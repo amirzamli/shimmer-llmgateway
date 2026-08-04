@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shimmer Gateway</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --border: #2a2f3a;
+    --text: #e6e9ef; --muted: #9aa3b2; --accent: #4f8cff;
+    --ok: #2ecc71; --warn: #f1c40f; --err: #e74c3c;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); }
+  header { padding: 12px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 20px; }
+  header h1 { font-size: 16px; margin: 0; }
+  nav { display: flex; gap: 4px; }
+  nav button { background: none; border: none; color: var(--muted); padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 14px; }
+  nav button.active { color: var(--text); background: var(--panel); }
+  main { max-width: 1100px; margin: 0 auto; padding: 20px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  .panel h2 { margin: 0 0 12px; font-size: 15px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+  input, select, textarea { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 6px 8px; font-size: 13px; }
+  button { background: var(--accent); border: none; color: white; border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
+  button.ghost { background: transparent; border: 1px solid var(--border); color: var(--muted); }
+  button.danger { background: var(--err); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; }
+  code, pre { font-family: ui-monospace, monospace; font-size: 12px; }
+  pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px; overflow: auto; max-height: 400px; }
+  .badge { padding: 1px 8px; border-radius: 10px; font-size: 11px; }
+  .badge.ok { background: rgba(46,204,113,.15); color: var(--ok); }
+  .badge.warn { background: rgba(241,196,15,.15); color: var(--warn); }
+  .badge.err { background: rgba(231,76,60,.15); color: var(--err); }
+  .badge.disabled { background: rgba(154,163,178,.15); color: var(--muted); }
+  .muted { color: var(--muted); font-size: 12px; }
+  .msg { margin: 6px 0; padding: 8px 10px; border-left: 3px solid var(--border); background: var(--bg); border-radius: 4px; }
+  .msg.user { border-left-color: var(--accent); }
+  .msg.assistant { border-left-color: var(--ok); }
+  .msg.tool { border-left-color: var(--warn); }
+  .verdict { font-size: 11px; padding: 1px 8px; border-radius: 10px; }
+  .verdict.SUCCESS { background: rgba(46,204,113,.2); color: var(--ok); }
+  .verdict.RECOVERABLE { background: rgba(241,196,15,.2); color: var(--warn); }
+  .verdict.BLIND_ERROR { background: rgba(231,76,60,.2); color: var(--err); }
+  .clickable { cursor: pointer; text-decoration: underline; }
+  .hidden { display: none; }
+  #master-key-banner { border-left: 4px solid var(--warn); }
+  #master-key-banner code { word-break: break-all; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Shimmer Gateway</h1>
+  <nav id="nav">
+    <button data-action="view" data-view="providers" class="active">Providers</button>
+    <button data-action="view" data-view="settings">Settings</button>
+    <button data-action="view" data-view="traces">Traces</button>
+    <button data-action="view" data-view="status">Status</button>
+  </nav>
+</header>
+<main>
+  <section id="view-providers"></section>
+  <section id="view-settings" class="hidden"></section>
+  <section id="view-traces" class="hidden"></section>
+  <section id="view-status" class="hidden"></section>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let templates = [];
+let instances = [];
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  const ct = res.headers.get("content-type") || "";
+  const body = ct.includes("json") ? await res.json() : await res.text();
+  if (!res.ok) {
+    const msg = body && body.message ? body.message : (typeof body === "string" ? body : "request failed");
+    throw new Error(msg);
+  }
+  return body;
+}
+// HTML-escape for text and double-quoted attribute contexts. Values rendered
+// into data-* attributes are read back via el.dataset (never interpolated
+// into JS strings), so no client-controlled value can execute in a JS
+// context.
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function jsonish(s) {
+  try { return JSON.stringify(JSON.parse(s), null, 2); } catch { return String(s || ""); }
+}
+
+/* ---------- event delegation ----------
+ * Every interactive element carries data-action (+ data-* payload) and is
+ * handled here; no inline onclick and no data interpolated into JS strings.
+ */
+document.addEventListener("click", function (ev) {
+  const el = ev.target.closest("[data-action]");
+  if (!el) return;
+  switch (el.dataset.action) {
+    case "view": switchView(el.dataset.view); break;
+    case "add-instance": addInstance(); break;
+    case "edit-instance": editInstance(el.dataset.alias); break;
+    case "toggle-instance": toggleInstance(el.dataset.alias); break;
+    case "delete-instance": deleteInstance(el.dataset.alias); break;
+    case "save-settings": saveSettings(); break;
+    case "search-sessions": loadSessions(); break;
+    case "open-session": openSession(el.dataset.id); break;
+    case "export-session": exportSession(el.dataset.id); break;
+    case "back": loadSessions(); break;
+    case "copy-master-key": copyMasterKey(); break;
+    case "ack-master-key": ackMasterKey(); break;
+  }
+});
+
+/* ---------- navigation ---------- */
+function switchView(view) {
+  document.querySelectorAll("#nav button").forEach(b => b.classList.toggle("active", b.dataset.view === view));
+  document.querySelectorAll("main section").forEach(s => s.classList.add("hidden"));
+  $("view-" + view).classList.remove("hidden");
+  loadView(view);
+}
+async function loadView(v) {
+  try {
+    if (v === "providers") { await loadProviders(); }
+    else if (v === "settings") { await loadSettings(); }
+    else if (v === "traces") { /* filters on demand */ }
+    else if (v === "status") { await loadStatus(); }
+  } catch (e) { alert(e.message); }
+}
+
+/* ---------- Providers ---------- */
+async function loadProviders() {
+  const [t, i] = await Promise.all([api("/api/templates"), api("/api/instances")]);
+  templates = t.templates; instances = i.instances;
+  const tmplOptions = templates.map(x => `<option value="${esc(x.name)}">${esc(x.name)}</option>`).join("");
+  $("view-providers").innerHTML = `
+    <div class="panel">
+      <h2>Add instance</h2>
+      <div class="row">
+        <label>Template
+          <select id="add-template">${tmplOptions}</select>
+        </label>
+        <label>Alias (auto-filled)
+          <input id="add-alias" placeholder="auto">
+        </label>
+        <label>Model subset (comma-separated, optional)
+          <input id="add-models" placeholder="gpt-4o, gpt-4o-mini">
+        </label>
+        <label>Key (optional)
+          <input id="add-key" type="password" placeholder="sk-...">
+        </label>
+        <button data-action="add-instance">Add</button>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Templates</h2>
+      <table><thead><tr><th>Name</th><th>Base URL</th><th>Key env</th><th>Models</th></tr></thead>
+      <tbody>
+        ${templates.map(x => `<tr><td>${esc(x.name)}</td><td>${esc(x.base_url)}</td><td>${esc(x.api_key_env)}</td><td class="muted">${esc((x.models||[]).join(", "))}</td></tr>`).join("")}
+      </tbody></table>
+    </div>
+    <div class="panel">
+      <h2>Instances</h2>
+      <table><thead><tr><th>Alias</th><th>Template</th><th>Key</th><th>Models</th><th>Status</th><th></th></tr></thead>
+      <tbody>
+        ${instances.map(x => `<tr>
+          <td>${esc(x.alias)}</td>
+          <td>${esc(x.template)}</td>
+          <td>${x.key_masked ? esc(x.key_masked) : `<span class="muted">env ${esc(x.api_key_env)}</span>`}</td>
+          <td class="muted">${esc((x.models||[]).join(", "))}</td>
+          <td>${x.disabled ? `<span class="badge disabled">disabled</span>` : `<span class="badge ok">enabled</span>`}</td>
+          <td>
+            <button class="ghost" data-action="edit-instance" data-alias="${esc(x.alias)}">Edit</button>
+            <button class="ghost" data-action="toggle-instance" data-alias="${esc(x.alias)}">${x.disabled ? "Enable" : "Disable"}</button>
+            <button class="danger" data-action="delete-instance" data-alias="${esc(x.alias)}">Delete</button>
+          </td></tr>`).join("")}
+      </tbody></table>
+    </div>`;
+  const sel = $("add-template");
+  sel.addEventListener("change", () => { $("add-alias").value = ""; $("add-alias").placeholder = "auto: " + suggestAlias(sel.value); });
+  $("add-alias").placeholder = "auto: " + suggestAlias(sel.value);
+}
+function suggestAlias(template) {
+  const count = instances.filter(i => i.template === template).length;
+  const base = templates.find(t => t.name === template) ? template : "";
+  return count === 0 ? base : base + "-" + (count + 1);
+}
+async function addInstance() {
+  const body = { template: $("add-template").value, alias: $("add-alias").value || undefined };
+  const models = $("add-models").value.split(",").map(s => s.trim()).filter(Boolean);
+  if (models.length) body.models = models;
+  const key = $("add-key").value;
+  if (key) body.key = key;
+  try {
+    await api("/api/instances", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    await loadProviders();
+  } catch (e) { alert(e.message); }
+}
+async function editInstance(alias) {
+  const inst = instances.find(x => x.alias === alias);
+  if (!inst) return;
+  const newAlias = prompt("Alias:", inst.alias);
+  if (newAlias == null) return;
+  const key = prompt("Replace key (leave empty to keep, type '-' to clear):", "");
+  const patch = {};
+  if (newAlias.trim() && newAlias.trim() !== inst.alias) patch.alias = newAlias.trim();
+  if (key === "-") patch.key = "";
+  else if (key) patch.key = key;
+  try {
+    await api("/api/instances/" + encodeURIComponent(inst.alias), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
+    await loadProviders();
+  } catch (e) { alert(e.message); }
+}
+async function toggleInstance(alias) {
+  try {
+    await api("/api/instances/" + encodeURIComponent(alias), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ disabled: !instances.find(x => x.alias === alias).disabled }) });
+    await loadProviders();
+  } catch (e) { alert(e.message); }
+}
+async function deleteInstance(alias) {
+  if (!confirm("Delete instance " + alias + "?")) return;
+  try {
+    await api("/api/instances/" + encodeURIComponent(alias), { method: "DELETE" });
+    await loadProviders();
+  } catch (e) { alert(e.message); }
+}
+
+/* ---------- Settings ---------- */
+async function loadSettings() {
+  const s = await api("/api/settings");
+  $("view-settings").innerHTML = `
+    <div class="panel">
+      <h2>Settings</h2>
+      <div class="row">
+        <label>Listen (read-only)<input value="${esc(s.listen)}" disabled></label>
+        <label>Store path (read-only)<input value="${esc(s.store)}" disabled></label>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <label>Retention days<input id="set-retention" type="number" value="${s.retention_days}"></label>
+        <label>Default alias<input id="set-default-alias" value="${esc(s.default_alias)}"></label>
+        <label>Request plugins (comma-separated)<input id="set-req-plugins" value="${esc((s.request_plugins||[]).join(", "))}"></label>
+        <label>Response plugins (comma-separated)<input id="set-resp-plugins" value="${esc((s.response_plugins||[]).join(", "))}"></label>
+        <button data-action="save-settings">Save</button>
+      </div>
+    </div>`;
+}
+async function saveSettings() {
+  const split = (s) => s.split(",").map(x => x.trim()).filter(Boolean);
+  const body = {
+    retention_days: parseInt($("set-retention").value, 10) || 0,
+    default_alias: $("set-default-alias").value,
+    request_plugins: split($("set-req-plugins").value),
+    response_plugins: split($("set-resp-plugins").value),
+  };
+  try {
+    await api("/api/settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    alert("Saved");
+  } catch (e) { alert(e.message); }
+}
+
+/* ---------- Traces ---------- */
+function renderFilters() {
+  $("view-traces").innerHTML = `
+    <div class="panel">
+      <h2>Traces</h2>
+      <div class="row">
+        <label>Alias<input id="f-alias"></label>
+        <label>Model<input id="f-model"></label>
+        <label>Status<select id="f-status"><option value="">any</option><option value="ok">ok</option><option value="error">error</option></select></label>
+        <label>Since<input id="f-since" type="date"></label>
+        <label>Until<input id="f-until" type="date"></label>
+        <label>Search<input id="f-q" placeholder="text search"></label>
+        <button data-action="search-sessions">Search</button>
+      </div>
+    </div>
+    <div class="panel"><div id="session-list" class="muted">Enter filters and search.</div></div>
+    <div class="panel hidden" id="session-detail"></div>`;
+}
+async function loadSessions() {
+  const params = new URLSearchParams();
+  if ($("f-alias").value) params.set("alias", $("f-alias").value);
+  if ($("f-model").value) params.set("model", $("f-model").value);
+  if ($("f-status").value) params.set("status", $("f-status").value);
+  if ($("f-since").value) params.set("since", $("f-since").value + "T00:00:00Z");
+  if ($("f-until").value) params.set("until", $("f-until").value + "T23:59:59Z");
+  if ($("f-q").value) params.set("q", $("f-q").value);
+  const data = await api("/api/sessions?" + params.toString());
+  const list = $("session-list");
+  if (!data.sessions.length) { list.innerHTML = `<span class="muted">No sessions.</span>`; return; }
+  list.innerHTML = `<table><thead><tr><th>Session</th><th>Created</th><th>Alias / Model</th><th>Requests</th><th>Tools</th><th>Status</th></tr></thead><tbody>
+    ${data.sessions.map(s => `<tr>
+      <td><span class="clickable" data-action="open-session" data-id="${esc(s.id)}">${esc(s.id.slice(0, 8))}</span></td>
+      <td class="muted">${esc(s.created_at)}</td>
+      <td>${esc(s.first_alias)} / ${esc(s.first_model)}</td>
+      <td>${s.request_count}</td><td>${s.tool_call_count}</td>
+      <td>${s.failure_count > 0 ? `<span class="badge err">${s.failure_count} failures</span>` : `<span class="badge ok">ok</span>`}</td>
+    </tr>`).join("")}
+  </tbody></table>`;
+  $("session-detail").classList.add("hidden");
+}
+async function openSession(id) {
+  const detail = $("session-detail");
+  detail.classList.remove("hidden");
+  detail.innerHTML = `<div class="row" style="margin-bottom:10px"><h2 style="margin:0">Session ${esc(id)}</h2>
+    <button class="ghost" data-action="export-session" data-id="${esc(id)}">Export JSONL</button>
+    <button class="ghost" data-action="back">Back</button></div><div class="muted">Loading…</div>`;
+  const s = await api("/api/sessions/" + encodeURIComponent(id));
+  const callsByReq = {};
+  (s.tool_calls || []).forEach(c => { (callsByReq[c.request_id] = callsByReq[c.request_id] || []).push(c); });
+  let html = `<div class="muted">${esc(s.created_at)} · alias ${esc(s.first_alias)} · model ${esc(s.first_model)} · ${s.request_count} requests · ${s.tool_call_count} tool calls</div>`;
+  (s.requests || []).forEach(r => {
+    html += `<h3 style="margin:14px 0 4px">Request #${r.seq} <span class="muted">${esc(r.alias)}/${esc(r.model)} · ${r.status_code}</span> ${r.truncated ? '<span class="badge warn">truncated</span>' : ""}</h3>`;
+    const body = safeParse(r.request_json);
+    const msgs = (body && body.messages) || [];
+    msgs.forEach(m => {
+      const content = m.content ? (Array.isArray(m.content) ? JSON.stringify(m.content) : m.content) : "";
+      html += `<div class="msg ${esc(m.role || "")}"><b>${esc(m.role || "")}</b> ${esc(content)}</div>`;
+    });
+    const reqCalls = callsByReq[r.id] || [];
+    if (reqCalls.length) {
+      html += `<h4 style="margin:8px 0 4px">Tool calls</h4>`;
+      reqCalls.forEach(c => {
+        html += `<div class="msg tool"><b>${esc(c.tool_name)}</b> <code>${esc(c.arguments_json || "")}</code>` +
+          (c.verdict ? ` <span class="verdict ${esc(c.verdict)}">${esc(c.verdict)}</span>` : "") +
+          (c.result_snippet ? ` <span class="muted">→ ${esc(c.result_snippet.slice(0, 120))}</span>` : "") + `</div>`;
+      });
+    }
+    if (r.error) html += `<div class="msg tool"><b>error ${r.status_code}</b> ${esc(r.error.message)}</div>`;
+    html += `<details><summary class="clickable muted">raw request/response</summary>
+      <pre>ORIGINAL REQUEST\n${esc(jsonish(r.request_json))}${r.request_filtered_json ? "\n\nFILTERED REQUEST\n" + esc(jsonish(r.request_filtered_json)) : ""}\n\nRESPONSE\n${esc(jsonish(r.response_json))}${r.response_filtered_json ? "\n\nFILTERED RESPONSE\n" + esc(jsonish(r.response_filtered_json)) : ""}</pre></details>`;
+  });
+  detail.innerHTML = detail.innerHTML.replace('<div class="muted">Loading…</div>', html);
+}
+function safeParse(s) {
+  try { return JSON.parse(s); } catch { return null; }
+}
+async function exportSession(id) {
+  window.location.href = "/api/sessions/" + encodeURIComponent(id) + "/export";
+}
+
+/* ---------- Status ---------- */
+async function loadStatus() {
+  const st = await api("/api/status");
+  const uptime = st.uptime_seconds;
+  const d = Math.floor(uptime / 86400), h = Math.floor((uptime % 86400) / 3600), m = Math.floor((uptime % 3600) / 60), s = uptime % 60;
+  $("view-status").innerHTML = `
+    <div class="panel"><h2>Store</h2>
+      <table><tbody>
+        <tr><td>Path</td><td><code>${esc(st.store_path)}</code></td></tr>
+        <tr><td>Sessions</td><td>${st.session_count}</td></tr>
+        <tr><td>Requests</td><td>${st.request_count}</td></tr>
+        <tr><td>Tool calls</td><td>${st.tool_call_count}</td></tr>
+        <tr><td>Failures</td><td>${st.failure_count}</td></tr>
+        <tr><td>Disk usage</td><td>${(st.disk_usage_bytes / 1024 / 1024).toFixed(1)} MiB</td></tr>
+        <tr><td>Retention</td><td>${st.retention_days} days</td></tr>
+      </tbody></table>
+    </div>
+    <div class="panel"><h2>Gateway</h2>
+      <table><tbody>
+        <tr><td>Uptime</td><td>${d}d ${h}h ${m}m ${s}s</td></tr>
+        <tr><td>Plugins</td><td>${esc((st.plugins||[]).join(", "))}</td></tr>
+        <tr><td>Aliases</td><td>${esc((st.aliases||[]).join(", "))}${st.disabled_instances ? ` <span class="badge disabled">${st.disabled_instances} disabled</span>` : ""}</td></tr>
+      </tbody></table>
+    </div>`;
+}
+
+/* ---------- Master key banner ---------- */
+let generatedMasterKey = "";
+
+// On page load, check for an unacknowledged gateway-generated master key. A
+// 404 (no generated key, or already acknowledged) means no banner; a 200 shows
+// the key once so the user can copy and save it before it is cleared from
+// memory by the ACK.
+async function loadMasterKeyBanner() {
+  let data;
+  try {
+    data = await api("/api/secrets/master-key");
+  } catch { return; }
+  if (!data || !data.key) return;
+  generatedMasterKey = data.key;
+  document.querySelector("main").insertAdjacentHTML("afterbegin", `
+    <div class="panel" id="master-key-banner">
+      <h2>Master key generated — copy and save it</h2>
+      <div class="muted" style="margin-bottom:10px">The secrets file is encrypted with a key generated on this first run. If you lose it, the stored API keys cannot be recovered — there is no recovery path. Copy it now and store it somewhere safe.</div>
+      <div class="row">
+        <code style="padding:6px 8px; background:var(--bg); border:1px solid var(--border); border-radius:6px;">${esc(generatedMasterKey)}</code>
+        <button data-action="copy-master-key">Copy</button>
+        <button class="ghost" data-action="ack-master-key" id="ack-master-key" disabled>I've saved it</button>
+      </div>
+    </div>`);
+}
+
+// Copy the generated key to the clipboard via the async Clipboard API, falling
+// back to a hidden textarea + execCommand. The ACK button stays disabled until
+// a copy actually succeeds (cheap guard against acknowledging an uncopied key).
+async function copyMasterKey() {
+  if (!generatedMasterKey) return;
+  let ok = false;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try {
+      await navigator.clipboard.writeText(generatedMasterKey);
+      ok = true;
+    } catch {}
+  }
+  if (!ok) {
+    const ta = document.createElement("textarea");
+    ta.value = generatedMasterKey;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try { ok = document.execCommand("copy"); } catch {}
+    document.body.removeChild(ta);
+  }
+  if (!ok) {
+    alert("Copy failed — select the key in the box and copy it manually.");
+    return;
+  }
+  const ackBtn = $("ack-master-key");
+  if (ackBtn) ackBtn.disabled = false;
+}
+
+// Acknowledge the generated key: the gateway clears it from memory (persisting
+// any pending legacy migration first) and the banner is removed. A failed ACK
+// (e.g. migration persist error) keeps the banner so the user can retry.
+async function ackMasterKey() {
+  try {
+    await api("/api/secrets/master-key/ack", { method: "POST" });
+    const b = $("master-key-banner");
+    if (b) b.remove();
+  } catch (e) { alert(e.message); }
+}
+
+/* ---------- init ---------- */
+renderFilters();
+switchView("providers");
+loadMasterKeyBanner();
+</script>
+</body>
+</html>

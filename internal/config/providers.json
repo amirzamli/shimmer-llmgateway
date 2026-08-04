@@ -1,0 +1,1124 @@
+{
+  "providers": [
+    {
+      "provider": "OpenRouter",
+      "aliases": [
+        "OpenRouter AI"
+      ],
+      "provider_type": "aggregator",
+      "api_style": "openai_compatible",
+      "supports_openai_compatible_api": true,
+      "native_api": {
+        "base_url": null,
+        "chat_completions_endpoint": null,
+        "responses_endpoint": null,
+        "messages_endpoint": null,
+        "completions_endpoint": null,
+        "embeddings_endpoint": null,
+        "images_endpoint": null,
+        "audio_endpoint": null,
+        "video_endpoint": null,
+        "batches_endpoint": null,
+        "models_endpoint": null,
+        "docs_url": null
+      },
+      "openai_compatible_api": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "chat_completions_endpoint": "/chat/completions",
+        "responses_endpoint": "/responses",
+        "completions_endpoint": null,
+        "embeddings_endpoint": "/embeddings",
+        "images_endpoint": null,
+        "audio_endpoint": null,
+        "video_endpoint": null,
+        "batches_endpoint": null,
+        "models_endpoint": "/models",
+        "compatibility_docs_url": "https://openrouter.ai/docs/api/reference/overview",
+        "compatibility_status": "beta"
+      },
+      "discovery": {
+        "models_endpoint": "https://openrouter.ai/api/v1/models",
+        "models_page_url": "https://openrouter.ai/docs/guides/overview/models",
+        "api_reference_url": "https://openrouter.ai/docs/api/reference/overview"
+      },
+      "pricing": {
+        "pricing_api_url": null,
+        "pricing_page_url": "https://openrouter.ai/pricing",
+        "pricing_notes": "OpenRouter is an aggregator that routes across upstream providers. Public pricing is primarily model-level passthrough plus OpenRouter platform fees and plan-specific features."
+      },
+      "auth": {
+        "authentication_method": "api_key",
+        "api_key_header": "Authorization",
+        "notes": "Bearer token in the Authorization header. OpenRouter also documents optional HTTP-Referer and X-OpenRouter-Title headers for ranking and app attribution."
+      },
+      "capabilities": {
+        "streaming": true,
+        "tool_calling": true,
+        "structured_output": true,
+        "vision": true,
+        "audio_input": true,
+        "image_generation": true,
+        "video_generation": true,
+        "embeddings": true,
+        "batch": false,
+        "prompt_caching": true,
+        "reasoning_controls": true,
+        "citations": false
+      },
+      "feature_gaps_in_compat_mode": [
+        "Responses API is explicitly documented as beta.",
+        "Responses API is stateless in OpenRouter's beta docs, so conversation state handling differs from fully stateful provider-native workflows.",
+        "No verified official /batches endpoint was found."
+      ],
+      "recommended_integration_mode": "openai_compatible",
+      "evidence": [
+        {
+          "field": "openai_compatible_api.chat_completions_endpoint",
+          "source_type": "official_api",
+          "url": "https://openrouter.ai/docs/api/api-reference/chat/send-chat-completion-request",
+          "note": "Official docs document POST https://openrouter.ai/api/v1/chat/completions."
+        },
+        {
+          "field": "openai_compatible_api.responses_endpoint",
+          "source_type": "official_docs",
+          "url": "https://openrouter.ai/docs/api/reference/responses/overview",
+          "note": "Official docs label the Responses API as beta and place it under /api/v1/responses."
+        },
+        {
+          "field": "discovery.models_endpoint",
+          "source_type": "official_api",
+          "url": "https://openrouter.ai/docs/guides/overview/models",
+          "note": "Official models guide shows requests to https://openrouter.ai/api/v1/models."
+        },
+        {
+          "field": "pricing.pricing_page_url",
+          "source_type": "official_pricing",
+          "url": "https://openrouter.ai/pricing",
+          "note": "Official pricing page describes pay-as-you-go, platform fee, free tier, and enterprise plans."
+        },
+        {
+          "field": "openai_compatible_api.base_url",
+          "source_type": "official_docs",
+          "url": "https://openrouter.ai/docs/quickstart",
+          "note": "Quickstart shows using OpenAI-compatible clients against https://openrouter.ai/api/v1."
+        }
+      ],
+      "confidence": "high",
+      "last_verified": "2026-04-27"
+    },
+    {
+      "provider": "OpenCode Go",
+      "aliases": [
+        "OpenCode Go Catalog"
+      ],
+      "provider_type": "gateway",
+      "api_style": "hybrid",
+      "supports_openai_compatible_api": true,
+      "native_api": {
+        "base_url": "https://opencode.ai/zen/go/v1",
+        "chat_completions_endpoint": null,
+        "responses_endpoint": null,
+        "messages_endpoint": "/messages",
+        "completions_endpoint": null,
+        "embeddings_endpoint": null,
+        "images_endpoint": null,
+        "audio_endpoint": null,
+        "video_endpoint": null,
+        "batches_endpoint": null,
+        "models_endpoint": null,
+        "docs_url": "https://opencode.ai/docs/go/"
+      },
+      "openai_compatible_api": {
+        "base_url": "https://opencode.ai/zen/go/v1",
+        "chat_completions_endpoint": "/chat/completions",
+        "responses_endpoint": null,
+        "completions_endpoint": null,
+        "embeddings_endpoint": null,
+        "images_endpoint": null,
+        "audio_endpoint": null,
+        "video_endpoint": null,
+        "batches_endpoint": null,
+        "models_endpoint": null,
+        "compatibility_docs_url": "https://opencode.ai/docs/go/",
+        "compatibility_status": "official"
+      },
+      "discovery": {
+        "models_endpoint": null,
+        "models_page_url": "https://opencode.ai/docs/go/",
+        "api_reference_url": "https://opencode.ai/docs/go/"
+      },
+      "pricing": {
+        "pricing_api_url": null,
+        "pricing_page_url": "https://opencode.ai/docs/go/",
+        "pricing_notes": "Official docs describe Go as a subscription product: $5 for the first month, then $10/month, with 5-hour, weekly, and monthly dollar-denominated usage caps. It can optionally fall back to Zen balance after limits are reached."
+      },
+      "auth": {
+        "authentication_method": "api_key",
+        "api_key_header": "Authorization",
+        "notes": "Users subscribe through OpenCode Zen and use an OpenCode API key issued there. HTTP auth uses Authorization: Bearer token."
+      },
+      "capabilities": {
+        "streaming": null,
+        "tool_calling": null,
+        "structured_output": null,
+        "vision": null,
+        "audio_input": null,
+        "image_generation": null,
+        "video_generation": null,
+        "embeddings": null,
+        "batch": null,
+        "prompt_caching": null,
+        "reasoning_controls": null,
+        "citations": null
+      },
+      "feature_gaps_in_compat_mode": [
+        "Not all Go models share one protocol surface: many use OpenAI-compatible /chat/completions, while some MiniMax models use Anthropic-style /messages.",
+        "No verified machine-readable models endpoint was exposed on the public docs page even though the page states that a full model list can be fetched."
+      ],
+      "recommended_integration_mode": "hybrid",
+      "evidence": [
+        {
+          "field": "native_api.base_url",
+          "source_type": "official_docs",
+          "url": "https://opencode.ai/docs/go/",
+          "note": "Official Go docs list endpoints under https://opencode.ai/zen/go/v1."
+        },
+        {
+          "field": "openai_compatible_api.chat_completions_endpoint",
+          "source_type": "official_docs",
+          "url": "https://opencode.ai/docs/go/",
+          "note": "Official Go docs list many models, including GLM, Kimi, DeepSeek, MiMo, and Qwen variants, on https://opencode.ai/zen/go/v1/chat/completions."
+        },
+        {
+          "field": "native_api.messages_endpoint",
+          "source_type": "official_docs",
+          "url": "https://opencode.ai/docs/go/",
+          "note": "Official Go docs list MiniMax models on https://opencode.ai/zen/go/v1/messages."
+        },
+        {
+          "field": "pricing.pricing_page_url",
+          "source_type": "official_docs",
+          "url": "https://opencode.ai/docs/go/",
+          "note": "Official docs include subscription price and usage cap details on the Go page."
+        }
+      ],
+      "confidence": "high",
+      "last_verified": "2026-04-27"
+    },
+    {
+      "provider": "OpenCode Zen",
+      "aliases": [
+        "OpenCode",
+        "OpenCode Zen Catalog"
+      ],
+      "provider_type": "gateway",
+      "api_style": "hybrid",
+      "supports_openai_compatible_api": true,
+      "native_api": {
+        "base_url": "https://opencode.ai/zen/v1",
+        "chat_completions_endpoint": null,
+        "responses_endpoint": null,
+        "messages_endpoint": "/messages",
+        "completions_endpoint": null,
+        "embeddings_endpoint": null,
+        "images_endpoint": null,
+        "audio_endpoint": null,
+        "video_endpoint": null,
+        "batches_endpoint": null,
+        "models_endpoint": null,
+        "docs_url": "https://opencode.ai/docs/zen/"
+      },
+      "openai_compatible_api": {
+        "base_url": "https://opencode.ai/zen/v1",
+        "chat_completions_endpoint": "/chat/completions",
+        "responses_endpoint": "/responses",
+        "completions_endpoint": null,
+        "embeddings_endpoint": null,
+        "images_endpoint": null,
+        "audio_endpoint": null,
+        "video_endpoint": null,
+        "batches_endpoint": null,
+        "models_endpoint": null,
+        "compatibility_docs_url": "https://opencode.ai/docs/zen/",
+        "compatibility_status": "official"
+      },
+      "discovery": {
+        "models_endpoint": null,
+        "models_page_url": "https://opencode.ai/docs/zen/",
+        "api_reference_url": "https://opencode.ai/docs/zen/"
+      },
+      "pricing": {
+        "pricing_api_url": null,
+        "pricing_page_url": null,
+        "pricing_notes": "Zen is a hosted curated catalog accessed through the OpenCode Zen account system. Public docs identify it as a billed service but do not expose a dedicated public per-token pricing page in the verified sources used here."
+      },
+      "auth": {
+        "authentication_method": "api_key",
+        "api_key_header": "Authorization",
+        "notes": "Users sign in to OpenCode Zen, add billing details, and copy an API key from the Zen console. HTTP auth uses Authorization: Bearer token."
+      },
+      "capabilities": {
+        "streaming": null,
+        "tool_calling": null,
+        "structured_output": null,
+        "vision": null,
+        "audio_input": null,
+        "image_generation": null,
+        "video_generation": null,
+        "embeddings": null,
+        "batch": null,
+        "prompt_caching": null,
+        "reasoning_controls": null,
+        "citations": null
+      },
+      "feature_gaps_in_compat_mode": [
+        "Zen exposes multiple upstream protocol styles per model row: OpenAI Responses, OpenAI-compatible Chat Completions, and Anthropic-style Messages.",
+        "No verified public models-list API endpoint was shown in the official Zen page."
+      ],
+      "recommended_integration_mode": "hybrid",
+      "evidence": [
+        {
+          "field": "native_api.base_url",
+          "source_type": "official_docs",
+          "url": "https://opencode.ai/docs/zen/",
+          "note": "Official Zen docs list model endpoints under https://opencode.ai/zen/v1."
+        },
+        {
+          "field": "openai_compatible_api.responses_endpoint",
+          "source_type": "official_docs",
+          "url": "https://opencode.ai/docs/zen/",
+          "note": "Official Zen docs list many OpenAI Responses-based models at https://opencode.ai/zen/v1/responses."
+        },
+        {
+          "field": "openai_compatible_api.chat_completions_endpoint",
+          "source_type": "official_docs",
+          "url": "https://opencode.ai/docs/zen/",
+          "note": "Official Zen docs also list some models on https://opencode.ai/zen/v1/chat/completions."
+        },
+        {
+          "field": "native_api.messages_endpoint",
+          "source_type": "official_docs",
+          "url": "https://opencode.ai/docs/zen/",
+          "note": "Official Zen docs list Anthropic-style models on https://opencode.ai/zen/v1/messages."
+        }
+      ],
+      "confidence": "high",
+      "last_verified": "2026-04-27"
+    },
+    {
+      "provider": "Kimi",
+      "aliases": [
+        "Moonshot Kimi",
+        "Moonshot AI"
+      ],
+      "provider_type": "direct",
+      "api_style": "openai_compatible",
+      "supports_openai_compatible_api": true,
+      "native_api": {
+        "base_url": null,
+        "chat_completions_endpoint": null,
+        "responses_endpoint": null,
+        "messages_endpoint": null,
+        "completions_endpoint": null,
+        "embeddings_endpoint": null,
+        "images_endpoint": null,
+        "audio_endpoint": null,
+        "video_endpoint": null,
+        "batches_endpoint": null,
+        "models_endpoint": null,
+        "docs_url": null
+      },
+      "openai_compatible_api": {
+        "base_url": "https://api.moonshot.ai/v1",
+        "chat_completions_endpoint": "/chat/completions",
+        "responses_endpoint": null,
+        "completions_endpoint": null,
+        "embeddings_endpoint": null,
+        "images_endpoint": null,
+        "audio_endpoint": null,
+        "video_endpoint": null,
+        "batches_endpoint": null,
+        "models_endpoint": "/models",
+        "compatibility_docs_url": "https://platform.kimi.ai/docs/api/overview",
+        "compatibility_status": "official"
+      },
+      "discovery": {
+        "models_endpoint": "https://api.moonshot.ai/v1/models",
+        "models_page_url": null,
+        "api_reference_url": "https://platform.kimi.ai/docs/api/overview"
+      },
+      "pricing": {
+        "pricing_api_url": null,
+        "pricing_page_url": null,
+        "pricing_notes": "Official docs in the verified sources show service address, auth, models listing, balance, token estimation, and file APIs, but no separate public pricing page was verified."
+      },
+      "auth": {
+        "authentication_method": "api_key",
+        "api_key_header": "Authorization",
+        "notes": "Official docs require Authorization: Bearer $MOONSHOT_API_KEY."
+      },
+      "capabilities": {
+        "streaming": true,
+        "tool_calling": true,
+        "structured_output": false,
+        "vision": true,
+        "audio_input": false,
+        "image_generation": false,
+        "video_generation": false,
+        "embeddings": false,
+        "batch": false,
+        "prompt_caching": false,
+        "reasoning_controls": true,
+        "citations": false
+      },
+      "feature_gaps_in_compat_mode": [
+        "Official compatibility docs center on Chat Completions and Models rather than the full OpenAI endpoint surface.",
+        "The Kimi-specific thinking parameter must be passed via extra_body rather than as a standard top-level OpenAI field.",
+        "The partial field is carried inside assistant messages rather than as a top-level OpenAI request parameter."
+      ],
+      "recommended_integration_mode": "openai_compatible",
+      "evidence": [
+        {
+          "field": "openai_compatible_api.base_url",
+          "source_type": "official_docs",
+          "url": "https://platform.kimi.ai/docs/api/overview",
+          "note": "Official API overview states that SDK users should set base_url to https://api.moonshot.ai/v1."
+        },
+        {
+          "field": "openai_compatible_api.chat_completions_endpoint",
+          "source_type": "official_docs",
+          "url": "https://platform.kimi.ai/docs/api/overview",
+          "note": "Official API overview lists POST /v1/chat/completions."
+        },
+        {
+          "field": "openai_compatible_api.models_endpoint",
+          "source_type": "official_docs",
+          "url": "https://platform.kimi.ai/docs/api/overview",
+          "note": "Official API overview lists GET /v1/models."
+        },
+        {
+          "field": "auth.api_key_header",
+          "source_type": "official_docs",
+          "url": "https://platform.kimi.ai/docs/api/overview",
+          "note": "Official API overview documents Authorization: Bearer $MOONSHOT_API_KEY."
+        },
+        {
+          "field": "supports_openai_compatible_api",
+          "source_type": "official_docs",
+          "url": "https://platform.kimi.ai/docs/guide/migrating-from-openai-to-kimi",
+          "note": "Official migration guide states that the Kimi API is compatible with OpenAI interface specifications."
+        },
+        {
+          "field": "capabilities.vision",
+          "source_type": "official_docs",
+          "url": "https://platform.kimi.ai/docs/guide/use-kimi-vision-model",
+          "note": "Official guide documents use of the Kimi Vision model through the same OpenAI-compatible base URL."
+        },
+        {
+          "field": "capabilities.tool_calling",
+          "source_type": "official_docs",
+          "url": "https://platform.kimi.ai/docs/guide/use-official-tools",
+          "note": "Official guide documents sending tools through the compatible API surface."
+        },
+        {
+          "field": "capabilities.streaming",
+          "source_type": "official_docs",
+          "url": "https://platform.kimi.ai/docs/api/overview",
+          "note": "Official API overview documents SSE streaming support for Chat Completions."
+        }
+      ],
+      "confidence": "high",
+      "last_verified": "2026-04-27"
+    },
+    {
+      "provider": "z.ai",
+      "aliases": [
+        "Z.AI"
+      ],
+      "provider_type": "direct",
+      "api_style": "native",
+      "supports_openai_compatible_api": false,
+      "native_api": {
+        "base_url": "https://api.z.ai/api/paas/v4",
+        "chat_completions_endpoint": "/chat/completions",
+        "responses_endpoint": null,
+        "messages_endpoint": null,
+        "completions_endpoint": null,
+        "embeddings_endpoint": null,
+        "images_endpoint": null,
+        "audio_endpoint": null,
+        "video_endpoint": null,
+        "batches_endpoint": null,
+        "models_endpoint": "/models",
+        "docs_url": "https://docs.z.ai/api-reference/introduction"
+      },
+      "openai_compatible_api": {
+        "base_url": null,
+        "chat_completions_endpoint": null,
+        "responses_endpoint": null,
+        "completions_endpoint": null,
+        "embeddings_endpoint": null,
+        "images_endpoint": null,
+        "audio_endpoint": null,
+        "video_endpoint": null,
+        "batches_endpoint": null,
+        "models_endpoint": null,
+        "compatibility_docs_url": null,
+        "compatibility_status": "unknown"
+      },
+      "discovery": {
+        "models_endpoint": "https://api.z.ai/api/paas/v4/models",
+        "models_page_url": null,
+        "api_reference_url": "https://docs.z.ai/api-reference/introduction"
+      },
+      "pricing": {
+        "pricing_api_url": null,
+        "pricing_page_url": null,
+        "pricing_notes": "No official public pricing page or pricing API was verified in the sources used here."
+      },
+      "auth": {
+        "authentication_method": "api_key",
+        "api_key_header": "Authorization",
+        "notes": "Official docs state that Z.AI uses standard HTTP Bearer authentication."
+      },
+      "capabilities": {
+        "streaming": null,
+        "tool_calling": null,
+        "structured_output": null,
+        "vision": null,
+        "audio_input": null,
+        "image_generation": null,
+        "video_generation": null,
+        "embeddings": null,
+        "batch": null,
+        "prompt_caching": null,
+        "reasoning_controls": null,
+        "citations": null
+      },
+      "feature_gaps_in_compat_mode": [
+        "Third-party registries describe OpenAI-compatible and Anthropic-compatible access patterns for some Z.AI models, but no official compatibility documentation was verified here.",
+        "Because official compatibility docs were not verified, OpenAI-compatible fields are intentionally left null."
+      ],
+      "recommended_integration_mode": "native",
+      "evidence": [
+        {
+          "field": "native_api.base_url",
+          "source_type": "official_docs",
+          "url": "https://docs.z.ai/guides/develop/http/introduction",
+          "note": "Official HTTP guide shows requests to https://api.z.ai/api/paas/v4/chat/completions."
+        },
+        {
+          "field": "native_api.chat_completions_endpoint",
+          "source_type": "official_docs",
+          "url": "https://docs.z.ai/guides/develop/http/introduction",
+          "note": "Official HTTP guide shows /chat/completions under the paas/v4 base path."
+        },
+        {
+          "field": "auth.api_key_header",
+          "source_type": "official_docs",
+          "url": "https://docs.z.ai/api-reference/introduction",
+          "note": "Official intro states that the API uses HTTP Bearer authentication and API keys."
+        },
+        {
+          "field": "feature_gaps_in_compat_mode",
+          "source_type": "opensource_registry",
+          "url": "https://hexdocs.pm/req_llm/zai.html",
+          "note": "Open-source provider docs describe a compatibility layer, but this was not confirmed in official Z.AI docs."
+        }
+      ],
+      "confidence": "medium",
+      "last_verified": "2026-04-27"
+    },
+    {
+      "provider": "OpenAI",
+      "aliases": [
+        "OpenAI Platform"
+      ],
+      "provider_type": "direct",
+      "api_style": "native",
+      "supports_openai_compatible_api": true,
+      "native_api": {
+        "base_url": "https://api.openai.com/v1",
+        "chat_completions_endpoint": "/chat/completions",
+        "responses_endpoint": "/responses",
+        "messages_endpoint": null,
+        "completions_endpoint": null,
+        "embeddings_endpoint": "/embeddings",
+        "images_endpoint": "/images/generations",
+        "audio_endpoint": "/audio/transcriptions",
+        "video_endpoint": null,
+        "batches_endpoint": "/batches",
+        "models_endpoint": "/models",
+        "docs_url": "https://platform.openai.com/docs/api-reference/introduction"
+      },
+      "openai_compatible_api": {
+        "base_url": "https://api.openai.com/v1",
+        "chat_completions_endpoint": "/chat/completions",
+        "responses_endpoint": "/responses",
+        "completions_endpoint": null,
+        "embeddings_endpoint": "/embeddings",
+        "images_endpoint": "/images/generations",
+        "audio_endpoint": "/audio/transcriptions",
+        "video_endpoint": null,
+        "batches_endpoint": "/batches",
+        "models_endpoint": "/models",
+        "compatibility_docs_url": "https://platform.openai.com/docs/api-reference/introduction",
+        "compatibility_status": "official"
+      },
+      "discovery": {
+        "models_endpoint": "https://api.openai.com/v1/models",
+        "models_page_url": null,
+        "api_reference_url": "https://platform.openai.com/docs/api-reference/introduction"
+      },
+      "pricing": {
+        "pricing_api_url": null,
+        "pricing_page_url": "https://platform.openai.com/docs/pricing",
+        "pricing_notes": "Official pricing is public on the OpenAI pricing page and varies by model family, with cached-input discounts on supported models."
+      },
+      "auth": {
+        "authentication_method": "api_key",
+        "api_key_header": "Authorization",
+        "notes": "Official docs use Bearer authentication with the OpenAI API key."
+      },
+      "capabilities": {
+        "streaming": true,
+        "tool_calling": true,
+        "structured_output": true,
+        "vision": true,
+        "audio_input": true,
+        "image_generation": true,
+        "video_generation": false,
+        "embeddings": true,
+        "batch": true,
+        "prompt_caching": true,
+        "reasoning_controls": true,
+        "citations": false
+      },
+      "feature_gaps_in_compat_mode": [],
+      "recommended_integration_mode": "native",
+      "evidence": [
+        {
+          "field": "native_api.responses_endpoint",
+          "source_type": "official_docs",
+          "url": "https://platform.openai.com/docs/quickstart?api-mode=responses",
+          "note": "Official quickstart shows POST https://api.openai.com/v1/responses."
+        },
+        {
+          "field": "native_api.chat_completions_endpoint",
+          "source_type": "official_api",
+          "url": "https://platform.openai.com/docs/api-reference/chat",
+          "note": "Official API reference documents POST https://api.openai.com/v1/chat/completions."
+        },
+        {
+          "field": "native_api.models_endpoint",
+          "source_type": "official_api",
+          "url": "https://platform.openai.com/docs/api-reference/introduction",
+          "note": "Official API reference includes GET https://api.openai.com/v1/models."
+        },
+        {
+          "field": "pricing.pricing_page_url",
+          "source_type": "official_pricing",
+          "url": "https://platform.openai.com/docs/pricing",
+          "note": "Official pricing page lists public API prices."
+        },
+        {
+          "field": "capabilities.audio_input",
+          "source_type": "official_docs",
+          "url": "https://platform.openai.com/docs/guides/audio",
+          "note": "Official audio guide documents audio workflows and multimodal inputs."
+        },
+        {
+          "field": "native_api.audio_endpoint",
+          "source_type": "official_api",
+          "url": "https://platform.openai.com/docs/api-reference/audio",
+          "note": "Official API reference documents POST /v1/audio/transcriptions and /v1/audio/speech."
+        },
+        {
+          "field": "capabilities.reasoning_controls",
+          "source_type": "official_docs",
+          "url": "https://platform.openai.com/docs/guides/reasoning",
+          "note": "Official docs document reasoning_effort parameter for o-series models."
+        }
+      ],
+      "confidence": "high",
+      "last_verified": "2026-04-27"
+    },
+    {
+      "provider": "Anthropic",
+      "aliases": [
+        "Claude",
+        "Anthropic Claude"
+      ],
+      "provider_type": "direct",
+      "api_style": "native",
+      "supports_openai_compatible_api": false,
+      "native_api": {
+        "base_url": "https://api.anthropic.com/v1",
+        "chat_completions_endpoint": null,
+        "responses_endpoint": null,
+        "messages_endpoint": "/messages",
+        "completions_endpoint": null,
+        "embeddings_endpoint": null,
+        "images_endpoint": null,
+        "audio_endpoint": null,
+        "video_endpoint": null,
+        "batches_endpoint": "/messages/batches",
+        "models_endpoint": "/models",
+        "docs_url": "https://docs.anthropic.com/claude/reference/messages_post"
+      },
+      "openai_compatible_api": {
+        "base_url": null,
+        "chat_completions_endpoint": null,
+        "responses_endpoint": null,
+        "completions_endpoint": null,
+        "embeddings_endpoint": null,
+        "images_endpoint": null,
+        "audio_endpoint": null,
+        "video_endpoint": null,
+        "batches_endpoint": null,
+        "models_endpoint": null,
+        "compatibility_docs_url": null,
+        "compatibility_status": "unknown"
+      },
+      "discovery": {
+        "models_endpoint": null,
+        "models_page_url": null,
+        "api_reference_url": "https://platform.claude.com/docs/en/api/overview"
+      },
+      "pricing": {
+        "pricing_api_url": null,
+        "pricing_page_url": "https://www.anthropic.com/pricing",
+        "pricing_notes": "Official pricing page lists public API prices per model, including prompt caching and batch discounts."
+      },
+      "auth": {
+        "authentication_method": "api_key",
+        "api_key_header": "x-api-key",
+        "notes": "Anthropic requests require an API key header and an anthropic-version header."
+      },
+      "capabilities": {
+        "streaming": true,
+        "tool_calling": true,
+        "structured_output": true,
+        "vision": true,
+        "audio_input": false,
+        "image_generation": false,
+        "video_generation": false,
+        "embeddings": false,
+        "batch": true,
+        "prompt_caching": true,
+        "reasoning_controls": true,
+        "citations": true
+      },
+      "feature_gaps_in_compat_mode": [],
+      "recommended_integration_mode": "native",
+      "evidence": [
+        {
+          "field": "native_api.base_url",
+          "source_type": "official_docs",
+          "url": "https://platform.claude.com/docs/en/api/overview",
+          "note": "Official API overview identifies the Claude API at api.anthropic.com."
+        },
+        {
+          "field": "native_api.messages_endpoint",
+          "source_type": "official_docs",
+          "url": "https://docs.anthropic.com/claude/reference/messages_post",
+          "note": "Official reference documents POST https://api.anthropic.com/v1/messages."
+        },
+        {
+          "field": "native_api.batches_endpoint",
+          "source_type": "official_docs",
+          "url": "https://docs.anthropic.com/en/api/messages-batches",
+          "note": "Official docs document POST https://api.anthropic.com/v1/messages/batches."
+        },
+        {
+          "field": "capabilities.vision",
+          "source_type": "official_docs",
+          "url": "https://platform.claude.com/docs/en/build-with-claude/working-with-messages",
+          "note": "Official Messages docs include image content examples."
+        },
+        {
+          "field": "native_api.models_endpoint",
+          "source_type": "official_api",
+          "url": "https://docs.anthropic.com/en/api/models",
+          "note": "Official API reference documents GET /v1/models with model capabilities."
+        },
+        {
+          "field": "capabilities.streaming",
+          "source_type": "official_docs",
+          "url": "https://docs.anthropic.com/en/api/messages-streaming",
+          "note": "Official docs document server-sent events streaming for the Messages API."
+        },
+        {
+          "field": "capabilities.tool_calling",
+          "source_type": "official_docs",
+          "url": "https://docs.anthropic.com/en/docs/build-with-claude/tool-use",
+          "note": "Official docs document tool use / function calling with the Messages API."
+        },
+        {
+          "field": "capabilities.structured_output",
+          "source_type": "official_api",
+          "url": "https://docs.anthropic.com/en/api/models",
+          "note": "Models API lists structured_outputs as a per-model capability."
+        },
+        {
+          "field": "capabilities.reasoning_controls",
+          "source_type": "official_docs",
+          "url": "https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking",
+          "note": "Official docs document extended thinking with budget_tokens control."
+        },
+        {
+          "field": "capabilities.citations",
+          "source_type": "official_api",
+          "url": "https://docs.anthropic.com/en/api/models",
+          "note": "Models API lists citations as a per-model capability."
+        },
+        {
+          "field": "pricing.pricing_page_url",
+          "source_type": "official_pricing",
+          "url": "https://www.anthropic.com/pricing",
+          "note": "Official pricing page lists per-model API prices including prompt caching and batch discounts."
+        }
+      ],
+      "confidence": "high",
+      "last_verified": "2026-04-27"
+    },
+    {
+      "provider": "Google Gemini",
+      "aliases": [
+        "Gemini API",
+        "Google Generative Language"
+      ],
+      "provider_type": "direct",
+      "api_style": "hybrid",
+      "supports_openai_compatible_api": true,
+      "native_api": {
+        "base_url": "https://generativelanguage.googleapis.com/v1beta",
+        "chat_completions_endpoint": null,
+        "responses_endpoint": null,
+        "messages_endpoint": null,
+        "completions_endpoint": null,
+        "embeddings_endpoint": "/models/{model}:embedContent",
+        "images_endpoint": "/models/{model}:generateContent",
+        "audio_endpoint": "/models/{model}:generateContent",
+        "video_endpoint": "/models/{model}:generateContent",
+        "batches_endpoint": null,
+        "models_endpoint": "/models",
+        "docs_url": "https://ai.google.dev/gemini-api/docs"
+      },
+      "openai_compatible_api": {
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "chat_completions_endpoint": "/chat/completions",
+        "responses_endpoint": null,
+        "completions_endpoint": null,
+        "embeddings_endpoint": "/embeddings",
+        "images_endpoint": null,
+        "audio_endpoint": null,
+        "video_endpoint": null,
+        "batches_endpoint": null,
+        "models_endpoint": null,
+        "compatibility_docs_url": "https://ai.google.dev/gemini-api/docs/openai",
+        "compatibility_status": "official"
+      },
+      "discovery": {
+        "models_endpoint": "https://generativelanguage.googleapis.com/v1beta/models",
+        "models_page_url": "https://ai.google.dev/gemini-api/docs/models",
+        "api_reference_url": "https://ai.google.dev/gemini-api/docs"
+      },
+      "pricing": {
+        "pricing_api_url": null,
+        "pricing_page_url": "https://ai.google.dev/pricing",
+        "pricing_notes": "Official pricing page lists Gemini API prices per model."
+      },
+      "auth": {
+        "authentication_method": "api_key",
+        "api_key_header": "x-goog-api-key",
+        "notes": "Gemini API requests use a Google AI Studio API key. Official docs describe using the Gemini API key with the Google endpoint and OpenAI-compatible setup."
+      },
+      "capabilities": {
+        "streaming": true,
+        "tool_calling": true,
+        "structured_output": false,
+        "vision": true,
+        "audio_input": true,
+        "image_generation": true,
+        "video_generation": true,
+        "embeddings": true,
+        "batch": false,
+        "prompt_caching": true,
+        "reasoning_controls": false,
+        "citations": false
+      },
+      "feature_gaps_in_compat_mode": [
+        "Official OpenAI compatibility docs focus on Chat Completions and Embeddings rather than the full native Gemini RPC surface.",
+        "Gemini-native multimodal workflows remain broader than the verified OpenAI-compatibility surface."
+      ],
+      "recommended_integration_mode": "hybrid",
+      "evidence": [
+        {
+          "field": "openai_compatible_api.base_url",
+          "source_type": "official_docs",
+          "url": "https://ai.google.dev/gemini-api/docs/openai",
+          "note": "Official docs configure the OpenAI client with base_url https://generativelanguage.googleapis.com/v1beta/openai/."
+        },
+        {
+          "field": "discovery.models_endpoint",
+          "source_type": "official_docs",
+          "url": "https://ai.google.dev/gemini-api/docs/api-versions",
+          "note": "Official docs describe Gemini API versions and the Google Generative Language API versioning scheme that exposes /models."
+        },
+        {
+          "field": "supports_openai_compatible_api",
+          "source_type": "official_docs",
+          "url": "https://developers.googleblog.com/en/gemini-is-now-accessible-from-the-openai-library/",
+          "note": "Official Google developer post announces Gemini availability through the OpenAI library."
+        },
+        {
+          "field": "capabilities.prompt_caching",
+          "source_type": "official_docs",
+          "url": "https://ai.google.dev/gemini-api/docs/caching",
+          "note": "Official docs document context caching (cachedContent API) for reusing large inputs at reduced cost."
+        },
+        {
+          "field": "pricing.pricing_page_url",
+          "source_type": "official_pricing",
+          "url": "https://ai.google.dev/pricing",
+          "note": "Official pricing page lists Gemini API prices per model."
+        }
+      ],
+      "confidence": "medium",
+      "last_verified": "2026-04-27"
+    },
+    {
+      "provider": "DeepSeek",
+      "aliases": [
+        "DeepSeek API"
+      ],
+      "provider_type": "direct",
+      "api_style": "openai_compatible",
+      "supports_openai_compatible_api": true,
+      "native_api": {
+        "base_url": null,
+        "chat_completions_endpoint": null,
+        "responses_endpoint": null,
+        "messages_endpoint": null,
+        "completions_endpoint": null,
+        "embeddings_endpoint": null,
+        "images_endpoint": null,
+        "audio_endpoint": null,
+        "video_endpoint": null,
+        "batches_endpoint": null,
+        "models_endpoint": null,
+        "docs_url": null
+      },
+      "openai_compatible_api": {
+        "base_url": "https://api.deepseek.com",
+        "chat_completions_endpoint": "/chat/completions",
+        "responses_endpoint": null,
+        "completions_endpoint": null,
+        "embeddings_endpoint": null,
+        "images_endpoint": null,
+        "audio_endpoint": null,
+        "video_endpoint": null,
+        "batches_endpoint": null,
+        "models_endpoint": null,
+        "compatibility_docs_url": "https://api-docs.deepseek.com",
+        "compatibility_status": "official"
+      },
+      "discovery": {
+        "models_endpoint": null,
+        "models_page_url": null,
+        "api_reference_url": "https://api-docs.deepseek.com"
+      },
+      "pricing": {
+        "pricing_api_url": null,
+        "pricing_page_url": "https://api-docs.deepseek.com/quick_start/pricing",
+        "pricing_notes": "Official docs list public per-token pricing."
+      },
+      "auth": {
+        "authentication_method": "api_key",
+        "api_key_header": "Authorization",
+        "notes": "Official compatibility docs use Authorization: Bearer <DEEPSEEK_API_KEY>."
+      },
+      "capabilities": {
+        "streaming": null,
+        "tool_calling": null,
+        "structured_output": null,
+        "vision": false,
+        "audio_input": false,
+        "image_generation": false,
+        "video_generation": false,
+        "embeddings": false,
+        "batch": false,
+        "prompt_caching": true,
+        "reasoning_controls": true,
+        "citations": false
+      },
+      "feature_gaps_in_compat_mode": [
+        "Verified docs focus on chat-style generation; no official embeddings, image, audio, video, or batch endpoints were verified here.",
+        "DeepSeek also documents Anthropic-format compatibility separately, but that protocol is outside this schema's OpenAI-compatible block."
+      ],
+      "recommended_integration_mode": "openai_compatible",
+      "evidence": [
+        {
+          "field": "openai_compatible_api.base_url",
+          "source_type": "official_docs",
+          "url": "https://api-docs.deepseek.com",
+          "note": "Official docs identify https://api.deepseek.com as the API host."
+        },
+        {
+          "field": "openai_compatible_api.chat_completions_endpoint",
+          "source_type": "official_docs",
+          "url": "https://api-docs.deepseek.com",
+          "note": "Official docs describe POST /chat/completions with an OpenAI-compatible request shape."
+        },
+        {
+          "field": "auth.api_key_header",
+          "source_type": "official_docs",
+          "url": "https://api-docs.deepseek.com",
+          "note": "Official docs show Authorization: Bearer <DEEPSEEK_API_KEY>."
+        },
+        {
+          "field": "feature_gaps_in_compat_mode",
+          "source_type": "official_docs",
+          "url": "https://api-docs.deepseek.com/guides/anthropic_api",
+          "note": "Official docs also provide Anthropic-format access, showing that compatibility surfaces are broader than only OpenAI format."
+        },
+        {
+          "field": "pricing.pricing_page_url",
+          "source_type": "official_pricing",
+          "url": "https://api-docs.deepseek.com/quick_start/pricing",
+          "note": "Official docs list public per-token pricing."
+        }
+      ],
+      "confidence": "medium",
+      "last_verified": "2026-04-27"
+    },
+    {
+      "provider": "Mistral",
+      "aliases": [
+        "Mistral AI",
+        "La Plateforme"
+      ],
+      "provider_type": "direct",
+      "api_style": "native",
+      "supports_openai_compatible_api": true,
+      "native_api": {
+        "base_url": "https://api.mistral.ai/v1",
+        "chat_completions_endpoint": "/chat/completions",
+        "responses_endpoint": null,
+        "messages_endpoint": null,
+        "completions_endpoint": null,
+        "embeddings_endpoint": "/embeddings",
+        "images_endpoint": null,
+        "audio_endpoint": null,
+        "video_endpoint": null,
+        "batches_endpoint": null,
+        "models_endpoint": "/models",
+        "docs_url": "https://docs.mistral.ai"
+      },
+      "openai_compatible_api": {
+        "base_url": null,
+        "chat_completions_endpoint": null,
+        "responses_endpoint": null,
+        "completions_endpoint": null,
+        "embeddings_endpoint": null,
+        "images_endpoint": null,
+        "audio_endpoint": null,
+        "video_endpoint": null,
+        "batches_endpoint": null,
+        "models_endpoint": null,
+        "compatibility_docs_url": null,
+        "compatibility_status": "unknown"
+      },
+      "discovery": {
+        "models_endpoint": "https://api.mistral.ai/v1/models",
+        "models_page_url": "https://docs.mistral.ai/api/endpoint/models",
+        "api_reference_url": "https://docs.mistral.ai/api/endpoint/chat"
+      },
+      "pricing": {
+        "pricing_api_url": null,
+        "pricing_page_url": "https://mistral.ai/pricing#api",
+        "pricing_notes": "Mistral publishes public API pricing at https://mistral.ai/pricing#api."
+      },
+      "auth": {
+        "authentication_method": "api_key",
+        "api_key_header": "Authorization",
+        "notes": "Official docs show Authorization: Bearer YOUR_APIKEY_HERE."
+      },
+      "capabilities": {
+        "streaming": true,
+        "tool_calling": true,
+        "structured_output": null,
+        "vision": false,
+        "audio_input": false,
+        "image_generation": false,
+        "video_generation": false,
+        "embeddings": true,
+        "batch": false,
+        "prompt_caching": false,
+        "reasoning_controls": true,
+        "citations": false
+      },
+      "feature_gaps_in_compat_mode": [],
+      "recommended_integration_mode": "native",
+      "evidence": [
+        {
+          "field": "native_api.chat_completions_endpoint",
+          "source_type": "official_docs",
+          "url": "https://docs.mistral.ai/api/endpoint/chat",
+          "note": "Official docs document the chat endpoint under /v1/chat/completions."
+        },
+        {
+          "field": "native_api.models_endpoint",
+          "source_type": "official_docs",
+          "url": "https://docs.mistral.ai/api/endpoint/models",
+          "note": "Official docs document the models endpoint under /v1/models."
+        },
+        {
+          "field": "native_api.embeddings_endpoint",
+          "source_type": "official_docs",
+          "url": "https://docs.mistral.ai/studio-api/knowledge-rag/embeddings",
+          "note": "Official docs document Mistral embeddings support."
+        },
+        {
+          "field": "auth.authentication_method",
+          "source_type": "official_docs",
+          "url": "https://docs.mistral.ai/api",
+          "note": "Official code examples initialize the SDK with MISTRAL_API_KEY."
+        },
+        {
+          "field": "auth.api_key_header",
+          "source_type": "official_docs",
+          "url": "https://docs.mistral.ai/api",
+          "note": "Official docs show curl example with Authorization: Bearer YOUR_APIKEY_HERE."
+        },
+        {
+          "field": "capabilities.streaming",
+          "source_type": "official_docs",
+          "url": "https://docs.mistral.ai/api",
+          "note": "Official API spec documents text/event-stream response type for streaming."
+        },
+        {
+          "field": "capabilities.tool_calling",
+          "source_type": "official_docs",
+          "url": "https://docs.mistral.ai/api",
+          "note": "Official API spec documents tools, tool_choice, and parallel_tool_calls parameters."
+        },
+        {
+          "field": "capabilities.reasoning_controls",
+          "source_type": "official_docs",
+          "url": "https://docs.mistral.ai/api",
+          "note": "Official API spec documents reasoning_effort parameter with high and none values."
+        },
+        {
+          "field": "supports_openai_compatible_api",
+          "source_type": "official_docs",
+          "url": "https://docs.mistral.ai/api",
+          "note": "Official API uses OpenAI-compatible base_url, endpoints, and request/response shapes."
+        }
+      ],
+      "confidence": "high",
+      "last_verified": "2026-04-27"
+    }
+  ]
+}
