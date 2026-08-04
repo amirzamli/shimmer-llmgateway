@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -721,5 +722,380 @@ func TestMasterKeyLegacyMigrationOnAck(t *testing.T) {
 	status, _ = doJSON(t, gs, "GET", "/api/secrets/master-key", "")
 	if status != http.StatusNotFound {
 		t.Errorf("GET master-key after ack status = %d, want 404", status)
+	}
+}
+
+// ---- provider model fetch (GET /api/instances/{alias}/models) ----
+
+// newModelsServer starts an httptest provider serving the OpenAI /models shape
+// and counts how many times it was hit (the fake provider records fetch
+// attempts so cache behavior is observable).
+func newModelsServer(t *testing.T, handler func(w http.ResponseWriter, r *http.Request)) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		handler(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+// modelsTestTOML seeds one openai template/instance whose base_url points at
+// the fake provider. keyEnv is the api_key_env used for both the template and
+// the instance ("" for a keyless instance).
+func modelsTestTOML(baseURL, keyEnv string) string {
+	return fmt.Sprintf(`
+listen = "127.0.0.1:8787"
+store = "gateway.db"
+retention_days = 30
+
+[settings]
+default_alias = "openai"
+
+[providers.openai]
+base_url = %q
+api_key_env = %q
+models = ["gpt-4o", "gpt-4o-mini"]
+
+[[instances]]
+alias = "openai"
+template = "openai"
+api_key_env = %q
+`, baseURL, keyEnv, keyEnv)
+}
+
+func TestInstanceModelsFetchSuccess(t *testing.T) {
+	var gotAuth string
+	srv, _ := newModelsServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":[{"id":"gpt-4o"},{"id":"gpt-4o-mini"},{"id":"  spaced-id  "}]}`)
+	})
+	t.Setenv("TEST_KEY_1", "sk-test-key")
+	gs, _, _, _ := newAPITest(t, modelsTestTOML(srv.URL, "TEST_KEY_1"), testMasterKey)
+
+	status, out := doJSON(t, gs, "GET", "/api/instances/openai/models", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET models status = %d, body %v", status, out)
+	}
+	if gotAuth != "Bearer sk-test-key" {
+		t.Errorf("Authorization = %q, want Bearer sk-test-key", gotAuth)
+	}
+	if out["alias"] != "openai" {
+		t.Errorf("alias = %v, want openai", out["alias"])
+	}
+	if out["source"] != "provider" {
+		t.Errorf("source = %v, want provider", out["source"])
+	}
+	if out["error"] != nil {
+		t.Errorf("error = %v, want absent on success", out["error"])
+	}
+	if _, ok := out["fetched_at"]; !ok {
+		t.Error("fetched_at missing")
+	}
+	models, ok := out["models"].([]any)
+	if !ok || len(models) != 3 {
+		t.Fatalf("models = %v, want 3 entries", out["models"])
+	}
+	if models[0] != "gpt-4o" || models[1] != "gpt-4o-mini" || models[2] != "spaced-id" {
+		t.Errorf("models = %v, want [gpt-4o gpt-4o-mini spaced-id] (ids trimmed)", models)
+	}
+}
+
+func TestInstanceModelsKeylessNoAuth(t *testing.T) {
+	var sawAuth bool
+	srv, _ := newModelsServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			sawAuth = true
+		}
+		fmt.Fprint(w, `{"data":[{"id":"llama3.1"}]}`)
+	})
+	gs, _, _, _ := newAPITest(t, modelsTestTOML(srv.URL, ""), testMasterKey)
+
+	status, out := doJSON(t, gs, "GET", "/api/instances/openai/models", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET models status = %d, body %v", status, out)
+	}
+	if sawAuth {
+		t.Error("keyless fetch sent an Authorization header")
+	}
+	if out["source"] != "provider" {
+		t.Errorf("source = %v, want provider (keyless fetch succeeded)", out["source"])
+	}
+	if out["error"] != nil {
+		t.Errorf("error = %v, want absent (keyless-only skip is not an error)", out["error"])
+	}
+	if models := out["models"].([]any); len(models) != 1 || models[0] != "llama3.1" {
+		t.Errorf("models = %v, want [llama3.1]", out["models"])
+	}
+}
+
+func TestInstanceModelsFallbackOnProviderError(t *testing.T) {
+	srv, _ := newModelsServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"error":"boom"}`)
+	})
+	t.Setenv("TEST_KEY_1", "sk-test-key")
+	gs, _, _, _ := newAPITest(t, modelsTestTOML(srv.URL, "TEST_KEY_1"), testMasterKey)
+
+	status, out := doJSON(t, gs, "GET", "/api/instances/openai/models", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET models status = %d, body %v", status, out)
+	}
+	if out["source"] != "config" {
+		t.Errorf("source = %v, want config", out["source"])
+	}
+	if out["error"] != "provider models unavailable" {
+		t.Errorf("error = %v, want %q", out["error"], "provider models unavailable")
+	}
+	models := out["models"].([]any)
+	if len(models) != 2 || models[0] != "gpt-4o" || models[1] != "gpt-4o-mini" {
+		t.Errorf("models = %v, want configured [gpt-4o gpt-4o-mini]", out["models"])
+	}
+}
+
+func TestInstanceModelsFallbackOnUnparseable(t *testing.T) {
+	srv, _ := newModelsServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `this is not json`)
+	})
+	t.Setenv("TEST_KEY_1", "sk-test-key")
+	gs, _, _, _ := newAPITest(t, modelsTestTOML(srv.URL, "TEST_KEY_1"), testMasterKey)
+
+	status, out := doJSON(t, gs, "GET", "/api/instances/openai/models", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET models status = %d, body %v", status, out)
+	}
+	if out["source"] != "config" {
+		t.Errorf("source = %v, want config", out["source"])
+	}
+	if out["error"] != "provider models unavailable" {
+		t.Errorf("error = %v, want %q", out["error"], "provider models unavailable")
+	}
+	if models := out["models"].([]any); len(models) != 2 || models[0] != "gpt-4o" {
+		t.Errorf("models = %v, want configured [gpt-4o gpt-4o-mini]", out["models"])
+	}
+}
+
+func TestInstanceModelsUnknownAlias404(t *testing.T) {
+	gs, _, _, _ := newAPITest(t, apiTestTOML, testMasterKey)
+
+	status, out := doJSON(t, gs, "GET", "/api/instances/nope/models", "")
+	if status != http.StatusNotFound {
+		t.Errorf("GET unknown alias models status = %d, want 404", status)
+	}
+	if out["code"] != "NOT_FOUND" {
+		t.Errorf("code = %v, want NOT_FOUND", out["code"])
+	}
+}
+
+func TestInstanceModelsCacheAndRefresh(t *testing.T) {
+	srv, hits := newModelsServer(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"data":[{"id":"m1"}]}`)
+	})
+	t.Setenv("TEST_KEY_1", "sk-test-key")
+	gs, _, _, _ := newAPITest(t, modelsTestTOML(srv.URL, "TEST_KEY_1"), testMasterKey)
+
+	status, out := doJSON(t, gs, "GET", "/api/instances/openai/models", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET models status = %d", status)
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("hits after first GET = %d, want 1", hits.Load())
+	}
+
+	// A second GET within the TTL is served from cache: the provider is not hit.
+	status, out = doJSON(t, gs, "GET", "/api/instances/openai/models", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET models (cached) status = %d", status)
+	}
+	if hits.Load() != 1 {
+		t.Errorf("hits after second GET = %d, want 1 (cached)", hits.Load())
+	}
+	if out["source"] != "provider" {
+		t.Errorf("cached source = %v, want provider", out["source"])
+	}
+
+	// ?refresh=1 bypasses the cache.
+	status, _ = doJSON(t, gs, "GET", "/api/instances/openai/models?refresh=1", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET models (refresh) status = %d", status)
+	}
+	if hits.Load() != 2 {
+		t.Errorf("hits after refresh = %d, want 2", hits.Load())
+	}
+}
+
+func TestInstanceModelsPatchInvalidatesCache(t *testing.T) {
+	srv, hits := newModelsServer(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"data":[{"id":"m1"}]}`)
+	})
+	t.Setenv("TEST_KEY_1", "sk-test-key")
+	gs, _, _, _ := newAPITest(t, modelsTestTOML(srv.URL, "TEST_KEY_1"), testMasterKey)
+
+	if status, _ := doJSON(t, gs, "GET", "/api/instances/openai/models", ""); status != http.StatusOK {
+		t.Fatalf("GET models status = %d", status)
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("hits after first GET = %d, want 1", hits.Load())
+	}
+
+	// A successful PATCH invalidates the cache; a disabled instance is still
+	// served by the models endpoint, and it refetches.
+	status, _ := doJSON(t, gs, "PATCH", "/api/instances/openai", `{"disabled":true}`)
+	if status != http.StatusOK {
+		t.Fatalf("PATCH status = %d, want 200", status)
+	}
+	if status, _ := doJSON(t, gs, "GET", "/api/instances/openai/models", ""); status != http.StatusOK {
+		t.Fatalf("GET models after PATCH status = %d", status)
+	}
+	if hits.Load() != 2 {
+		t.Errorf("hits after PATCH = %d, want 2 (cache invalidated)", hits.Load())
+	}
+
+	// A rename invalidates both the old and the new alias: fetching the new
+	// alias refetches rather than serving stale cache.
+	status, _ = doJSON(t, gs, "PATCH", "/api/instances/openai", `{"alias":"main"}`)
+	if status != http.StatusOK {
+		t.Fatalf("PATCH rename status = %d, want 200", status)
+	}
+	if status, _ := doJSON(t, gs, "GET", "/api/instances/main/models", ""); status != http.StatusOK {
+		t.Fatalf("GET renamed models status = %d", status)
+	}
+	if hits.Load() != 3 {
+		t.Errorf("hits after rename = %d, want 3 (rename invalidated cache)", hits.Load())
+	}
+}
+
+func TestInstanceModelsDeleteInvalidatesCache(t *testing.T) {
+	srv, hits := newModelsServer(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"data":[{"id":"m1"}]}`)
+	})
+	t.Setenv("TEST_KEY_1", "sk-test-key")
+	gs, _, _, _ := newAPITest(t, modelsTestTOML(srv.URL, "TEST_KEY_1"), testMasterKey)
+
+	if status, _ := doJSON(t, gs, "GET", "/api/instances/openai/models", ""); status != http.StatusOK {
+		t.Fatalf("GET models status = %d", status)
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("hits after first GET = %d, want 1", hits.Load())
+	}
+
+	resp := doRaw(t, gs, "DELETE", "/api/instances/openai", "")
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("DELETE status = %d, want 204", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Re-creating the alias must refetch, never serve the stale cached list.
+	status, inst := doJSON(t, gs, "POST", "/api/instances", `{"template":"openai"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("POST re-create status = %d, body %v", status, inst)
+	}
+	if status, out := doJSON(t, gs, "GET", "/api/instances/openai/models", ""); status != http.StatusOK {
+		t.Fatalf("GET re-created models status = %d, body %v", status, out)
+	}
+	if hits.Load() != 2 {
+		t.Errorf("hits after re-create = %d, want 2 (delete invalidated cache)", hits.Load())
+	}
+}
+
+func TestInstancePatchModelAliasesPersists(t *testing.T) {
+	gs, _, _, cfgPath := newAPITest(t, apiTestTOML, testMasterKey)
+
+	status, inst := doJSON(t, gs, "PATCH", "/api/instances/openai", `{"model_aliases":{"small":"gpt-4o-mini"}}`)
+	if status != http.StatusOK {
+		t.Fatalf("PATCH model_aliases status = %d, body %v", status, inst)
+	}
+	aliases, ok := inst["model_aliases"].(map[string]any)
+	if !ok || aliases["small"] != "gpt-4o-mini" {
+		t.Errorf("response model_aliases = %v, want {small: gpt-4o-mini}", inst["model_aliases"])
+	}
+
+	// The map is visible on the instance list and persisted to gateway.toml.
+	status, list := doJSON(t, gs, "GET", "/api/instances", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET instances status = %d", status)
+	}
+	item := list["instances"].([]any)[0].(map[string]any)
+	if got := item["model_aliases"].(map[string]any); got["small"] != "gpt-4o-mini" {
+		t.Errorf("list model_aliases = %v, want {small: gpt-4o-mini}", item["model_aliases"])
+	}
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload persisted config: %v", err)
+	}
+	if got := reloaded.Instances[0].ModelAliases["small"]; got != "gpt-4o-mini" {
+		t.Errorf("persisted model_aliases = %v, want small→gpt-4o-mini", reloaded.Instances[0].ModelAliases)
+	}
+
+	// Whole-map replacement: a new map replaces the old entirely.
+	status, inst = doJSON(t, gs, "PATCH", "/api/instances/openai", `{"model_aliases":{"large":"gpt-4o"}}`)
+	if status != http.StatusOK {
+		t.Fatalf("PATCH replace status = %d, body %v", status, inst)
+	}
+	aliases, _ = inst["model_aliases"].(map[string]any)
+	if len(aliases) != 1 || aliases["large"] != "gpt-4o" {
+		t.Errorf("replace model_aliases = %v, want only {large: gpt-4o}", inst["model_aliases"])
+	}
+	if _, present := aliases["small"]; present {
+		t.Errorf("replace kept stale key small: %v", inst["model_aliases"])
+	}
+
+	// An empty map clears the field (omitempty drops it from the view).
+	status, inst = doJSON(t, gs, "PATCH", "/api/instances/openai", `{"model_aliases":{}}`)
+	if status != http.StatusOK {
+		t.Fatalf("PATCH clear status = %d, body %v", status, inst)
+	}
+	if _, ok := inst["model_aliases"]; ok {
+		t.Errorf("model_aliases should be absent after clearing, got %v", inst["model_aliases"])
+	}
+}
+
+func TestInstancePatchModelAliasesValidation(t *testing.T) {
+	gs, _, _, _ := newAPITest(t, apiTestTOML, testMasterKey)
+
+	for _, body := range []string{
+		`{"model_aliases":{"UPPER":"gpt-4o"}}`,
+		`{"model_aliases":{"bad key":"gpt-4o"}}`,
+		`{"model_aliases":{"small":""}}`,
+	} {
+		status, out := doJSON(t, gs, "PATCH", "/api/instances/openai", body)
+		if status != http.StatusBadRequest {
+			t.Errorf("PATCH %s status = %d, want 400 (body %v)", body, status, out)
+		}
+		if out["code"] != "INVALID_ARGUMENT" {
+			t.Errorf("PATCH %s code = %v, want INVALID_ARGUMENT", body, out["code"])
+		}
+	}
+
+	// Rejected updates left the instance unchanged and the handler usable.
+	status, list := doJSON(t, gs, "GET", "/api/instances", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET instances status = %d", status)
+	}
+	if _, ok := list["instances"].([]any)[0].(map[string]any)["model_aliases"]; ok {
+		t.Error("instance gained model_aliases from a rejected PATCH")
+	}
+	status, _ = doJSON(t, gs, "PATCH", "/api/instances/openai", `{"model_aliases":{"small":"gpt-4o-mini"}}`)
+	if status != http.StatusOK {
+		t.Errorf("valid PATCH after rejected ones status = %d, want 200", status)
+	}
+}
+
+func TestInstancePatchCombinedFields(t *testing.T) {
+	gs, _, _, _ := newAPITest(t, apiTestTOML, testMasterKey)
+
+	// Rename + disable + model_aliases together: all fields apply.
+	status, inst := doJSON(t, gs, "PATCH", "/api/instances/openai", `{"alias":"main","disabled":true,"model_aliases":{"small":"gpt-4o-mini"}}`)
+	if status != http.StatusOK {
+		t.Fatalf("PATCH combined status = %d, body %v", status, inst)
+	}
+	if inst["alias"] != "main" || inst["disabled"] != true {
+		t.Errorf("combined view = %v, want alias=main disabled=true", inst)
+	}
+	if got := inst["model_aliases"].(map[string]any)["small"]; got != "gpt-4o-mini" {
+		t.Errorf("combined model_aliases = %v, want {small: gpt-4o-mini}", inst["model_aliases"])
 	}
 }

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -24,12 +25,31 @@ func (s *Store) retention() int {
 // configured retention window. It is the startup purge; the daily ticker runs
 // StartRetentionLoop. Returns the number of sessions purged. Disabled when
 // retention is <= 0.
+//
+// The cutoff is anchored to the newest session in the store rather than the
+// wall clock: retention counts backward from the most recent recorded
+// activity, so the most recent session (and anything within the window of it)
+// can never fall on the expired side of a time.Now()-based cutoff.
 func (s *Store) Purge(ctx context.Context) (int, error) {
 	days := s.retention()
 	if days <= 0 {
 		return 0, nil
 	}
-	cutoff := formatTS(time.Now().UTC().AddDate(0, 0, -days))
+
+	// Anchor to MAX(created_at) instead of time.Now() so the purge never
+	// classifies the newest recorded session as expired.
+	var newest string
+	if err := s.db.QueryRowContext(ctx, `SELECT MAX(created_at) FROM sessions`).Scan(&newest); err != nil {
+		return 0, err
+	}
+	if newest == "" {
+		return 0, nil // empty store: nothing to purge
+	}
+	newestTS, err := time.Parse(tsLayout, newest)
+	if err != nil {
+		return 0, fmt.Errorf("store: purge: parse newest created_at %q: %w", newest, err)
+	}
+	cutoff := formatTS(newestTS.AddDate(0, 0, -days))
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

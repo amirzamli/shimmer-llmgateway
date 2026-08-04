@@ -760,3 +760,329 @@ models = ["m1"]
 		t.Errorf("Marshal leaked the Name field: %s", data)
 	}
 }
+
+func TestModelAliasesRoundTrip(t *testing.T) {
+	cases := map[string]string{
+		"subtable": `
+[[instances]]
+alias = "openai"
+template = "openai"
+
+[instances.model_aliases]
+small = "gpt-4o-mini"
+large = "gpt-4o"
+`,
+		"inline": `
+[[instances]]
+alias = "openai"
+template = "openai"
+model_aliases = { small = "gpt-4o-mini", large = "gpt-4o" }
+`,
+	}
+	for name, data := range cases {
+		t.Run(name, func(t *testing.T) {
+			cfg := mustParse(t, data)
+			got := cfg.Instances[0].ModelAliases
+			if got["small"] != "gpt-4o-mini" || got["large"] != "gpt-4o" {
+				t.Fatalf("model_aliases = %v, want {small,gpt-4o-mini large,gpt-4o}", got)
+			}
+			// Marshal then re-parse: the map survives the write-back.
+			out, err := Marshal(cfg)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			re, err := Parse(out)
+			if err != nil {
+				t.Fatalf("re-parse of %s: %v", out, err)
+			}
+			got = re.Instances[0].ModelAliases
+			if got["small"] != "gpt-4o-mini" || got["large"] != "gpt-4o" {
+				t.Errorf("round-tripped model_aliases = %v, want {small,gpt-4o-mini large,gpt-4o}", got)
+			}
+		})
+	}
+}
+
+func TestModelAliasesOmittedWhenAbsent(t *testing.T) {
+	cfg := mustParse(t, `
+[[instances]]
+alias = "openai"
+template = "openai"
+`)
+	out, err := Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(out), "model_aliases") {
+		t.Errorf("Marshal emitted model_aliases when unset: %s", out)
+	}
+}
+
+func TestValidationModelAliasBadKeys(t *testing.T) {
+	for _, key := range []string{"UPPER", "with space", "bad!", ""} {
+		t.Run(key, func(t *testing.T) {
+			_, err := Parse([]byte(`
+[[instances]]
+alias = "openai"
+template = "openai"
+model_aliases = { "` + key + `" = "gpt-4o" }
+`))
+			if err == nil || !IsValidationError(err) {
+				t.Fatalf("alias key %q: err = %v, want ValidationError", key, err)
+			}
+			if !strings.Contains(err.Error(), "must match") {
+				t.Errorf("error %q does not mention the alias pattern", err)
+			}
+		})
+	}
+}
+
+func TestValidationModelAliasEmptyValue(t *testing.T) {
+	_, err := Parse([]byte(`
+[[instances]]
+alias = "openai"
+template = "openai"
+model_aliases = { small = "" }
+`))
+	if err == nil || !IsValidationError(err) {
+		t.Fatalf("err = %v, want ValidationError", err)
+	}
+	if !strings.Contains(err.Error(), "empty model value") {
+		t.Errorf("error %q does not mention the empty value", err)
+	}
+}
+
+func TestValidationModelAliasValueMayContainSlash(t *testing.T) {
+	cfg := mustParse(t, `
+[[instances]]
+alias = "openai"
+template = "openai"
+model_aliases = { local = "meta-llama/Meta-Llama-3-8B-Instruct" }
+`)
+	if got := cfg.Instances[0].ModelAliases["local"]; got != "meta-llama/Meta-Llama-3-8B-Instruct" {
+		t.Errorf("model_aliases[local] = %q, want the slashed value", got)
+	}
+}
+
+func TestResolvePrefixedAliasExpands(t *testing.T) {
+	cfg := mustParse(t, `
+[[instances]]
+alias = "openai"
+template = "openai"
+model_aliases = { small = "gpt-4o-mini" }
+`)
+	inst, model, err := cfg.Resolve("openai/small")
+	if err != nil {
+		t.Fatalf("Resolve(openai/small): %v", err)
+	}
+	if inst.Alias != "openai" || model != "gpt-4o-mini" {
+		t.Errorf("got (%q, %q), want (openai, gpt-4o-mini)", inst.Alias, model)
+	}
+}
+
+func TestResolvePrefixedNoAliasMapPassthrough(t *testing.T) {
+	// A prefixed model not in the instance's map passes through verbatim,
+	// preserving the no-membership-check behavior.
+	cfg := mustParse(t, `
+[[instances]]
+alias = "openai"
+template = "openai"
+model_aliases = { small = "gpt-4o-mini" }
+`)
+	inst, model, err := cfg.Resolve("openai/anything-else")
+	if err != nil {
+		t.Fatalf("Resolve(openai/anything-else): %v", err)
+	}
+	if inst.Alias != "openai" || model != "anything-else" {
+		t.Errorf("got (%q, %q), want (openai, anything-else)", inst.Alias, model)
+	}
+}
+
+func TestResolvePrefixedSlashyValueVerbatim(t *testing.T) {
+	// The value "meta-llama/Meta-Llama-3-8B-Instruct" contains a slash; the
+	// prefixed routing key names it after the first slash and expands verbatim.
+	cfg := mustParse(t, `
+[[instances]]
+alias = "openai"
+template = "openai"
+model_aliases = { local = "meta-llama/Meta-Llama-3-8B-Instruct" }
+`)
+	inst, model, err := cfg.Resolve("openai/local")
+	if err != nil {
+		t.Fatalf("Resolve(openai/local): %v", err)
+	}
+	if inst.Alias != "openai" || model != "meta-llama/Meta-Llama-3-8B-Instruct" {
+		t.Errorf("got (%q, %q), want (openai, meta-llama/...)", inst.Alias, model)
+	}
+}
+
+func TestResolveUnprefixedDefaultAliasMapWins(t *testing.T) {
+	cfg := mustParse(t, `
+[settings]
+default_alias = "openai"
+
+[[instances]]
+alias = "openai"
+template = "openai"
+model_aliases = { small = "gpt-4o-mini" }
+
+[[instances]]
+alias = "openai-2"
+template = "openai"
+model_aliases = { small = "gpt-4o" }
+`)
+	inst, model, err := cfg.Resolve("small")
+	if err != nil {
+		t.Fatalf("Resolve(small): %v", err)
+	}
+	if inst.Alias != "openai" || model != "gpt-4o-mini" {
+		t.Errorf("got (%q, %q), want (openai, gpt-4o-mini) from default_alias map", inst.Alias, model)
+	}
+}
+
+func TestResolveUnprefixedFirstEnabledInstanceMap(t *testing.T) {
+	// No default_alias: the first enabled instance in config order whose map
+	// contains the name wins.
+	cfg := mustParse(t, `
+[[instances]]
+alias = "openai"
+template = "openai"
+
+[[instances]]
+alias = "openai-2"
+template = "openai"
+model_aliases = { small = "gpt-4o-mini" }
+`)
+	inst, model, err := cfg.Resolve("small")
+	if err != nil {
+		t.Fatalf("Resolve(small): %v", err)
+	}
+	if inst.Alias != "openai-2" || model != "gpt-4o-mini" {
+		t.Errorf("got (%q, %q), want (openai-2, gpt-4o-mini)", inst.Alias, model)
+	}
+}
+
+func TestResolveUnprefixedDisabledInstanceMapSkipped(t *testing.T) {
+	cfg := mustParse(t, `
+[settings]
+default_alias = "openai"
+
+[[instances]]
+alias = "openai"
+template = "openai"
+
+[[instances]]
+alias = "openai-2"
+template = "openai"
+disabled = true
+model_aliases = { small = "gpt-4o" }
+`)
+	_, _, err := cfg.Resolve("small")
+	var ume *UnknownModelError
+	if !errors.As(err, &ume) {
+		t.Fatalf("Resolve(small) err = %T, want *UnknownModelError", err)
+	}
+}
+
+func TestResolveAliasBeatsLiteralShadowing(t *testing.T) {
+	// "small" is a literal model of the default_alias instance but an alias key
+	// of a later instance; the alias mapping shadows the literal membership.
+	cfg := mustParse(t, `
+[settings]
+default_alias = "openai"
+
+[[instances]]
+alias = "openai"
+template = "openai"
+models = ["small"]
+
+[[instances]]
+alias = "openai-2"
+template = "openai"
+model_aliases = { small = "gpt-4o" }
+`)
+	inst, model, err := cfg.Resolve("small")
+	if err != nil {
+		t.Fatalf("Resolve(small): %v", err)
+	}
+	if inst.Alias != "openai-2" || model != "gpt-4o" {
+		t.Errorf("got (%q, %q), want (openai-2, gpt-4o) — alias shadows literal", inst.Alias, model)
+	}
+}
+
+func TestResolveSingleLevelExpansion(t *testing.T) {
+	// small → "medium" is forwarded verbatim and never re-expanded, even
+	// though the same instance maps medium too.
+	cfg := mustParse(t, `
+[[instances]]
+alias = "openai"
+template = "openai"
+model_aliases = { small = "medium", medium = "gpt-4o" }
+`)
+	for _, model := range []string{"openai/small", "small"} {
+		inst, resolved, err := cfg.Resolve(model)
+		if err != nil {
+			t.Fatalf("Resolve(%s): %v", model, err)
+		}
+		if inst.Alias != "openai" || resolved != "medium" {
+			t.Errorf("Resolve(%s) = (%q, %q), want (openai, medium) — single level", model, inst.Alias, resolved)
+		}
+	}
+}
+
+func TestResolveNoAliasMapsUnchanged(t *testing.T) {
+	cfg := mustParse(t, specExample)
+	inst, model, err := cfg.Resolve("gpt-4o")
+	if err != nil {
+		t.Fatalf("Resolve(gpt-4o): %v", err)
+	}
+	if inst.Alias != "openai" || model != "gpt-4o" {
+		t.Errorf("got (%q, %q), want (openai, gpt-4o)", inst.Alias, model)
+	}
+	if _, _, err := cfg.Resolve("no-such-model"); !errors.As(err, new(*UnknownModelError)) {
+		t.Errorf("Resolve(no-such-model) err = %v, want UnknownModelError", err)
+	}
+}
+
+func TestAliasModelIDsOrderAndDedupe(t *testing.T) {
+	cfg := mustParse(t, `
+[[instances]]
+alias = "openai"
+template = "openai"
+model_aliases = { b = "gpt-4o", a = "gpt-4o-mini" }
+
+[[instances]]
+alias = "openai-2"
+template = "openai"
+model_aliases = { a = "claude", small = "llama" }
+
+[[instances]]
+alias = "disabled"
+template = "ollama"
+disabled = true
+model_aliases = { x = "y" }
+`)
+	got := cfg.AliasModelIDs()
+	want := []string{"a", "openai/a", "b", "openai/b", "openai-2/a", "small", "openai-2/small"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("AliasModelIDs = %v, want %v", got, want)
+	}
+}
+
+func TestCloneDeepCopiesModelAliases(t *testing.T) {
+	cfg := mustParse(t, `
+[[instances]]
+alias = "openai"
+template = "openai"
+model_aliases = { small = "gpt-4o-mini" }
+`)
+	clone := cfg.Clone()
+	clone.Instances[0].ModelAliases["small"] = "mutated"
+	clone.Instances[0].ModelAliases["extra"] = "added"
+	if got := cfg.Instances[0].ModelAliases["small"]; got != "gpt-4o-mini" {
+		t.Errorf("original model_aliases mutated by clone: %v", cfg.Instances[0].ModelAliases)
+	}
+	if _, ok := cfg.Instances[0].ModelAliases["extra"]; ok {
+		t.Error("original model_aliases gained a key from the clone")
+	}
+}

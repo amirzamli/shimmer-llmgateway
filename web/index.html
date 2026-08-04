@@ -73,6 +73,10 @@
 const $ = (id) => document.getElementById(id);
 let templates = [];
 let instances = [];
+// Per-instance provider model lists and fetch metadata for the alias editor,
+// populated by fetchModels from GET /api/instances/{alias}/models.
+let fetchedModels = {}; // alias -> string[] of available model ids
+let fetchedMeta = {};   // alias -> {source, fetched_at, error}
 
 async function api(path, opts) {
   const res = await fetch(path, opts);
@@ -108,6 +112,10 @@ document.addEventListener("click", function (ev) {
     case "edit-instance": editInstance(el.dataset.alias); break;
     case "toggle-instance": toggleInstance(el.dataset.alias); break;
     case "delete-instance": deleteInstance(el.dataset.alias); break;
+    case "models-refresh": refreshModels(el.dataset.alias); break;
+    case "aliases-add": addAliasRow(el.dataset.alias); break;
+    case "aliases-remove": removeAliasRow(el); break;
+    case "aliases-save": saveAliases(el.dataset.alias); break;
     case "save-settings": saveSettings(); break;
     case "search-sessions": loadSessions(); break;
     case "open-session": openSession(el.dataset.id); break;
@@ -138,6 +146,9 @@ async function loadView(v) {
 async function loadProviders() {
   const [t, i] = await Promise.all([api("/api/templates"), api("/api/instances")]);
   templates = t.templates; instances = i.instances;
+  // Pre-fetch each instance's provider model list (server-cached for 5 min)
+  // so the alias editor can offer them; fetchModels never throws.
+  await Promise.all(instances.map(x => fetchModels(x.alias)));
   const tmplOptions = templates.map(x => `<option value="${esc(x.name)}">${esc(x.name)}</option>`).join("");
   $("view-providers").innerHTML = `
     <div class="panel">
@@ -181,6 +192,26 @@ async function loadProviders() {
             <button class="danger" data-action="delete-instance" data-alias="${esc(x.alias)}">Delete</button>
           </td></tr>`).join("")}
       </tbody></table>
+    </div>
+    <div class="panel">
+      <h2>Model aliases</h2>
+      <div class="muted" style="margin-bottom:12px">Map a short name (e.g. <code>small</code>) to a model on each instance. Saved aliases appear in <code>/v1/models</code> and are expanded when routing unprefixed names.</div>
+      ${instances.map(x => `
+        <div class="aliases-instance" style="margin:14px 0 18px">
+          <div class="row" style="margin-bottom:6px;align-items:center">
+            <h3 style="margin:0;font-size:14px">${esc(x.alias)}</h3>
+            <span class="muted" id="models-status-${esc(x.alias)}">${aliasesStatus(x.alias)}</span>
+          </div>
+          <datalist id="dl-models-${esc(x.alias)}">${modelOptions(x.alias)}</datalist>
+          <table>
+            <thead><tr><th>Alias name</th><th>Model</th><th></th></tr></thead>
+            <tbody id="aliases-body-${esc(x.alias)}">${renderAliasRows(x)}</tbody>
+          </table>
+          <div class="row" style="margin-top:8px">
+            <button class="ghost" data-action="aliases-add" data-alias="${esc(x.alias)}">Add alias</button>
+            <button data-action="aliases-save" data-alias="${esc(x.alias)}">Save</button>
+          </div>
+        </div>`).join("")}
     </div>`;
   const sel = $("add-template");
   sel.addEventListener("change", () => { $("add-alias").value = ""; $("add-alias").placeholder = "auto: " + suggestAlias(sel.value); });
@@ -227,6 +258,97 @@ async function deleteInstance(alias) {
   if (!confirm("Delete instance " + alias + "?")) return;
   try {
     await api("/api/instances/" + encodeURIComponent(alias), { method: "DELETE" });
+    await loadProviders();
+  } catch (e) { alert(e.message); }
+}
+
+/* ---------- Model aliases editor ---------- */
+// fetchModels loads GET /api/instances/{alias}/models into fetchedModels /
+// fetchedMeta, falling back to the instance's configured models when the
+// fetch is unavailable. It never throws so callers can rely on a list.
+async function fetchModels(alias, refresh) {
+  let data;
+  try {
+    data = await api("/api/instances/" + encodeURIComponent(alias) + "/models" + (refresh ? "?refresh=1" : ""));
+  } catch (e) {
+    const inst = instances.find(x => x.alias === alias);
+    data = { models: inst ? inst.models : [], source: "config", error: e.message };
+  }
+  fetchedModels[alias] = data.models || [];
+  fetchedMeta[alias] = { source: data.source || "config", fetched_at: data.fetched_at || "", error: data.error || "" };
+}
+// modelOptions builds the <option> set for an instance's model datalist. Model
+// ids come from the provider (or config fallback) and are provider-controlled,
+// so every value is esc()'d.
+function modelOptions(alias) {
+  return (fetchedModels[alias] || []).map(m => `<option value="${esc(m)}">`).join("");
+}
+// aliasesStatus is the muted source/freshness line shown next to an instance.
+function aliasesStatus(alias) {
+  const meta = fetchedMeta[alias];
+  if (!meta) return "";
+  const src = meta.source === "provider" ? "fetched from provider" : "configured models";
+  let html = esc(src);
+  if (meta.fetched_at) html += " · " + esc(meta.fetched_at);
+  if (meta.error) html += ` <span class="badge warn">${esc(meta.error)}</span>`;
+  return html;
+}
+// aliasRowHtml renders one editable row. Keys/values come from gateway.toml
+// (user-controlled) and model ids from the provider, so all are esc()'d; the
+// model input doubles as free-typed custom model entry via the datalist.
+function aliasRowHtml(alias, key, val, i) {
+  return `<tr>
+    <td><input class="aliases-key" value="${esc(key)}" placeholder="e.g. small"></td>
+    <td><input class="aliases-model" list="dl-models-${esc(alias)}" value="${esc(val)}" placeholder="choose a model or type one"></td>
+    <td>
+      <button class="ghost" data-action="models-refresh" data-alias="${esc(alias)}">Refresh</button>
+      <button class="ghost" data-action="aliases-remove" data-alias="${esc(alias)}" data-row="${i}">Remove</button>
+    </td>
+  </tr>`;
+}
+function renderAliasRows(inst) {
+  const rows = Object.entries(inst.model_aliases || {});
+  if (!rows.length) return `<tr class="no-aliases"><td colspan="3" class="muted">No aliases yet — add one below.</td></tr>`;
+  return rows.map(([key, val], i) => aliasRowHtml(inst.alias, key, val, i)).join("");
+}
+function addAliasRow(alias) {
+  const tbody = $("aliases-body-" + alias);
+  if (!tbody) return;
+  const placeholder = tbody.querySelector("tr.no-aliases");
+  if (placeholder) placeholder.remove();
+  tbody.insertAdjacentHTML("beforeend", aliasRowHtml(alias, "", "", tbody.children.length));
+}
+// removeAliasRow drops the row client-side (unsaved until Save). It uses the
+// clicked row's DOM position rather than the data-row index so it stays
+// correct after rows are removed and reordered without a re-render.
+function removeAliasRow(el) {
+  const row = el.closest("tr");
+  if (row) row.remove();
+}
+async function refreshModels(alias) {
+  try {
+    await fetchModels(alias, true);
+    const dl = $("dl-models-" + alias);
+    if (dl) dl.innerHTML = modelOptions(alias);
+    const status = $("models-status-" + alias);
+    if (status) status.innerHTML = aliasesStatus(alias);
+  } catch (e) { alert(e.message); }
+}
+// saveAliases PATCHes the whole model_aliases map (replace semantics); rows
+// with an empty alias name are dropped, invalid names/empty models are
+// rejected server-side and surfaced via the existing alert path.
+async function saveAliases(alias) {
+  const map = {};
+  const tbody = $("aliases-body-" + alias);
+  if (tbody) tbody.querySelectorAll("tr").forEach(tr => {
+    const key = tr.querySelector(".aliases-key");
+    const model = tr.querySelector(".aliases-model");
+    if (!key || !model) return;
+    const name = key.value.trim();
+    if (name) map[name] = model.value.trim();
+  });
+  try {
+    await api("/api/instances/" + encodeURIComponent(alias), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model_aliases: map }) });
     await loadProviders();
   } catch (e) { alert(e.message); }
 }

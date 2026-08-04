@@ -16,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -121,8 +122,11 @@ type modelObject struct {
 
 // handleModels returns an OpenAI-shaped model list: every enabled instance's
 // effective models as alias/model ids, plus unprefixed ids for the first
-// instance listing each model (deduped, per the plan's assumption 6). Disabled
-// instances are excluded — they are not routable.
+// instance listing each model (deduped, per the plan's assumption 6), and the
+// instance's model_alias keys as unprefixed and alias/key ids (deduped with the
+// same maps, so an alias key that collides with a literal model listed by an
+// earlier instance keeps that literal entry). Disabled instances are excluded —
+// they are not routable.
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfg.Get()
 	data := []modelObject{}
@@ -143,8 +147,29 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 				data = append(data, modelObject{ID: id, Object: "model", OwnedBy: inst.Template})
 			}
 		}
+		for _, key := range sortedMapKeys(inst.ModelAliases) {
+			if !seenUnprefixed[key] {
+				seenUnprefixed[key] = true
+				data = append(data, modelObject{ID: key, Object: "model", OwnedBy: inst.Template})
+			}
+			id := inst.Alias + "/" + key
+			if !seenAliased[id] {
+				seenAliased[id] = true
+				data = append(data, modelObject{ID: id, Object: "model", OwnedBy: inst.Template})
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
+}
+
+// sortedMapKeys returns m's keys in sorted order for a deterministic listing.
+func sortedMapKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // chatRequest is the subset of the client body the gateway routes on.

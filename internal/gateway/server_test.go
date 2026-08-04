@@ -1150,3 +1150,145 @@ api_key_env = "NEVER_SET_ENV"
 		t.Errorf("file-fallback Authorization = %q, want Bearer sk-stored-2 (secrets file used)", got)
 	}
 }
+
+// ---- model aliases (§4.2 model_aliases) ----
+
+func TestModelsListIncludesAliases(t *testing.T) {
+	provider := newFakeProvider(t, nil)
+	instances := `
+[[instances]]
+alias = "openai"
+template = "openai"
+api_key_env = "TEST_KEY_1"
+model_aliases = { small = "gpt-4o-mini" }
+`
+	gs, _ := newGatewayTest(t, provider, instances, defaultEnv)
+
+	resp, err := http.Get(gs.URL + "/v1/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := drainClose(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var models struct {
+		Data []struct {
+			ID      string `json:"id"`
+			OwnedBy string `json:"owned_by"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &models); err != nil {
+		t.Fatalf("models body: %v", err)
+	}
+	got := map[string]string{}
+	for _, m := range models.Data {
+		got[m.ID] = m.OwnedBy
+	}
+	for _, want := range []string{"small", "openai/small"} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("models list missing alias id %q: %v", want, got)
+		}
+	}
+	if got["small"] != "openai" {
+		t.Errorf("unprefixed alias id owned_by = %q, want openai", got["small"])
+	}
+	if got["openai/small"] != "openai" {
+		t.Errorf("prefixed alias id owned_by = %q, want openai", got["openai/small"])
+	}
+}
+
+func TestChatCompletionAliasExpandsToMappedModel(t *testing.T) {
+	provider := newFakeProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	})
+	instances := `
+[[instances]]
+alias = "openai"
+template = "openai"
+api_key_env = "TEST_KEY_1"
+model_aliases = { small = "gpt-4o-mini" }
+`
+	gs, st := newGatewayTest(t, provider, instances, defaultEnv)
+
+	drainClose(t, postChat(t, gs, `{"model":"openai/small","messages":[{"role":"user","content":"hi"}]}`, map[string]string{"X-Session-Id": "sess-alias"}))
+
+	seen := provider.requests()
+	if len(seen) != 1 {
+		t.Fatalf("provider saw %d requests, want 1", len(seen))
+	}
+	var sent struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(seen[0].Body, &sent); err != nil {
+		t.Fatalf("provider body: %v", err)
+	}
+	if sent.Model != "gpt-4o-mini" {
+		t.Errorf("upstream model = %q, want gpt-4o-mini (expanded from openai/small)", sent.Model)
+	}
+
+	req := waitForRequest(t, st, "sess-alias", 5*time.Second)
+	if req.Alias != "openai" || req.Model != "gpt-4o-mini" {
+		t.Errorf("captured routing = %s/%s, want openai/gpt-4o-mini", req.Alias, req.Model)
+	}
+}
+
+func TestModelsListAliasCollisionDeduped(t *testing.T) {
+	// "small" is a literal model of the first instance (openai) and an alias
+	// key of the second (openai-2, a different template). The unprefixed id is
+	// listed once, owned by the earlier literal instance — the listing owner
+	// may differ from the routed owner (documented shadowing).
+	provider := newFakeProvider(t, nil)
+	instances := `
+[[instances]]
+alias = "openai"
+template = "openai"
+api_key_env = "TEST_KEY_1"
+models = ["small"]
+
+[[instances]]
+alias = "openai-2"
+template = "ollama"
+api_key_env = "TEST_KEY_2"
+model_aliases = { small = "gpt-4o" }
+`
+	gs, _ := newGatewayTest(t, provider, instances, defaultEnv)
+
+	resp, err := http.Get(gs.URL + "/v1/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := drainClose(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var models struct {
+		Data []struct {
+			ID      string `json:"id"`
+			OwnedBy string `json:"owned_by"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &models); err != nil {
+		t.Fatalf("models body: %v", err)
+	}
+	var unprefixed []string
+	hasAliased := false
+	for _, m := range models.Data {
+		if m.ID == "small" {
+			unprefixed = append(unprefixed, m.OwnedBy)
+		}
+		if m.ID == "openai-2/small" {
+			hasAliased = true
+		}
+	}
+	if len(unprefixed) != 1 {
+		t.Errorf("unprefixed 'small' listed %d times (owners %v), want 1", len(unprefixed), unprefixed)
+	}
+	if len(unprefixed) == 1 && unprefixed[0] != "openai" {
+		t.Errorf("unprefixed 'small' owned_by = %q, want openai (earlier literal instance)", unprefixed[0])
+	}
+	if !hasAliased {
+		t.Error("models list missing the prefixed alias id openai-2/small")
+	}
+}

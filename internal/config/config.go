@@ -35,6 +35,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 
@@ -87,6 +88,11 @@ type Instance struct {
 	// Models optionally narrows the template's model list for this instance.
 	Models  []string `toml:"models,omitempty"`
 	Plugins []string `toml:"plugins,omitempty"`
+	// ModelAliases maps a user-facing alias name to a concrete model string
+	// (e.g. "small" → "gpt-4o-mini"). Keys must match AliasPattern; values are
+	// non-empty concrete model strings (slashes allowed) that are forwarded
+	// verbatim — expansion is single-level, never re-expanded.
+	ModelAliases map[string]string `toml:"model_aliases,omitempty"`
 	// Disabled excludes the instance from routing (§6.2 PATCH disable). It
 	// stays visible to the API/UI for re-enabling, but Resolve never routes
 	// to it.
@@ -147,6 +153,12 @@ func (c *Config) Clone() *Config {
 		ic := *inst
 		ic.Models = append([]string(nil), inst.Models...)
 		ic.Plugins = append([]string(nil), inst.Plugins...)
+		if inst.ModelAliases != nil {
+			ic.ModelAliases = make(map[string]string, len(inst.ModelAliases))
+			for k, v := range inst.ModelAliases {
+				ic.ModelAliases[k] = v
+			}
+		}
 		out.Instances[i] = &ic
 	}
 	// The alias index is rebuilt over the cloned instances (the original
@@ -233,12 +245,16 @@ func (c *Config) Instance(alias string) (*Instance, bool) {
 //
 // Prefixed form "alias/model": the alias must exist and be enabled, otherwise
 // an *UnknownAliasError carrying the available alias list is returned (the
-// Phase 3 caller turns that into a 400 INVALID_ARGUMENT). The model after the
-// slash is returned verbatim; prefixed routing does not check membership.
+// Phase 3 caller turns that into a 400 INVALID_ARGUMENT). When the model is a
+// key of the instance's model_aliases map it is expanded to the mapped value;
+// otherwise the model after the slash is returned verbatim (the current
+// no-membership-check behavior).
 //
-// Unprefixed form: resolve via settings.default_alias if that instance lists
-// the model, else the first instance (in config order) that lists the model,
-// else an *UnknownModelError.
+// Unprefixed form: resolve via settings.default_alias if that instance maps or
+// lists the model, else the first enabled instance (in config order) that maps
+// or lists the model, else an *UnknownModelError. An alias mapping shadows a
+// literal model membership, and the mapped value is forwarded verbatim
+// (single-level expansion).
 func (c *Config) Resolve(model string) (*Instance, string, error) {
 	if i := strings.IndexByte(model, '/'); i >= 0 {
 		alias, rest := model[:i], model[i+1:]
@@ -246,7 +262,27 @@ func (c *Config) Resolve(model string) (*Instance, string, error) {
 		if !ok || inst.Disabled {
 			return nil, "", &UnknownAliasError{Alias: alias, Aliases: c.AliasList()}
 		}
+		if mapped, ok := inst.ModelAliases[rest]; ok {
+			return inst, mapped, nil
+		}
 		return inst, rest, nil
+	}
+	// Alias maps shadow literal membership, so all map passes run before the
+	// literal fallback (default_alias map → first enabled instance map → literal).
+	if c.Settings.DefaultAlias != "" {
+		if inst, ok := c.instancesByAlias[c.Settings.DefaultAlias]; ok && !inst.Disabled {
+			if mapped, ok := inst.ModelAliases[model]; ok {
+				return inst, mapped, nil
+			}
+		}
+	}
+	for _, inst := range c.Instances {
+		if inst.Disabled {
+			continue
+		}
+		if mapped, ok := inst.ModelAliases[model]; ok {
+			return inst, mapped, nil
+		}
 	}
 	if c.Settings.DefaultAlias != "" {
 		if inst, ok := c.instancesByAlias[c.Settings.DefaultAlias]; ok && !inst.Disabled && contains(inst.EffectiveModels(c), model) {
@@ -262,6 +298,38 @@ func (c *Config) Resolve(model string) (*Instance, string, error) {
 		}
 	}
 	return nil, "", &UnknownModelError{Model: model}
+}
+
+// AliasModelIDs returns the routable model-alias ids to advertise in
+// /v1/models: for each enabled instance in config order, the deduped unprefixed
+// key plus the "alias/key" prefixed form, with keys sorted within an instance
+// for a deterministic order. Disabled instances contribute nothing.
+func (c *Config) AliasModelIDs() []string {
+	var out []string
+	seenUnprefixed := map[string]bool{}
+	seenAliased := map[string]bool{}
+	for _, inst := range c.Instances {
+		if inst.Disabled {
+			continue
+		}
+		keys := make([]string, 0, len(inst.ModelAliases))
+		for key := range inst.ModelAliases {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			if !seenUnprefixed[key] {
+				seenUnprefixed[key] = true
+				out = append(out, key)
+			}
+			id := inst.Alias + "/" + key
+			if !seenAliased[id] {
+				seenAliased[id] = true
+				out = append(out, id)
+			}
+		}
+	}
+	return out
 }
 
 // UnknownAliasError reports a prefixed model naming an alias that does not
@@ -468,6 +536,8 @@ func (e *ValidationError) Error() string {
 //   - every instance references a known template;
 //   - aliases are unique and match [a-z0-9._-]+;
 //   - per-instance api_key_env values are valid env var names;
+//   - per-instance model_aliases keys match [a-z0-9._-]+ and values are
+//     non-empty;
 //   - every plugin name (settings defaults or per-instance list) is known to
 //     the built-in registry (§4.5).
 //
@@ -525,6 +595,14 @@ func Validate(c *Config) error {
 		}
 		if inst.APIKeyEnv != "" && !envNameRe.MatchString(inst.APIKeyEnv) {
 			problems = append(problems, fmt.Sprintf("instance %q: invalid api_key_env %q", inst.Alias, inst.APIKeyEnv))
+		}
+		for key, value := range inst.ModelAliases {
+			if !aliasRe.MatchString(key) {
+				problems = append(problems, fmt.Sprintf("instance %q: model alias key %q must match %s", inst.Alias, key, AliasPattern))
+			}
+			if value == "" {
+				problems = append(problems, fmt.Sprintf("instance %q: model alias %q has an empty model value", inst.Alias, key))
+			}
 		}
 	}
 

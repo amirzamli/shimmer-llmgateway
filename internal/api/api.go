@@ -51,13 +51,17 @@ type API struct {
 	// stale base and its Swap would clobber the other's result).
 	updateMu  sync.Mutex
 	startedAt time.Time
+	// modelsMu guards modelsCache, the in-memory provider model-fetch cache
+	// keyed by instance alias (TTL 5 min; invalidated on PATCH/DELETE).
+	modelsMu    sync.Mutex
+	modelsCache map[string]modelsCacheEntry
 }
 
 // New builds the API handler set over the live config manager, the capture
 // store, and the secrets store. configPath is the gateway.toml path written
 // back on config mutations.
 func New(mgr *config.ConfigManager, configPath string, st *store.Store, sec *secrets.Store, logger *logging.Logger) *API {
-	return &API{mgr: mgr, path: configPath, store: st, sec: sec, logger: logger, startedAt: time.Now()}
+	return &API{mgr: mgr, path: configPath, store: st, sec: sec, logger: logger, startedAt: time.Now(), modelsCache: map[string]modelsCacheEntry{}}
 }
 
 // Handler returns the §6.2 router.
@@ -69,6 +73,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /api/instances", a.handleInstancesCreate)
 	mux.HandleFunc("PATCH /api/instances/{alias}", a.handleInstancePatch)
 	mux.HandleFunc("DELETE /api/instances/{alias}", a.handleInstanceDelete)
+	mux.HandleFunc("GET /api/instances/{alias}/models", a.handleInstanceModels)
 	mux.HandleFunc("GET /api/settings", a.handleSettingsGet)
 	mux.HandleFunc("PATCH /api/settings", a.handleSettingsPatch)
 	mux.HandleFunc("GET /api/sessions", a.handleSessionsList)

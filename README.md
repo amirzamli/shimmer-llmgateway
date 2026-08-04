@@ -99,6 +99,63 @@ Key rules:
 - Config mutations made through the UI/REST API are written back to
   `gateway.toml` and applied atomically to the next request — no restart.
 
+### Model aliases
+
+Per-instance `model_aliases` map a friendly name (`small`, `medium`,
+`large`, …) to any concrete provider model string, so harness users can
+request an alias and the operator decides which model it resolves to. Alias
+keys follow the same `[a-z0-9._-]+` rule as instance aliases; values are
+non-empty model strings (slashes allowed, e.g.
+`meta-llama/Meta-Llama-3-8B-Instruct`).
+
+```toml
+[[instances]]
+alias = 'openai'
+template = 'openai'
+api_key_env = 'OPENAI_API_KEY'
+
+[instances.model_aliases]
+small  = 'gpt-4o-mini'
+medium = 'gpt-4o'
+large  = 'gpt-4o'
+```
+
+(The inline `model_aliases = { small = 'gpt-4o-mini' }` form inside the
+`[[instances]]` block works too.)
+
+Routing / expansion:
+
+- **Unprefixed names** (`small`, `medium`) resolve in order: (1) the
+  `settings.default_alias` instance's map; (2) the first enabled instance in
+  config order whose map contains the name; (3) the existing literal fallback
+  (`default_alias` list, then the first instance listing the model).
+- **Prefixed names** (`openai/small`) expand only when the name is a key of
+  that instance's map; otherwise the name passes through verbatim.
+- **Shadowing:** an alias mapping wins over literal model membership, so an
+  alias key may legitimately collide with a real model name.
+- **Single-level:** the mapped value is forwarded verbatim and never
+  re-expanded (`small = 'medium'` routes the literal model `medium`).
+- **Disabled instances** contribute no aliases and are never routed to;
+  `GET /v1/models` lists alias ids (bare key and `alias/key`) for enabled
+  instances only, alongside the real models.
+
+Provider model fetching — the dashboard's model dropdown is populated from the
+provider itself. The gateway fetches `GET <base_url>/models` (OpenAI list
+shape) with the instance's resolved key, or with no Authorization header for
+keyless providers (ollama, vllm), caches the result **in-memory for 5
+minutes**, and never persists it. A manual **Refresh** in the dashboard (or
+`?refresh=1` on the API) bypasses the cache; a PATCH or DELETE on the instance
+invalidates it. On any fetch failure — including the built-in `anthropic`
+template, whose `/models` fetch can fail on its non-native path — the
+configured models are returned instead (`source: "config"`) with only the
+generic error `"provider models unavailable"`; the underlying detail is
+written to the gateway log.
+
+Dashboard: the **Providers** view has a **Model aliases** editor per instance —
+add/remove rows (alias name + model select from the fetched list, or type a
+custom model), Refresh, and Save (a PATCH replacing the whole map). Edits
+persist to `gateway.toml` like the rest of the config UI.
+
 ### Master key (`SHIMMER_MASTER_KEY`)
 
 The UI-managed secrets file `<store>.secrets.json` holds per-instance API keys
@@ -176,6 +233,9 @@ Add a custom provider and select a model in `opencode.json` (project or
   real key from the instance config.
 - Model ids are the routing key: `openai/gpt-4o` → instance `openai`, model
   `gpt-4o`; use the prefix form to select a specific account.
+- Model aliases work the same way: any id `GET /v1/models` lists is routable —
+  `shimmer/small` for an unprefixed alias, `shimmer/openai/small` for a
+  prefixed one (see [Model aliases](#model-aliases)).
 - opencode loads config at startup — **restart opencode** after editing.
 
 ### Other OpenAI-compatible clients (LibreChat, custom scripts, …)

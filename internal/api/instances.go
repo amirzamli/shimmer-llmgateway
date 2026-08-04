@@ -13,23 +13,25 @@ import (
 // key masked for display ("sk-…abcd"), present only when a key is stored in
 // the secrets file; keys from api_key_env are shown as the env var name.
 type instanceView struct {
-	Alias     string   `json:"alias"`
-	Template  string   `json:"template"`
-	APIKeyEnv string   `json:"api_key_env"`
-	Models    []string `json:"models,omitempty"`
-	Plugins   []string `json:"plugins,omitempty"`
-	Disabled  bool     `json:"disabled"`
-	KeyMasked string   `json:"key_masked,omitempty"`
+	Alias        string            `json:"alias"`
+	Template     string            `json:"template"`
+	APIKeyEnv    string            `json:"api_key_env"`
+	Models       []string          `json:"models,omitempty"`
+	Plugins      []string          `json:"plugins,omitempty"`
+	ModelAliases map[string]string `json:"model_aliases,omitempty"`
+	Disabled     bool              `json:"disabled"`
+	KeyMasked    string            `json:"key_masked,omitempty"`
 }
 
 func (a *API) instanceViewOf(cfg *config.Config, inst *config.Instance) instanceView {
 	v := instanceView{
-		Alias:     inst.Alias,
-		Template:  inst.Template,
-		APIKeyEnv: inst.EffectiveAPIKeyEnv(cfg),
-		Models:    inst.Models,
-		Plugins:   inst.Plugins,
-		Disabled:  inst.Disabled,
+		Alias:        inst.Alias,
+		Template:     inst.Template,
+		APIKeyEnv:    inst.EffectiveAPIKeyEnv(cfg),
+		Models:       inst.Models,
+		Plugins:      inst.Plugins,
+		ModelAliases: inst.ModelAliases,
+		Disabled:     inst.Disabled,
 	}
 	if key, ok := a.sec.Get(inst.Alias); ok {
 		v.KeyMasked = secrets.MaskKey(key)
@@ -116,6 +118,10 @@ func (a *API) handleInstancesCreate(w http.ResponseWriter, r *http.Request) {
 type instancePatchReq struct {
 	Alias    *string `json:"alias"`
 	Disabled *bool   `json:"disabled"`
+	// ModelAliases replaces the whole model_aliases map when provided (an empty
+	// map clears it); absent → unchanged. Validation runs via config.Validate
+	// in ConfigManager.Update (bad key → 400 INVALID_ARGUMENT).
+	ModelAliases *map[string]string `json:"model_aliases"`
 	// Key replaces the stored key when non-empty and clears it when present
 	// and empty (the UI sends "" to forget a stored key). Absent → unchanged.
 	Key *string `json:"key"`
@@ -156,11 +162,21 @@ func (a *API) handleInstancePatch(w http.ResponseWriter, r *http.Request) {
 		if req.Disabled != nil {
 			inst.Disabled = *req.Disabled
 		}
+		if req.ModelAliases != nil {
+			inst.ModelAliases = *req.ModelAliases
+		}
 		return nil
 	})
 	if err != nil {
 		a.writeUpdateError(w, err)
 		return
+	}
+
+	// A successful PATCH invalidates the cached provider model list for the
+	// old and (if renamed) new alias so the next fetch is fresh.
+	a.invalidateModels(oldAlias)
+	if renamed {
+		a.invalidateModels(newAlias)
 	}
 
 	// Secrets follow the instance: a rename moves the stored key, a key
@@ -216,6 +232,9 @@ func (a *API) handleInstanceDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.sec.Delete(alias) //nolint:errcheck // best effort
+	// Invalidate the cached provider list so a recycled alias never serves a
+	// stale model list after re-create.
+	a.invalidateModels(alias)
 	w.WriteHeader(http.StatusNoContent)
 }
 
