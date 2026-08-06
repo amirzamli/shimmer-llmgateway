@@ -48,8 +48,18 @@ func resultJSONText(v any) string {
 // Tool input schema helpers (JSON Schema subset used by MCP).
 func schemaProp(typ string) map[string]any { return map[string]any{"type": typ} }
 
+// objectSchema builds a JSON Schema object input schema for a tool. Empty
+// maps/slices are omitted entirely — the MCP client SDK validates properties
+// as a record and required as an array, and rejects null values.
 func objectSchema(props map[string]any, required []string) map[string]any {
-	return map[string]any{"type": "object", "properties": props, "required": required}
+	schema := map[string]any{"type": "object"}
+	if len(props) > 0 {
+		schema["properties"] = props
+	}
+	if len(required) > 0 {
+		schema["required"] = required
+	}
+	return schema
 }
 
 // registerTools populates the table-driven registry with the §7.1 tools

@@ -7,7 +7,6 @@ export PATH := env_var_or_default('PATH', '') + ':/usr/local/go/bin'
 
 bin_dir := 'bin'
 config  := 'gateway.toml'
-db      := 'gateway.db'
 
 # fmt + vet + build + test
 default: fmt vet build test
@@ -78,14 +77,18 @@ init:
 
 # run the gateway (reads {{config}}; listen/store come from the config)
 run:
+    #!/usr/bin/env bash
+    set -a
+    source .env
+    set +a
     go run ./cmd/gateway -config {{config}}
 
 # run the MCP inspection server over stdio against the store
-mcp db='{{db}}':
+mcp db='gateway.db':
     go run ./cmd/inspect-mcp -db {{db}}
 
 # run the MCP inspection server over streamable-http
-mcp-http db='{{db}}' addr='127.0.0.1:9876':
+mcp-http db='gateway.db' addr='127.0.0.1:9876':
     go run ./cmd/inspect-mcp -db {{db}} -http {{addr}}
 
 # remove build artifacts
