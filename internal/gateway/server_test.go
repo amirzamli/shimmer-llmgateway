@@ -109,6 +109,16 @@ var defaultEnv = map[string]string{"TEST_KEY_1": "sk-account-1", "TEST_KEY_2": "
 // opened in a temp dir so the append log lands at <store>.jsonl.
 func newGatewayTest(t *testing.T, provider *fakeProvider, instances string, env map[string]string) (*httptest.Server, *store.Store) {
 	t.Helper()
+	srv, st := newGatewayServer(t, provider, instances, env, io.Discard)
+	gs := httptest.NewServer(srv.Handler())
+	t.Cleanup(gs.Close)
+	return gs, st
+}
+
+// newGatewayServer builds the gateway Server (not yet served) with console
+// logs written to logw, so tests can observe the JSON log stream.
+func newGatewayServer(t *testing.T, provider *fakeProvider, instances string, env map[string]string, logw io.Writer) (*Server, *store.Store) {
+	t.Helper()
 	for k, v := range env {
 		t.Setenv(k, v)
 	}
@@ -127,13 +137,11 @@ func newGatewayTest(t *testing.T, provider *fakeProvider, instances string, env 
 	}
 	t.Cleanup(func() { st.Close() })
 
-	srv, err := New(mgr, st, logging.New(io.Discard), filepath.Join(dir, "gateway.toml"), nil)
+	srv, err := New(mgr, st, logging.New(logw), filepath.Join(dir, "gateway.toml"), nil)
 	if err != nil {
 		t.Fatalf("gateway.New: %v", err)
 	}
-	gs := httptest.NewServer(srv.Handler())
-	t.Cleanup(gs.Close)
-	return gs, st
+	return srv, st
 }
 
 func postChat(t *testing.T, gs *httptest.Server, body string, headers map[string]string) *http.Response {

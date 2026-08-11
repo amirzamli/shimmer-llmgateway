@@ -47,6 +47,7 @@ retention_days = 30
 default_alias = "openai"
 request_plugins = []
 response_plugins = []
+log_payloads = false
 
 [providers.openai]
 base_url = "https://api.openai.com/v1"

@@ -61,6 +61,9 @@ type Settings struct {
 	RequestPlugins []string `toml:"request_plugins"`
 	// ResponsePlugins are global defaults, overridable per instance.
 	ResponsePlugins []string `toml:"response_plugins"`
+	// LogPayloads opts into per-request console logging of the redacted
+	// request/response payloads at the capture chokepoint.
+	LogPayloads bool `toml:"log_payloads"`
 }
 
 // Template is a provider definition (a [providers.<name>] entry, the §4.2

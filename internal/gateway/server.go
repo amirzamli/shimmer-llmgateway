@@ -3,7 +3,8 @@
 // streaming correctness (line-by-line forward with per-chunk flush,
 // index-stable tool-call delta reassembly, truncation on disconnect), §4.3
 // session correlation, one capture transaction per request (resolved review
-// decision #6), and the §8 append JSONL log.
+// decision #6), the §8 append JSONL log, and a one-line JSON access log for
+// every HTTP request (method, path, status, duration).
 package gateway
 
 import (
@@ -83,7 +84,8 @@ func New(cfg *config.ConfigManager, st *store.Store, logger *logging.Logger, con
 
 // Handler returns the HTTP router. Any /v1/* path other than the capture
 // surface and /v1/models returns 404; /healthz is the repo-convention health
-// probe; /api/* is the §6.2 REST surface; / serves the embedded HTML UI.
+// probe; /api/* is the §6.2 REST surface; / serves the embedded HTML UI. The
+// router is wrapped in the access-log middleware, so every request is logged.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
@@ -94,7 +96,75 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.Handle("/api/", s.api.Handler())
 	mux.HandleFunc("GET /{$}", s.handleUI)
-	return mux
+	return s.accessLog(mux)
+}
+
+// statusRecorder wraps an http.ResponseWriter to capture the response status
+// code written (defaulting to 200 when the handler never writes a header) and
+// the number of response bytes written. Flush forwards to the underlying
+// writer so the streaming path's http.Flusher assertion keeps working — the
+// recorder must implement Flush itself because http.ResponseWriter does not
+// declare it — and Unwrap exposes the underlying writer's optional interfaces.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (r *statusRecorder) WriteHeader(status int) {
+	if r.status == 0 {
+		r.status = status
+	}
+	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	n, err := r.ResponseWriter.Write(b)
+	r.bytes += n
+	return n, err
+}
+
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
+// accessLog wraps next and emits one one-line JSON access record per request
+// after the handler completes: event "request" with fields {method, path,
+// status, bytes, duration_ms, remote_addr}, plus session_id when the request
+// carries an X-Session-Id header or the handler echoed a normalized
+// X-Gateway-Session-Id response header (chat completions). This is separate
+// from — and complementary to — the opt-in redacted request_payloads logging,
+// which only fires for the capture surface when settings.log_payloads is on.
+func (s *Server) accessLog(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w}
+		next.ServeHTTP(rec, r)
+		if rec.status == 0 {
+			rec.status = http.StatusOK
+		}
+		fields := map[string]any{
+			"method":      r.Method,
+			"path":        r.URL.Path,
+			"status":      rec.status,
+			"bytes":       rec.bytes,
+			"duration_ms": durationMS(start),
+			"remote_addr": r.RemoteAddr,
+		}
+		if sid := rec.Header().Get("X-Gateway-Session-Id"); sid != "" {
+			fields["session_id"] = sid
+		} else if sid := r.Header.Get("X-Session-Id"); sid != "" {
+			fields["session_id"] = sid
+		}
+		s.logger.Info("request", fields)
+	})
 }
 
 // handleUI serves the embedded single-page HTML UI (§6.1).
@@ -610,6 +680,30 @@ func (s *Server) capture(rec *store.CaptureRecord) {
 	if err := s.append.write(rec); err != nil {
 		s.logger.Error("append_log_failed", map[string]any{"session_id": rec.SessionID, "error": err.Error()})
 	}
+	s.logPayloads(rec)
+}
+
+// logPayloads writes one opt-in console record with the redacted request and
+// response payloads when settings.log_payloads is enabled. The payloads are
+// redacted before logging so prompt/tool-call content never reaches stderr.
+func (s *Server) logPayloads(rec *store.CaptureRecord) {
+	if !s.cfg.Get().Settings.LogPayloads {
+		return
+	}
+	fields := map[string]any{
+		"session_id":  rec.SessionID,
+		"alias":       rec.Alias,
+		"model":       rec.Model,
+		"status_code": rec.StatusCode,
+		"duration_ms": rec.DurationMS,
+	}
+	if len(rec.RequestJSON) > 0 {
+		fields["request"] = string(redactPayload(rec.RequestJSON))
+	}
+	if len(rec.ResponseJSON) > 0 {
+		fields["response"] = string(redactPayload(rec.ResponseJSON))
+	}
+	s.logger.Info("request_payloads", fields)
 }
 
 // passthrough copies a provider response (status, content type, body) to the
