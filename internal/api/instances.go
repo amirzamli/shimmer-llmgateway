@@ -172,11 +172,14 @@ func (a *API) handleInstancePatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A successful PATCH invalidates the cached provider model list for the
-	// old and (if renamed) new alias so the next fetch is fresh.
+	// A successful PATCH invalidates the cached provider model list (and the
+	// quota cache) for the old and (if renamed) new alias so the next fetch is
+	// fresh.
 	a.invalidateModels(oldAlias)
+	a.quota.InvalidateQuota(oldAlias)
 	if renamed {
 		a.invalidateModels(newAlias)
+		a.quota.InvalidateQuota(newAlias)
 	}
 
 	// Secrets follow the instance: a rename moves the stored key, a key
@@ -232,9 +235,10 @@ func (a *API) handleInstanceDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.sec.Delete(alias) //nolint:errcheck // best effort
-	// Invalidate the cached provider list so a recycled alias never serves a
-	// stale model list after re-create.
+	// Invalidate the cached provider list (and quota) so a recycled alias
+	// never serves stale model or balance data after re-create.
 	a.invalidateModels(alias)
+	a.quota.InvalidateQuota(alias)
 	w.WriteHeader(http.StatusNoContent)
 }
 

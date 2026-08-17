@@ -20,6 +20,7 @@ import (
 
 	"shimmer-llmgateway/internal/config"
 	"shimmer-llmgateway/internal/logging"
+	"shimmer-llmgateway/internal/quota"
 	"shimmer-llmgateway/internal/secrets"
 	"shimmer-llmgateway/internal/store"
 )
@@ -55,13 +56,16 @@ type API struct {
 	// keyed by instance alias (TTL 5 min; invalidated on PATCH/DELETE).
 	modelsMu    sync.Mutex
 	modelsCache map[string]modelsCacheEntry
+	// quota fetches per-provider account quota/balance for the UI with its
+	// own getter-based TTL cache (internal/quota; invalidated on PATCH/DELETE).
+	quota *quota.Fetcher
 }
 
 // New builds the API handler set over the live config manager, the capture
 // store, and the secrets store. configPath is the gateway.toml path written
 // back on config mutations.
 func New(mgr *config.ConfigManager, configPath string, st *store.Store, sec *secrets.Store, logger *logging.Logger) *API {
-	return &API{mgr: mgr, path: configPath, store: st, sec: sec, logger: logger, startedAt: time.Now(), modelsCache: map[string]modelsCacheEntry{}}
+	return &API{mgr: mgr, path: configPath, store: st, sec: sec, logger: logger, startedAt: time.Now(), modelsCache: map[string]modelsCacheEntry{}, quota: quota.New(mgr.Get, sec)}
 }
 
 // Handler returns the §6.2 router.
@@ -74,6 +78,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/instances/{alias}", a.handleInstancePatch)
 	mux.HandleFunc("DELETE /api/instances/{alias}", a.handleInstanceDelete)
 	mux.HandleFunc("GET /api/instances/{alias}/models", a.handleInstanceModels)
+	mux.HandleFunc("GET /api/quota", a.handleQuota)
 	mux.HandleFunc("GET /api/settings", a.handleSettingsGet)
 	mux.HandleFunc("PATCH /api/settings", a.handleSettingsPatch)
 	mux.HandleFunc("GET /api/sessions", a.handleSessionsList)

@@ -49,6 +49,14 @@
   .hidden { display: none; }
   #master-key-banner { border-left: 4px solid var(--warn); }
   #master-key-banner code { word-break: break-all; }
+  .usage { display: flex; flex-direction: column; gap: 10px; min-width: 240px; }
+  .usage-item { display: flex; flex-direction: column; gap: 3px; }
+  .usage-header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .usage-label { color: var(--muted); font-size: 12px; }
+  .usage-value { font-weight: 600; font-size: 13px; }
+  .progress { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; height: 8px; overflow: hidden; }
+  .progress-bar { background: var(--accent); height: 100%; }
+  .reset-time { color: var(--muted); font-size: 11px; }
 </style>
 </head>
 <body>
@@ -73,6 +81,9 @@
 const $ = (id) => document.getElementById(id);
 let templates = [];
 let instances = [];
+// Per-instance quota/balance results from GET /api/quota (internal/quota),
+// shown in the Quota panel of the Providers view.
+let quota = [];
 // Per-instance provider model lists and fetch metadata for the alias editor,
 // populated by fetchModels from GET /api/instances/{alias}/models.
 let fetchedModels = {}; // alias -> string[] of available model ids
@@ -113,6 +124,7 @@ document.addEventListener("click", function (ev) {
     case "toggle-instance": toggleInstance(el.dataset.alias); break;
     case "delete-instance": deleteInstance(el.dataset.alias); break;
     case "models-refresh": refreshModels(el.dataset.alias); break;
+    case "quota-refresh": refreshQuota(); break;
     case "aliases-add": addAliasRow(el.dataset.alias); break;
     case "aliases-remove": removeAliasRow(el); break;
     case "aliases-save": saveAliases(el.dataset.alias); break;
@@ -144,8 +156,8 @@ async function loadView(v) {
 
 /* ---------- Providers ---------- */
 async function loadProviders() {
-  const [t, i] = await Promise.all([api("/api/templates"), api("/api/instances")]);
-  templates = t.templates; instances = i.instances;
+  const [t, i, q] = await Promise.all([api("/api/templates"), api("/api/instances"), api("/api/quota")]);
+  templates = t.templates; instances = i.instances; quota = (q && q.quota) || [];
   // Pre-fetch each instance's provider model list (server-cached for 5 min)
   // so the alias editor can offer them; fetchModels never throws.
   await Promise.all(instances.map(x => fetchModels(x.alias)));
@@ -193,6 +205,7 @@ async function loadProviders() {
           </td></tr>`).join("")}
       </tbody></table>
     </div>
+    ${renderQuota()}
     <div class="panel">
       <h2>Model aliases</h2>
       <div class="muted" style="margin-bottom:12px">Map a short name (e.g. <code>small</code>) to a model on each instance. Saved aliases appear in <code>/v1/models</code> and are expanded when routing unprefixed names.</div>
@@ -259,6 +272,97 @@ async function deleteInstance(alias) {
   try {
     await api("/api/instances/" + encodeURIComponent(alias), { method: "DELETE" });
     await loadProviders();
+  } catch (e) { alert(e.message); }
+}
+
+/* ---------- Quota ---------- */
+// renderQuota builds the Quota panel: one row per instance with the latest
+// per-provider balance/usage. Window keys and value labels are
+// provider-controlled, so every interpolated value is esc()'d.
+function renderQuota() {
+  return `<div class="panel" id="quota-panel">
+    <h2>Quota <button class="ghost" data-action="quota-refresh">Refresh</button></h2>
+    <table><thead><tr><th>Alias</th><th>Template</th><th>Quota</th></tr></thead>
+    <tbody>
+      ${quota.map(x => `<tr>
+        <td>${esc(x.alias)}</td>
+        <td>${esc(x.template)}</td>
+        <td>${quotaCell(x)}</td>
+      </tr>`).join("")}
+    </tbody></table>
+  </div>`;
+}
+// Friendly labels and canonical order for known window keys (OpenCode Go
+// exposes 5h/weekly/monthly). The backend JSON map is alphabetically ordered,
+// so the UI imposes this order for readability.
+const WINDOW_LABELS = {
+  "5h": "Rolling Usage", "weekly": "Weekly Usage", "monthly": "Monthly Usage",
+  "credits_balance": "Balance", "credits": "Credits"
+};
+const WINDOW_ORDER = ["5h", "weekly", "monthly"];
+
+// quotaCell renders the quota summary for one result: gaps are muted labels,
+// fetch failures show a red badge, percent windows render as an OpenCode-style
+// usage card (label + value + progress bar + reset time), and balance windows
+// render as a single inline code line.
+function quotaCell(x) {
+  if (!x.supported) return `<span class="muted">not supported</span>`;
+  if (!x.configured) return `<span class="muted">no key</span>`;
+  if (!x.ok) return `<span class="badge err">${esc(x.error || "unknown error")}</span>`;
+  const windows = x.windows || {};
+  const keys = [
+    ...WINDOW_ORDER.filter(k => windows[k]),
+    ...Object.keys(windows).filter(k => !WINDOW_ORDER.includes(k)).sort()
+  ];
+  const items = keys.map(k => windowItem(WINDOW_LABELS[k] || k, windows[k]));
+  return items.length ? `<div class="usage">${items.join("")}</div>` : `<span class="muted">no data</span>`;
+}
+
+// windowItem renders one window. Percent windows (OpenCode Go) get the full
+// usage card; balance windows (DeepSeek/OpenRouter) are a single code line.
+function windowItem(label, w) {
+  if (w.used_percent != null) return usageItem(label, w);
+  const val = w.value_label != null && w.value_label !== "" ? w.value_label : "";
+  return `<code>${esc(label)}: ${esc(val)}</code>`;
+}
+
+// usageItem renders the OpenCode-style usage card: header (label + value), a
+// progress bar, and the reset time. used_percent is clamped and rounded.
+function usageItem(label, w) {
+  const pct = Math.max(0, Math.min(100, Math.round(w.used_percent)));
+  const reset = resetLabel(w.reset_at);
+  return `<div class="usage-item">
+    <div class="usage-header"><span class="usage-label">${esc(label)}</span><span class="usage-value">${pct}%</span></div>
+    <div class="progress"><div class="progress-bar" style="width:${pct}%"></div></div>
+    ${reset ? `<span class="reset-time">${esc(reset)}</span>` : ""}
+  </div>`;
+}
+
+// resetLabel formats a unix-millisecond reset time as "Resets in 3 hours
+// 0 minutes" or "Resets in 6 days 13 hours", mirroring the OpenCode usage UI.
+function resetLabel(resetAtMs) {
+  if (resetAtMs == null) return "";
+  const ms = resetAtMs - Date.now();
+  if (ms <= 0) return "Resets soon";
+  const totalMinutes = Math.floor(ms / 60000);
+  if (totalMinutes < 1) return "Resets in less than a minute";
+  const days = Math.floor(totalMinutes / 1440);
+  if (days >= 1) {
+    const hours = Math.floor((totalMinutes % 1440) / 60);
+    return `Resets in ${days} day${days === 1 ? "" : "s"} ${hours} hour${hours === 1 ? "" : "s"}`;
+  }
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return `Resets in ${hours} hour${hours === 1 ? "" : "s"} ${minutes} minute${minutes === 1 ? "" : "s"}`;
+}
+// refreshQuota re-fetches /api/quota bypassing the server-side TTL cache and
+// re-renders only the Quota panel.
+async function refreshQuota() {
+  try {
+    const q = await api("/api/quota?refresh=1");
+    quota = (q && q.quota) || [];
+    const pane = $("quota-panel");
+    if (pane) pane.outerHTML = renderQuota();
   } catch (e) { alert(e.message); }
 }
 
