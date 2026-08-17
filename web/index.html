@@ -43,7 +43,7 @@
   .msg.tool { border-left-color: var(--warn); }
   /* chat-style trace windows: user bubbles right, assistant/system/tool left */
   .chat { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
-  .chat .msg { margin: 0; max-width: 85%; border-left: none; border-radius: 10px; word-break: break-word; }
+  .chat .msg { margin: 0; max-width: 85%; border-left: none; border-radius: 10px; word-break: break-word; white-space: pre-wrap; }
   .chat .msg.user { align-self: flex-end; background: rgba(79,140,255,.15); }
   .chat .msg.assistant { align-self: flex-start; background: rgba(46,204,113,.1); }
   .chat .msg.system { align-self: flex-start; background: rgba(154,163,178,.12); }
@@ -53,6 +53,14 @@
   .verdict.SUCCESS { background: rgba(46,204,113,.2); color: var(--ok); }
   .verdict.RECOVERABLE { background: rgba(241,196,15,.2); color: var(--warn); }
   .verdict.BLIND_ERROR { background: rgba(231,76,60,.2); color: var(--err); }
+  .chat-role { display: block; font-size: 11px; color: var(--muted); margin-bottom: 3px; letter-spacing: .02em; text-transform: uppercase; }
+  .chat-content { white-space: pre-wrap; }
+  .tool-call { margin-top: 6px; padding: 6px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; }
+  .tool-call pre { margin: 4px 0 0; max-height: 220px; }
+  .tool-result { margin-top: 6px; padding: 6px 8px; background: var(--bg); border-left: 3px solid var(--warn); border-radius: 6px; }
+  .tool-result pre { margin: 4px 0 0; max-height: 320px; }
+  a.newtab { color: var(--muted); font-size: 12px; margin-left: 8px; text-decoration: none; }
+  a.newtab:hover { color: var(--accent); text-decoration: underline; }
   .clickable { cursor: pointer; text-decoration: underline; }
   .hidden { display: none; }
   #master-key-banner { border-left: 4px solid var(--warn); }
@@ -114,8 +122,18 @@ async function api(path, opts) {
 function esc(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
+// toObj coerces a JSON field that arrives as an object (json.RawMessage on
+// the Go side) or a JSON string into an object, or null. JSON.parse on an
+// object stringifies it to "[object Object]" and throws, so it is never
+// applied to non-strings.
+function toObj(v) {
+  if (v == null) return null;
+  if (typeof v === "string") { try { return JSON.parse(v); } catch { return null; } }
+  return v;
+}
 function jsonish(s) {
-  try { return JSON.stringify(JSON.parse(s), null, 2); } catch { return String(s || ""); }
+  const o = toObj(s);
+  return o == null ? String(s || "") : JSON.stringify(o, null, 2);
 }
 
 /* ---------- event delegation ----------
@@ -526,11 +544,15 @@ async function loadSessions() {
   if ($("f-until").value) params.set("until", $("f-until").value + "T23:59:59Z");
   if ($("f-q").value) params.set("q", $("f-q").value);
   const data = await api("/api/sessions?" + params.toString());
+  // Leaving the detail view: drop the deep-link hash so a reload lands on the
+  // list instead of re-opening the previous session (replaceState does not
+  // navigate or fire hashchange).
+  if (hashSessionId() != null) history.replaceState(null, "", location.pathname + location.search);
   const list = $("session-list");
   if (!data.sessions.length) { list.innerHTML = `<span class="muted">No sessions.</span>`; return; }
   list.innerHTML = `<table><thead><tr><th>Session</th><th>Created</th><th>Alias / Model</th><th>Requests</th><th>Tools</th><th>Status</th></tr></thead><tbody>
     ${data.sessions.map(s => `<tr>
-      <td><span class="clickable" data-action="open-session" data-id="${esc(s.id)}">${esc(s.id.slice(0, 8))}</span></td>
+      <td><span class="clickable" data-action="open-session" data-id="${esc(s.id)}">${esc(s.id.slice(0, 8))}</span><a class="newtab" href="#session=${encodeURIComponent(s.id)}" target="_blank" rel="noopener" title="Open session in a new tab">new tab</a></td>
       <td class="muted">${esc(s.created_at)}</td>
       <td>${esc(s.first_alias)} / ${esc(s.first_model)}</td>
       <td>${s.request_count}</td><td>${s.tool_call_count}</td>
@@ -539,62 +561,192 @@ async function loadSessions() {
   </tbody></table>`;
   $("session-detail").classList.add("hidden");
 }
+// hashSessionId parses the deep-link hash "#session=<id>" (set by openSession
+// and by the per-row "new tab" anchors) into the session id, or null. A bare
+// "#session=" hash has no id and is treated as null so callers never attempt
+// openSession("") (which would 404). Malformed escapes also return null.
+function hashSessionId() {
+  const h = location.hash;
+  if (!h || h.indexOf("session=") !== 1) return null;
+  let id;
+  try { id = decodeURIComponent(h.slice(9)); } catch { return null; }
+  return id || null;
+}
+// ignoreNextHash guards the hashchange listener against the hash write made by
+// openSession itself (that session is already being rendered).
+let ignoreNextHash = false;
+// Live deep-link navigation: hashchange fires on back/forward, manual URL
+// edits, and same-tab clicks on the "#session=" anchors.
+window.addEventListener("hashchange", () => {
+  if (ignoreNextHash) { ignoreNextHash = false; return; }
+  const id = hashSessionId();
+  if (id == null) return;
+  switchView("traces");
+  openSession(id);
+});
 async function openSession(id) {
   const detail = $("session-detail");
   detail.classList.remove("hidden");
   detail.innerHTML = `<div class="row" style="margin-bottom:10px"><h2 style="margin:0">Session ${esc(id)}</h2>
     <button class="ghost" data-action="export-session" data-id="${esc(id)}">Export JSONL</button>
     <button class="ghost" data-action="back">Back</button></div><div class="muted">Loading…</div>`;
+  // Keep the deep-link hash in sync. The hashchange this triggers is ignored
+  // via ignoreNextHash because the session is already being opened.
+  const target = "#session=" + encodeURIComponent(id);
+  if (location.hash !== target) { ignoreNextHash = true; location.hash = target; }
   const s = await api("/api/sessions/" + encodeURIComponent(id));
   const callsByReq = {};
   (s.tool_calls || []).forEach(c => { (callsByReq[c.request_id] = callsByReq[c.request_id] || []).push(c); });
-  let html = `<div class="muted">${esc(s.created_at)} · alias ${esc(s.first_alias)} · model ${esc(s.first_model)} · ${s.request_count} requests · ${s.tool_call_count} tool calls</div>`;
+  const toolCount = (s.tool_calls || []).length;
+  let html = `<div class="muted">${esc(s.created_at)} · alias ${esc(s.first_alias)} · model ${esc(s.first_model)} · ${s.request_count} requests · ${toolCount} tool calls</div>`;
+  // Render the session as one continuous conversation: each request window
+  // shows only the messages that are NEW in that turn (the common-prefix tail,
+  // mirroring the Go replay), so nothing is re-rendered in later windows.
+  let prevMsgs = [];
   (s.requests || []).forEach(r => {
-    html += chatWindowHtml(r, callsByReq[r.id] || []);
+    const req = safeParse(r.request_json);
+    const msgs = req && Array.isArray(req.messages) ? req.messages : null;
+    let newMsgs = msgs;
+    if (msgs != null) {
+      newMsgs = messagesTail(prevMsgs, msgs);
+      prevMsgs = msgs;
+    }
+    html += chatWindowHtml(r, callsByReq[r.id] || [], newMsgs);
   });
   detail.innerHTML = detail.innerHTML.replace('<div class="muted">Loading…</div>', html);
+  // Move focus to the just-rendered chat.
+  detail.scrollIntoView({ behavior: "smooth", block: "start" });
 }
-// msgText extracts displayable text from a message: string content as-is,
-// array content stringified, and assistant tool_calls rendered as name(args)
-// lines when there is no text content.
-function msgText(m) {
-  const c = m && m.content;
-  if (c != null && c !== "") return Array.isArray(c) ? JSON.stringify(c) : String(c);
-  const tcs = m && m.tool_calls;
-  if (Array.isArray(tcs) && tcs.length) {
-    return tcs.map(tc => { const fn = (tc && tc.function) || {}; return (fn.name || "tool_call") + "(" + (fn.arguments || "") + ")"; }).join("\n");
+// contentText flattens a message.content value into displayable text: strings
+// pass through, array parts (OpenAI multimodal format) contribute their text
+// fields and non-text parts become [image]/[part] placeholders. The array is
+// never JSON.stringified into the bubble.
+function contentText(content) {
+  if (content == null) return "";
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content.map(p => {
+      if (p == null) return "";
+      if (typeof p === "string") return p;
+      if (p.type === "text" && p.text != null) return String(p.text);
+      if (p.type === "image_url") return "[image]";
+      return "[" + String(p.type || "part") + "]";
+    }).join("");
   }
-  return "";
+  return String(content);
 }
-// requestMessageHtml renders one request message as a chat bubble. Roles come
-// from the request payload (provider-controlled), so every value is esc()'d.
+// msgText extracts displayable text from a message via contentText.
+function msgText(m) {
+  return contentText(m && m.content);
+}
+// prettyArgs pretty-prints tool-call arguments, which are a JSON string (or
+// already an object via json.RawMessage); malformed values fall back raw.
+function prettyArgs(args) {
+  if (args == null || args === "") return "";
+  if (typeof args !== "string") {
+    try { return JSON.stringify(args, null, 2); } catch { return String(args); }
+  }
+  try { return JSON.stringify(JSON.parse(args), null, 2); } catch { return args; }
+}
+// canonicalJson returns a whitespace-insensitive encoding of a message content
+// value for prefix comparison (mirrors the Go replay's compactRaw).
+function canonicalJson(v) {
+  try {
+    const s = JSON.stringify(v);
+    return s === undefined ? "\u0000" : s;
+  } catch { return String(v); }
+}
+// sameMessage mirrors the Go replay's sameOpenAIMessage: two messages are the
+// same when role, tool_call_id and content match.
+function sameMessage(a, b) {
+  return !!a && !!b &&
+    (a.role || "") === (b.role || "") &&
+    (a.tool_call_id || "") === (b.tool_call_id || "") &&
+    canonicalJson(a.content) === canonicalJson(b.content);
+}
+// messagesTail mirrors the Go replay's newMessagesTail: returns the tail of cur
+// after the longest common prefix with prev. OpenAI clients resend the full
+// history with every request, so the tail is what is actually new for this
+// turn and only it gets rendered — no message is repeated across windows.
+function messagesTail(prev, cur) {
+  if (!prev || !prev.length || !cur) return cur || [];
+  let n = 0;
+  while (n < prev.length && n < cur.length && sameMessage(prev[n], cur[n])) n++;
+  return cur.slice(n);
+}
+// Chat bubble role classes that exist in CSS; unknown provider roles render
+// with the default assistant (left) alignment.
+const CHAT_ROLES = new Set(["user", "assistant", "system", "tool"]);
+// toolCallHtml renders one assistant tool call as a styled block: name, pretty
+// arguments, and — when the matching tool_calls row is available — the verdict
+// badge and full result snippet. This is the only place a tool call renders,
+// merged into the assistant reply, so each call appears exactly once.
+function toolCallHtml(tc, row) {
+  const fn = (tc && tc.function) || {};
+  const name = tc ? (fn.name || "tool_call") : (row ? row.tool_name : "tool_call");
+  const args = prettyArgs((tc && fn.arguments) || (row && row.arguments_json));
+  let html = `<div class="tool-call"><span class="chat-role">tool call</span><b>${esc(name || "tool_call")}</b>`;
+  if (row) {
+    if (row.verdict) html += ` <span class="verdict ${esc(row.verdict)}">${esc(row.verdict)}</span>`;
+    if (row.result_is_error) html += ` <span class="badge err">error</span>`;
+  }
+  if (args) html += `<pre>${esc(args)}</pre>`;
+  if (row && row.result_snippet) html += `<div class="chat-content">${esc(row.result_snippet)}</div>`;
+  return html + `</div>`;
+}
+// requestMessageHtml renders one request message as a chat bubble with a role
+// label. Assistant tool_calls in replayed history are intentionally NOT
+// rendered as blocks here: the tool call itself renders exactly once, in the
+// assistant reply of the turn that produced it (see responseMessageHtml), so
+// it never duplicates across windows. Roles and content come from the request
+// payload (provider-controlled), so every interpolated value is esc()'d.
 function requestMessageHtml(m) {
   const role = (m && m.role) || "user";
+  let inner = `<span class="chat-role">${esc(role)}</span>`;
   const text = msgText(m);
-  if (role === "system") return `<div class="msg system"><span class="muted">system</span>${text ? " " + esc(text) : ""}</div>`;
-  if (role === "tool") return `<div class="msg tool"><span class="muted">tool</span>${text ? " " + esc(text) : ""}</div>`;
-  if (role === "assistant") return `<div class="msg assistant">${esc(text)}</div>`;
-  return `<div class="msg user">${esc(text)}</div>`;
+  if (text) inner += `<div class="chat-content">${esc(text)}</div>`;
+  else if (role === "assistant") inner += `<div class="chat-content muted">(tool calls)</div>`;
+  return `<div class="msg ${CHAT_ROLES.has(role) ? esc(role) : "assistant"}">${inner}</div>`;
 }
 // responseMessageHtml renders the assistant reply from the reassembled
-// OpenAI-style response_json: only the assistant's textual content renders as
-// a bubble. Assistant tool_calls are intentionally NOT rendered here — they are
-// covered by the reqCalls tool-call blocks in chatWindowHtml (which carry name
-// + arguments + verdict + full result), so a tool-call turn never shows
-// duplicate bubbles.
-function responseMessageHtml(resp) {
-  const msg = resp && resp.choices && resp.choices[0] && resp.choices[0].message;
-  const c = msg && msg.content;
-  if (c == null || c === "") return "";
-  return `<div class="msg assistant">${esc(Array.isArray(c) ? JSON.stringify(c) : String(c))}</div>`;
+// OpenAI-style response_json, merged with the request's tool_calls rows: each
+// tool call appears exactly once, as a block carrying name + pretty arguments
+// + verdict + result snippet (matched to the row by flattened index, mirroring
+// the Go replay's assistantReplayMessage). When the response body is missing
+// but tool rows were captured, the rows are still rendered so the turn is not
+// lost.
+function responseMessageHtml(resp, reqCalls) {
+  const rows = reqCalls || [];
+  const calls = [];
+  let content = "";
+  let hasMsg = false;
+  let callIdx = 0;
+  ((resp && resp.choices) || []).forEach(ch => {
+    const m = ch && ch.message;
+    if (!m) return;
+    hasMsg = true;
+    if (!content) content = msgText(m);
+    (Array.isArray(m.tool_calls) ? m.tool_calls : []).forEach(tc => {
+      calls.push({ tc: tc, row: rows[callIdx] || null });
+      callIdx++;
+    });
+  });
+  if (!calls.length && rows.length) {
+    rows.forEach(row => calls.push({ tc: null, row: row }));
+  }
+  if (!hasMsg && !calls.length) return "";
+  let inner = `<span class="chat-role">assistant</span>`;
+  if (content) inner += `<div class="chat-content">${esc(content)}</div>`;
+  else if (!calls.length) inner += `<div class="chat-content muted">(tool calls)</div>`;
+  calls.forEach(c => { inner += toolCallHtml(c.tc, c.row); });
+  return `<div class="msg assistant">${inner}</div>`;
 }
 // usageSuffix formats the token-usage tail of the request metadata line. usage
 // is provider-controlled, so the returned text is esc()'d before interpolation.
 function usageSuffix(u) {
   if (u == null) return "";
-  let o = u;
-  if (typeof o === "string") { try { o = JSON.parse(o); } catch { return " · usage " + u; } }
-  if (typeof o === "object") {
+  const o = toObj(u);
+  if (o != null && typeof o === "object") {
     const bits = [];
     if (o.prompt_tokens != null) bits.push(o.prompt_tokens + " in");
     if (o.completion_tokens != null) bits.push(o.completion_tokens + " out");
@@ -603,34 +755,35 @@ function usageSuffix(u) {
   }
   return " · usage " + String(u);
 }
-// chatWindowHtml renders one request as a chat window: request messages as
-// bubbles, the assistant reply, tool-call blocks (full result, no truncation),
-// and an expandable details section with the original request/response JSON
-// (never the filtered/redacted payloads) plus metadata.
-function chatWindowHtml(r, reqCalls) {
-  const req = safeParse(r.request_json);
+// chatWindowHtml renders one request as a chat window: only the NEW request
+// messages for this turn (newMsgs — the common-prefix tail computed by
+// openSession, mirroring the Go replay's newMessagesTail), the assistant reply
+// merged with its tool calls (each rendered exactly once), and an expandable
+// details section with the original request/response JSON (never the
+// filtered/redacted payloads) plus metadata.
+function chatWindowHtml(r, reqCalls, newMsgs) {
   const resp = safeParse(r.response_json);
   let html = `<div class="chat-window">`;
-  html += `<h3 style="margin:0 0 4px">Request #${r.seq} <span class="muted">${esc(r.alias)}/${esc(r.model)} · HTTP ${esc(r.status_code)}</span> ${r.truncated ? '<span class="badge warn">truncated</span>' : ""}</h3>`;
+  html += `<h3 style="margin:0 0 4px">Request #${r.seq} <span class="muted">${esc(r.alias)}/${esc(r.model)} · HTTP ${esc(r.status_code)} · ${esc(r.duration_ms)} ms${r.finish_reason ? " · finish " + esc(r.finish_reason) : ""}${esc(usageSuffix(r.usage))}</span>${r.truncated ? ' <span class="badge warn">truncated</span>' : ""}</h3>`;
   html += `<div class="chat">`;
-  ((req && req.messages) || []).forEach(m => { html += requestMessageHtml(m); });
-  html += responseMessageHtml(resp);
-  reqCalls.forEach(c => {
-    html += `<div class="msg tool"><span class="muted">tool</span> <b>${esc(c.tool_name)}</b> <code>${esc(c.arguments_json || "")}</code>` +
-      (c.verdict ? ` <span class="verdict ${esc(c.verdict)}">${esc(c.verdict)}</span>` : "") +
-      (c.result_snippet ? `<div style="margin-top:6px"><span class="muted">result</span> ${esc(c.result_snippet)}</div>` : "") + `</div>`;
-  });
-  if (r.error) html += `<div class="msg tool"><span class="muted">error</span> <b>${esc(r.status_code)}</b> ${esc(r.error.message || r.error)}</div>`;
+  (newMsgs || []).forEach(m => { html += requestMessageHtml(m); });
+  html += responseMessageHtml(resp, reqCalls);
+  if (r.error) {
+    let errMsg = r.error;
+    if (typeof r.error === "object") errMsg = r.error.message || r.error.code || JSON.stringify(r.error);
+    html += `<div class="msg tool"><span class="chat-role">tool</span><div class="tool-result"><b>request error</b><div class="chat-content">${esc(errMsg)}</div></div></div>`;
+  }
   html += `</div>`;
   html += `<details style="margin-top:10px"><summary class="clickable muted">full request/response details</summary>
-    <div class="muted" style="margin:8px 0">alias ${esc(r.alias)} · model ${esc(r.model)} · HTTP ${esc(r.status_code)} · ${esc(r.duration_ms)} ms${esc(usageSuffix(r.usage))}</div>
-    <pre>REQUEST\n${esc(jsonish(r.request_json))}</pre>
+    <pre style="margin-top:8px">REQUEST\n${esc(jsonish(r.request_json))}</pre>
     <pre>RESPONSE\n${esc(jsonish(r.response_json))}</pre>
   </details>`;
   return html + `</div>`;
 }
+// safeParse mirrors the old name but delegates to toObj: it returns the parsed
+// object whether the field is already an object or a JSON string.
 function safeParse(s) {
-  try { return JSON.parse(s); } catch { return null; }
+  return toObj(s);
 }
 async function exportSession(id) {
   window.location.href = "/api/sessions/" + encodeURIComponent(id) + "/export";
@@ -733,6 +886,13 @@ async function ackMasterKey() {
 renderFilters();
 switchView("providers");
 loadMasterKeyBanner();
+// Deep-link support: "#session=<id>" (from the per-row "new tab" anchors or a
+// manually built URL) opens the traces view and loads that session on load.
+const initialSession = hashSessionId();
+if (initialSession) {
+  switchView("traces");
+  openSession(initialSession);
+}
 </script>
 </body>
 </html>
