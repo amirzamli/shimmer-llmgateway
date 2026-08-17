@@ -41,6 +41,14 @@
   .msg.user { border-left-color: var(--accent); }
   .msg.assistant { border-left-color: var(--ok); }
   .msg.tool { border-left-color: var(--warn); }
+  /* chat-style trace windows: user bubbles right, assistant/system/tool left */
+  .chat { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
+  .chat .msg { margin: 0; max-width: 85%; border-left: none; border-radius: 10px; word-break: break-word; }
+  .chat .msg.user { align-self: flex-end; background: rgba(79,140,255,.15); }
+  .chat .msg.assistant { align-self: flex-start; background: rgba(46,204,113,.1); }
+  .chat .msg.system { align-self: flex-start; background: rgba(154,163,178,.12); }
+  .chat .msg.tool { align-self: flex-start; width: 100%; max-width: 100%; background: rgba(241,196,15,.08); }
+  .chat-window { border: 1px solid var(--border); border-radius: 8px; background: var(--bg); padding: 12px 14px; margin: 14px 0; }
   .verdict { font-size: 11px; padding: 1px 8px; border-radius: 10px; }
   .verdict.SUCCESS { background: rgba(46,204,113,.2); color: var(--ok); }
   .verdict.RECOVERABLE { background: rgba(241,196,15,.2); color: var(--warn); }
@@ -81,8 +89,8 @@
 const $ = (id) => document.getElementById(id);
 let templates = [];
 let instances = [];
-// Per-instance quota/balance results from GET /api/quota (internal/quota),
-// shown in the Quota panel of the Providers view.
+// Quota entries from GET /api/quota (internal/quota), rendered inline in the
+// combined Instances panel of the Providers view.
 let quota = [];
 // Per-instance provider model lists and fetch metadata for the alias editor,
 // populated by fetchModels from GET /api/instances/{alias}/models.
@@ -180,32 +188,14 @@ async function loadProviders() {
         </label>
         <button data-action="add-instance">Add</button>
       </div>
+      <details style="margin-top:14px"><summary class="clickable muted">Templates</summary>
+        <table style="margin-top:8px"><thead><tr><th>Name</th><th>Base URL</th><th>Key env</th><th>Models</th></tr></thead>
+        <tbody>
+          ${templates.map(x => `<tr><td>${esc(x.name)}</td><td>${esc(x.base_url)}</td><td>${esc(x.api_key_env)}</td><td class="muted">${esc((x.models||[]).join(", "))}</td></tr>`).join("")}
+        </tbody></table>
+      </details>
     </div>
-    <div class="panel">
-      <h2>Templates</h2>
-      <table><thead><tr><th>Name</th><th>Base URL</th><th>Key env</th><th>Models</th></tr></thead>
-      <tbody>
-        ${templates.map(x => `<tr><td>${esc(x.name)}</td><td>${esc(x.base_url)}</td><td>${esc(x.api_key_env)}</td><td class="muted">${esc((x.models||[]).join(", "))}</td></tr>`).join("")}
-      </tbody></table>
-    </div>
-    <div class="panel">
-      <h2>Instances</h2>
-      <table><thead><tr><th>Alias</th><th>Template</th><th>Key</th><th>Models</th><th>Status</th><th></th></tr></thead>
-      <tbody>
-        ${instances.map(x => `<tr>
-          <td>${esc(x.alias)}</td>
-          <td>${esc(x.template)}</td>
-          <td>${x.key_masked ? esc(x.key_masked) : `<span class="muted">env ${esc(x.api_key_env)}</span>`}</td>
-          <td class="muted">${esc((x.models||[]).join(", "))}</td>
-          <td>${x.disabled ? `<span class="badge disabled">disabled</span>` : `<span class="badge ok">enabled</span>`}</td>
-          <td>
-            <button class="ghost" data-action="edit-instance" data-alias="${esc(x.alias)}">Edit</button>
-            <button class="ghost" data-action="toggle-instance" data-alias="${esc(x.alias)}">${x.disabled ? "Enable" : "Disable"}</button>
-            <button class="danger" data-action="delete-instance" data-alias="${esc(x.alias)}">Delete</button>
-          </td></tr>`).join("")}
-      </tbody></table>
-    </div>
-    ${renderQuota()}
+    ${renderInstances()}
     <div class="panel">
       <h2>Model aliases</h2>
       <div class="muted" style="margin-bottom:12px">Map a short name (e.g. <code>small</code>) to a model on each instance. Saved aliases appear in <code>/v1/models</code> and are expanded when routing unprefixed names.</div>
@@ -275,22 +265,40 @@ async function deleteInstance(alias) {
   } catch (e) { alert(e.message); }
 }
 
-/* ---------- Quota ---------- */
-// renderQuota builds the Quota panel: one row per instance with the latest
-// per-provider balance/usage. Window keys and value labels are
-// provider-controlled, so every interpolated value is esc()'d.
-function renderQuota() {
-  return `<div class="panel" id="quota-panel">
-    <h2>Quota <button class="ghost" data-action="quota-refresh">Refresh</button></h2>
-    <table><thead><tr><th>Alias</th><th>Template</th><th>Quota</th></tr></thead>
+// renderInstances builds the combined Instances + Quota panel (stable id
+// "instances-panel"). Each row shows the instance and its quota inline by
+// matching quota entries on alias, so the standalone Quota panel is gone.
+// refreshQuota re-renders only this panel in place.
+function renderInstances() {
+  return `<div class="panel" id="instances-panel">
+    <h2>Instances <button class="ghost" data-action="quota-refresh">Refresh</button></h2>
+    <table><thead><tr><th>Alias</th><th>Template</th><th>Key</th><th>Models</th><th>Status</th><th>Quota</th><th></th></tr></thead>
     <tbody>
-      ${quota.map(x => `<tr>
+      ${instances.map(x => `<tr>
         <td>${esc(x.alias)}</td>
         <td>${esc(x.template)}</td>
-        <td>${quotaCell(x)}</td>
-      </tr>`).join("")}
+        <td>${x.key_masked ? esc(x.key_masked) : `<span class="muted">env ${esc(x.api_key_env)}</span>`}</td>
+        <td class="muted">${esc((x.models||[]).join(", "))}</td>
+        <td>${x.disabled ? `<span class="badge disabled">disabled</span>` : `<span class="badge ok">enabled</span>`}</td>
+        <td>${quotaCellFor(x.alias)}</td>
+        <td>
+          <button class="ghost" data-action="edit-instance" data-alias="${esc(x.alias)}">Edit</button>
+          <button class="ghost" data-action="toggle-instance" data-alias="${esc(x.alias)}">${x.disabled ? "Enable" : "Disable"}</button>
+          <button class="danger" data-action="delete-instance" data-alias="${esc(x.alias)}">Delete</button>
+        </td></tr>`).join("")}
     </tbody></table>
   </div>`;
+}
+
+/* ---------- Quota ---------- */
+// Quota entries are per-instance and rendered inline in the combined
+// Instances panel (renderInstances). Window keys and value labels are
+// provider-controlled, so every interpolated value is esc()'d.
+// quotaCellFor looks up the quota entry for an instance alias and reuses the
+// quotaCell logic; aliases without a quota row get a muted placeholder.
+function quotaCellFor(alias) {
+  const entry = quota.find(q => q.alias === alias);
+  return entry ? quotaCell(entry) : `<span class="muted">—</span>`;
 }
 // Friendly labels and canonical order for known window keys (OpenCode Go
 // exposes 5h/weekly/monthly). The backend JSON map is alphabetically ordered,
@@ -356,13 +364,14 @@ function resetLabel(resetAtMs) {
   return `Resets in ${hours} hour${hours === 1 ? "" : "s"} ${minutes} minute${minutes === 1 ? "" : "s"}`;
 }
 // refreshQuota re-fetches /api/quota bypassing the server-side TTL cache and
-// re-renders only the Quota panel.
+// re-renders only the combined Instances + Quota panel in place, so the Add
+// instance form and the folded Templates section keep their state.
 async function refreshQuota() {
   try {
     const q = await api("/api/quota?refresh=1");
     quota = (q && q.quota) || [];
-    const pane = $("quota-panel");
-    if (pane) pane.outerHTML = renderQuota();
+    const pane = $("instances-panel");
+    if (pane) pane.outerHTML = renderInstances();
   } catch (e) { alert(e.message); }
 }
 
@@ -541,27 +550,84 @@ async function openSession(id) {
   (s.tool_calls || []).forEach(c => { (callsByReq[c.request_id] = callsByReq[c.request_id] || []).push(c); });
   let html = `<div class="muted">${esc(s.created_at)} · alias ${esc(s.first_alias)} · model ${esc(s.first_model)} · ${s.request_count} requests · ${s.tool_call_count} tool calls</div>`;
   (s.requests || []).forEach(r => {
-    html += `<h3 style="margin:14px 0 4px">Request #${r.seq} <span class="muted">${esc(r.alias)}/${esc(r.model)} · ${r.status_code}</span> ${r.truncated ? '<span class="badge warn">truncated</span>' : ""}</h3>`;
-    const body = safeParse(r.request_json);
-    const msgs = (body && body.messages) || [];
-    msgs.forEach(m => {
-      const content = m.content ? (Array.isArray(m.content) ? JSON.stringify(m.content) : m.content) : "";
-      html += `<div class="msg ${esc(m.role || "")}"><b>${esc(m.role || "")}</b> ${esc(content)}</div>`;
-    });
-    const reqCalls = callsByReq[r.id] || [];
-    if (reqCalls.length) {
-      html += `<h4 style="margin:8px 0 4px">Tool calls</h4>`;
-      reqCalls.forEach(c => {
-        html += `<div class="msg tool"><b>${esc(c.tool_name)}</b> <code>${esc(c.arguments_json || "")}</code>` +
-          (c.verdict ? ` <span class="verdict ${esc(c.verdict)}">${esc(c.verdict)}</span>` : "") +
-          (c.result_snippet ? ` <span class="muted">→ ${esc(c.result_snippet.slice(0, 120))}</span>` : "") + `</div>`;
-      });
-    }
-    if (r.error) html += `<div class="msg tool"><b>error ${r.status_code}</b> ${esc(r.error.message)}</div>`;
-    html += `<details><summary class="clickable muted">raw request/response</summary>
-      <pre>ORIGINAL REQUEST\n${esc(jsonish(r.request_json))}${r.request_filtered_json ? "\n\nFILTERED REQUEST\n" + esc(jsonish(r.request_filtered_json)) : ""}\n\nRESPONSE\n${esc(jsonish(r.response_json))}${r.response_filtered_json ? "\n\nFILTERED RESPONSE\n" + esc(jsonish(r.response_filtered_json)) : ""}</pre></details>`;
+    html += chatWindowHtml(r, callsByReq[r.id] || []);
   });
   detail.innerHTML = detail.innerHTML.replace('<div class="muted">Loading…</div>', html);
+}
+// msgText extracts displayable text from a message: string content as-is,
+// array content stringified, and assistant tool_calls rendered as name(args)
+// lines when there is no text content.
+function msgText(m) {
+  const c = m && m.content;
+  if (c != null && c !== "") return Array.isArray(c) ? JSON.stringify(c) : String(c);
+  const tcs = m && m.tool_calls;
+  if (Array.isArray(tcs) && tcs.length) {
+    return tcs.map(tc => { const fn = (tc && tc.function) || {}; return (fn.name || "tool_call") + "(" + (fn.arguments || "") + ")"; }).join("\n");
+  }
+  return "";
+}
+// requestMessageHtml renders one request message as a chat bubble. Roles come
+// from the request payload (provider-controlled), so every value is esc()'d.
+function requestMessageHtml(m) {
+  const role = (m && m.role) || "user";
+  const text = msgText(m);
+  if (role === "system") return `<div class="msg system"><span class="muted">system</span>${text ? " " + esc(text) : ""}</div>`;
+  if (role === "tool") return `<div class="msg tool"><span class="muted">tool</span>${text ? " " + esc(text) : ""}</div>`;
+  if (role === "assistant") return `<div class="msg assistant">${esc(text)}</div>`;
+  return `<div class="msg user">${esc(text)}</div>`;
+}
+// responseMessageHtml renders the assistant reply from the reassembled
+// OpenAI-style response_json: only the assistant's textual content renders as
+// a bubble. Assistant tool_calls are intentionally NOT rendered here — they are
+// covered by the reqCalls tool-call blocks in chatWindowHtml (which carry name
+// + arguments + verdict + full result), so a tool-call turn never shows
+// duplicate bubbles.
+function responseMessageHtml(resp) {
+  const msg = resp && resp.choices && resp.choices[0] && resp.choices[0].message;
+  const c = msg && msg.content;
+  if (c == null || c === "") return "";
+  return `<div class="msg assistant">${esc(Array.isArray(c) ? JSON.stringify(c) : String(c))}</div>`;
+}
+// usageSuffix formats the token-usage tail of the request metadata line. usage
+// is provider-controlled, so the returned text is esc()'d before interpolation.
+function usageSuffix(u) {
+  if (u == null) return "";
+  let o = u;
+  if (typeof o === "string") { try { o = JSON.parse(o); } catch { return " · usage " + u; } }
+  if (typeof o === "object") {
+    const bits = [];
+    if (o.prompt_tokens != null) bits.push(o.prompt_tokens + " in");
+    if (o.completion_tokens != null) bits.push(o.completion_tokens + " out");
+    if (o.total_tokens != null) bits.push(o.total_tokens + " total");
+    return " · usage " + (bits.length ? bits.join(", ") : JSON.stringify(o));
+  }
+  return " · usage " + String(u);
+}
+// chatWindowHtml renders one request as a chat window: request messages as
+// bubbles, the assistant reply, tool-call blocks (full result, no truncation),
+// and an expandable details section with the original request/response JSON
+// (never the filtered/redacted payloads) plus metadata.
+function chatWindowHtml(r, reqCalls) {
+  const req = safeParse(r.request_json);
+  const resp = safeParse(r.response_json);
+  let html = `<div class="chat-window">`;
+  html += `<h3 style="margin:0 0 4px">Request #${r.seq} <span class="muted">${esc(r.alias)}/${esc(r.model)} · HTTP ${esc(r.status_code)}</span> ${r.truncated ? '<span class="badge warn">truncated</span>' : ""}</h3>`;
+  html += `<div class="chat">`;
+  ((req && req.messages) || []).forEach(m => { html += requestMessageHtml(m); });
+  html += responseMessageHtml(resp);
+  reqCalls.forEach(c => {
+    html += `<div class="msg tool"><span class="muted">tool</span> <b>${esc(c.tool_name)}</b> <code>${esc(c.arguments_json || "")}</code>` +
+      (c.verdict ? ` <span class="verdict ${esc(c.verdict)}">${esc(c.verdict)}</span>` : "") +
+      (c.result_snippet ? `<div style="margin-top:6px"><span class="muted">result</span> ${esc(c.result_snippet)}</div>` : "") + `</div>`;
+  });
+  if (r.error) html += `<div class="msg tool"><span class="muted">error</span> <b>${esc(r.status_code)}</b> ${esc(r.error.message || r.error)}</div>`;
+  html += `</div>`;
+  html += `<details style="margin-top:10px"><summary class="clickable muted">full request/response details</summary>
+    <div class="muted" style="margin:8px 0">alias ${esc(r.alias)} · model ${esc(r.model)} · HTTP ${esc(r.status_code)} · ${esc(r.duration_ms)} ms${esc(usageSuffix(r.usage))}</div>
+    <pre>REQUEST\n${esc(jsonish(r.request_json))}</pre>
+    <pre>RESPONSE\n${esc(jsonish(r.response_json))}</pre>
+  </details>`;
+  return html + `</div>`;
 }
 function safeParse(s) {
   try { return JSON.parse(s); } catch { return null; }
