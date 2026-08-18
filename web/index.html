@@ -599,6 +599,20 @@ async function openSession(id) {
   (s.tool_calls || []).forEach(c => { (callsByReq[c.request_id] = callsByReq[c.request_id] || []).push(c); });
   const toolCount = (s.tool_calls || []).length;
   let html = `<div class="muted">${esc(s.created_at)} · alias ${esc(s.first_alias)} · model ${esc(s.first_model)} · ${s.request_count} requests · ${toolCount} tool calls</div>`;
+  // Pre-pass: collect the FULL tool results from every request's history
+  // (role:"tool" messages, keyed by tool_call_id). The result for request N's
+  // tool call arrives in request N+1's payload, so it must be gathered before
+  // the per-window render loop below.
+  const toolResults = {};
+  (s.requests || []).forEach(r => {
+    const req = safeParse(r.request_json);
+    const msgs = req && Array.isArray(req.messages) ? req.messages : [];
+    msgs.forEach(m => {
+      if (m && m.role === "tool" && m.tool_call_id != null) {
+        toolResults[m.tool_call_id] = contentText(m.content);
+      }
+    });
+  });
   // Render the session as one continuous conversation: each request window
   // shows only the messages that are NEW in that turn (the common-prefix tail,
   // mirroring the Go replay), so nothing is re-rendered in later windows.
@@ -611,7 +625,7 @@ async function openSession(id) {
       newMsgs = messagesTail(prevMsgs, msgs);
       prevMsgs = msgs;
     }
-    html += chatWindowHtml(r, callsByReq[r.id] || [], newMsgs);
+    html += chatWindowHtml(r, callsByReq[r.id] || [], newMsgs, toolResults);
   });
   detail.innerHTML = detail.innerHTML.replace('<div class="muted">Loading…</div>', html);
   // Move focus to the just-rendered chat.
@@ -678,20 +692,25 @@ function messagesTail(prev, cur) {
 // with the default assistant (left) alignment.
 const CHAT_ROLES = new Set(["user", "assistant", "system", "tool"]);
 // toolCallHtml renders one assistant tool call as a styled block: name, pretty
-// arguments, and — when the matching tool_calls row is available — the verdict
-// badge and full result snippet. This is the only place a tool call renders,
-// merged into the assistant reply, so each call appears exactly once.
-function toolCallHtml(tc, row) {
+// arguments, and the tool result (the FULL role:"tool" result matched by the
+// provider tool_call id when available, falling back to the row's truncated
+// result_snippet), plus — when the matching tool_calls row is available — the
+// verdict badge. This is the only place a tool call renders, merged into the
+// assistant reply, so each call appears exactly once.
+function toolCallHtml(tc, row, toolResults) {
   const fn = (tc && tc.function) || {};
   const name = tc ? (fn.name || "tool_call") : (row ? row.tool_name : "tool_call");
   const args = prettyArgs((tc && fn.arguments) || (row && row.arguments_json));
+  const result = (tc && tc.id != null && toolResults && toolResults[tc.id] != null)
+    ? toolResults[tc.id]
+    : (row && row.result_snippet);
   let html = `<div class="tool-call"><span class="chat-role">tool call</span><b>${esc(name || "tool_call")}</b>`;
   if (row) {
     if (row.verdict) html += ` <span class="verdict ${esc(row.verdict)}">${esc(row.verdict)}</span>`;
     if (row.result_is_error) html += ` <span class="badge err">error</span>`;
   }
   if (args) html += `<pre>${esc(args)}</pre>`;
-  if (row && row.result_snippet) html += `<div class="chat-content">${esc(row.result_snippet)}</div>`;
+  if (result) html += `<div class="chat-content">${esc(result)}</div>`;
   return html + `</div>`;
 }
 // requestMessageHtml renders one request message as a chat bubble with a role
@@ -711,11 +730,12 @@ function requestMessageHtml(m) {
 // responseMessageHtml renders the assistant reply from the reassembled
 // OpenAI-style response_json, merged with the request's tool_calls rows: each
 // tool call appears exactly once, as a block carrying name + pretty arguments
-// + verdict + result snippet (matched to the row by flattened index, mirroring
+// + FULL result (from the role:"tool" message matched by tool_call_id, via
+// toolResults) + verdict (matched to the row by flattened index, mirroring
 // the Go replay's assistantReplayMessage). When the response body is missing
 // but tool rows were captured, the rows are still rendered so the turn is not
 // lost.
-function responseMessageHtml(resp, reqCalls) {
+function responseMessageHtml(resp, reqCalls, toolResults) {
   const rows = reqCalls || [];
   const calls = [];
   let content = "";
@@ -738,7 +758,7 @@ function responseMessageHtml(resp, reqCalls) {
   let inner = `<span class="chat-role">assistant</span>`;
   if (content) inner += `<div class="chat-content">${esc(content)}</div>`;
   else if (!calls.length) inner += `<div class="chat-content muted">(tool calls)</div>`;
-  calls.forEach(c => { inner += toolCallHtml(c.tc, c.row); });
+  calls.forEach(c => { inner += toolCallHtml(c.tc, c.row, toolResults); });
   return `<div class="msg assistant">${inner}</div>`;
 }
 // usageSuffix formats the token-usage tail of the request metadata line. usage
@@ -758,16 +778,16 @@ function usageSuffix(u) {
 // chatWindowHtml renders one request as a chat window: only the NEW request
 // messages for this turn (newMsgs — the common-prefix tail computed by
 // openSession, mirroring the Go replay's newMessagesTail), the assistant reply
-// merged with its tool calls (each rendered exactly once), and an expandable
-// details section with the original request/response JSON (never the
-// filtered/redacted payloads) plus metadata.
-function chatWindowHtml(r, reqCalls, newMsgs) {
+// merged with its tool calls (each rendered exactly once, with its FULL result
+// from toolResults), and an expandable details section with the original
+// request/response JSON (never the filtered/redacted payloads) plus metadata.
+function chatWindowHtml(r, reqCalls, newMsgs, toolResults) {
   const resp = safeParse(r.response_json);
   let html = `<div class="chat-window">`;
   html += `<h3 style="margin:0 0 4px">Request #${r.seq} <span class="muted">${esc(r.alias)}/${esc(r.model)} · HTTP ${esc(r.status_code)} · ${esc(r.duration_ms)} ms${r.finish_reason ? " · finish " + esc(r.finish_reason) : ""}${esc(usageSuffix(r.usage))}</span>${r.truncated ? ' <span class="badge warn">truncated</span>' : ""}</h3>`;
   html += `<div class="chat">`;
   (newMsgs || []).forEach(m => { html += requestMessageHtml(m); });
-  html += responseMessageHtml(resp, reqCalls);
+  html += responseMessageHtml(resp, reqCalls, toolResults);
   if (r.error) {
     let errMsg = r.error;
     if (typeof r.error === "object") errMsg = r.error.message || r.error.code || JSON.stringify(r.error);
