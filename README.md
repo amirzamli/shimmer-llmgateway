@@ -39,7 +39,7 @@ UI and the MCP server both read that same store.
 ## Running the gateway
 
 ```
-usage: gateway -config <path>
+usage: gateway -config <path> [-allow-remote]
 ```
 
 The gateway loads `gateway.toml`, opens the SQLite store, and serves:
@@ -48,9 +48,16 @@ The gateway loads `gateway.toml`, opens the SQLite store, and serves:
 | :--- | :------ |
 | `GET /healthz` | health check → `{"status":"ok"}` |
 | `GET /` | embedded HTML UI |
-| `GET/POST/DELETE /api/*` | UI REST surface (config mutations hot-reload) |
+| `GET/POST/PATCH/DELETE /api/*` | UI REST surface (config mutations hot-reload) |
 | `GET /v1/models` | models across all configured instances |
 | `POST /v1/chat/completions` | the only capture surface (stream + non-stream) |
+
+> **Security & binding.** The gateway binds loopback-only by default
+> (`127.0.0.1:8787`); pass `-allow-remote` to permit a non-loopback listen
+> address. The secrets master-key endpoints are localhost-only even then.
+> Provider `base_url` is trusted config: the gateway validates an http(s)
+> scheme + host and never follows redirects, but it will still forward to any
+> configured http(s) host, including local ones (ollama, vllm).
 
 ### Configuration (`gateway.toml`)
 
@@ -98,6 +105,8 @@ Key rules:
   for the key setup, generation flow, and loss warning.
 - Config mutations made through the UI/REST API are written back to
   `gateway.toml` and applied atomically to the next request — no restart.
+  The file is rewritten wholesale, so hand-edited comments and formatting are
+  not preserved.
 
 ### Model aliases
 
@@ -369,3 +378,7 @@ tools are live (`/mcp` or the tools list) and try `list_sessions`.
 - Response plugins run post-reassembly (buffer mode); the store always keeps
   both original and filtered payloads plus `plugins_applied`.
 - Sessions older than `retention_days` are purged at startup and daily.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

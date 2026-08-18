@@ -1,0 +1,30 @@
+# Shimmer LLM Gateway configuration.
+#
+# Copy this file to gateway.toml and edit it. API keys never live here — they
+# come from the api_key_env environment variable or the UI-managed secrets file
+# (<store>.secrets.json, encrypted at rest).
+
+listen = "127.0.0.1:8787"
+store  = "gateway.db"
+retention_days = 30
+
+[settings]
+default_alias = "openai"        # used when a client sends no alias prefix
+request_plugins = []            # global defaults, overridable per instance
+response_plugins = []
+log_payloads = false            # opt-in: log redacted payloads to the console
+
+[providers.openai]              # TEMPLATE: the dropdown entry
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"  # default for the first instance
+models = ["gpt-4o", "gpt-4o-mini"]
+
+[providers.ollama]              # keyless local provider
+base_url = "http://localhost:11434/v1"
+api_key_env = ""
+models = ["llama3.1"]
+
+[[instances]]                   # INSTANCE 1 of openai — alias defaults to "openai"
+alias = "openai"
+template = "openai"
+api_key_env = "OPENAI_API_KEY"

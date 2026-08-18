@@ -53,7 +53,7 @@ Four outcomes:
 | Store              | SQLite (embedded, zero-dep)                         | no external service, trivially inspectable |
 | HTML UI            | embedded in the gateway (`embed.FS`, no build step) | one binary, one port, zero extra services  |
 | Plugins            | built-in Go plugins by name, per-instance ordering  | seam designed now, external loading v2     |
-| Inspection MCP     | Python FastMCP (recommended) or Go                  | FastMCP matches repo conventions           |
+| Inspection MCP     | hand-rolled Go MCP server (no framework)             | all-Go repo; no Python dependency         |
 
 ## 4. Gateway (Go)
 
@@ -63,7 +63,7 @@ Four outcomes:
 | :----- | :---------------------- | :------------------------------------------------- |
 | GET    | `/healthz`              | `{"status":"ok"}` (repo convention)                |
 | GET    | `/`                     | embedded HTML UI                                   |
-| GET/POST/DELETE | `/api/*`      | UI REST surface (§6)                               |
+| GET/POST/PATCH/DELETE | `/api/*`      | UI REST surface (§6)                               |
 | GET    | `/v1/models`            | models across all configured instances             |
 | POST   | `/v1/chat/completions`  | the only capture surface (stream + non-stream)     |
 
@@ -73,8 +73,9 @@ Two-level model — this is what makes multi-account work:
 
 - **Template** = a provider definition: `name`, `base_url`, default
   `api_key_env`, `models`, optional docs. These are the entries in the
-  dropdown. A small set ships built-in (openai, anthropic, ollama, groq,
-  vllm, lite_llm); users can add custom ones via the UI.
+  dropdown. A set ships built-in (openai, anthropic, ollama, groq, vllm,
+  lite_llm, openrouter, deepseek, gemini, mistral, and more); users can add
+  custom ones via the UI.
 - **Instance** = a concrete account of a template: `alias`, `template`,
   `api_key_env`, optional model subset, optional `model_aliases` map. You may
   add the same template many times.
@@ -106,7 +107,8 @@ instances contribute no aliases and are skipped in both expansion and
 `alias/key`, deduped with the real model list (an alias key colliding with a
 literal model is listed once).
 
-**Config (`gateway.toml`):**
+**Config (`gateway.toml`):** the repo ships `gateway.toml.example` — copy it
+to `gateway.toml` and edit (see the Quick start in the README):
 
 ```toml
 listen = "127.0.0.1:8787"
@@ -152,8 +154,10 @@ Per request:
    echoes the effective session id in an `X-Gateway-Session-Id` response
    header so any client can correlate without knowing it in advance.
 2. **Record** the full request body — messages, tool definitions/schemas,
-   sampling params. Redact `Authorization` / API-key headers. Content
-   redaction is a plugin concern (§4.5), not core.
+   sampling params. The gateway captures the body only; it never stores
+   client-supplied headers. The resolved provider key is injected into the
+   outbound request itself and never touches the store. Content redaction is a
+   plugin concern (§4.5), not core.
 3. **Plugins** run before forward (request filters) and on the way back
    (response filters). The store keeps BOTH payloads: what the client sent
    (original) and what the provider actually saw / what the client actually
@@ -213,7 +217,7 @@ type Plugin interface {
 
 ### 4.6 Logging
 
-One-line JSON to stderr, same shape as the repo's `common/logging.py`:
+One-line JSON to stderr (see `internal/logging/logging.go`):
 `{timestamp, level, component, event, fields}` — component `gateway`.
 
 ## 5. Store schema (SQLite)
@@ -289,8 +293,11 @@ small REST API. **Read-only for traces; writes only for config.**
 `GET /api/templates`, `POST /api/templates` · `GET /api/instances`,
 `POST /api/instances`, `PATCH /api/instances/{alias}` (rename/disable/
 `model_aliases`), `DELETE /api/instances/{alias}`,
-`GET /api/instances/{alias}/models` (provider model fetch) · `GET /api/settings`,
-`PATCH /api/settings` · `GET /api/sessions`, `GET /api/sessions/{id}`,
+`GET /api/instances/{alias}/models` (provider model fetch) · `GET /api/quota`
+(per-instance quota/balance) · `GET /api/settings`, `PATCH /api/settings` ·
+`GET /api/secrets/master-key`, `POST /api/secrets/master-key/ack`
+(one-time generated master-key exposure + acknowledge; localhost-only) ·
+`GET /api/sessions`, `GET /api/sessions/{id}`,
 `GET /api/sessions/{id}/export`, `GET /api/status`.
 
 - Config mutations reload atomically — instance changes apply to the next
@@ -337,11 +344,12 @@ neither owns data — SQLite does.
 
 ## 7. Inspection MCP server
 
-Transport: FastMCP stdio + optional streamable-http (mirror the repo's
-`registry_mcp` pattern). Config: `--db <path>`, optional `--session` scoping.
-All tools: `structured_output=False`, return JSON text strings, never throw
-(`CallToolResult(isError=True, ...)`), errors as `{errorCode, message}` —
-identical conventions to `registry_mcp/server.py`.
+Transport: hand-rolled Go MCP server (no framework — a minimal JSON-RPC
+surface: `initialize`, `ping`, `notifications/initialized`, `tools/list`,
+`tools/call`) over stdio (default) and optional streamable-http. Config:
+`--db <path>`, optional `--session` scoping. All tools:
+`structured_output=False`, return JSON text strings, never throw
+(`CallToolResult(isError=True, ...)`); errors as `{errorCode, message}`.
 
 ### 7.1 Generic tools (v1)
 
@@ -351,8 +359,8 @@ identical conventions to `registry_mcp/server.py`.
 | `get_conversation` | `session_id, include_full?` | ordered replay: user/assistant/tool messages, tool calls interleaved with results |
 | `get_request` | `session_id, seq` | raw request/response JSON (both filtered and original) |
 | `list_tool_calls` | `session_id?, tool_name?, verdict?, limit?` | tool-call records |
-| `validate_tool_call` | `session_id, seq` (or tool-call id) | diffs emitted args vs the schemas **declared in the originating request**: `{ok, unknown_params[], missing_required[], type_mismatches[], nearest_params[]}` (rapidfuzz for nearest-param suggestions) |
-| `classify_failure` | `session_id, seq` | SUCCESS / RECOVERABLE / BLIND_ERROR + reason keywords (taxonomy from `docs/agent-hallucination-report.md`) |
+| `validate_tool_call` | `session_id, seq` (or tool-call id) | diffs emitted args vs the schemas **declared in the originating request**: `{ok, unknown_params[], missing_required[], type_mismatches[], nearest_params[]}` (Levenshtein-based nearest-param suggestions, `internal/mcp/analysis.go`) |
+| `classify_failure` | `session_id, seq` | SUCCESS / RECOVERABLE / BLIND_ERROR + reason keywords (internal taxonomy, documented in `internal/mcp/analysis.go`) |
 | `export_session` | `session_id` | JSONL — messages-only replay, the eval-fixture format |
 | `gateway_status` | — | store path, counts, disk usage, retention, configured aliases |
 | `search_conversations` | `query, limit?` | LIKE-based text search over messages (FTS5 later) |
@@ -382,8 +390,7 @@ future tooling all consume one shape.
    verify keys are never mixed.
 4. **UI smoke**: template + instance CRUD via the API, alias auto-naming,
    key masking, session export.
-5. **MCP smoke**: scripted JSON-RPC drive of every inspection tool (mirror
-   `scripts/mcp-smoke.py`).
+5. **MCP smoke**: scripted JSON-RPC drive of every inspection tool over stdio.
 6. **Dogfood**: point opencode / LibreChat at the gateway, run a real agent
    task, then replay + validate it through the UI and the inspection server.
 
