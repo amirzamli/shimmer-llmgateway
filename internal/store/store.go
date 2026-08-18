@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sync"
@@ -35,9 +36,6 @@ var ErrNotFound = errors.New("store: not found")
 
 // ResultSnippetLen is the maximum length of tool_calls.result_snippet.
 const ResultSnippetLen = 512
-
-// maxSessionIDLen caps client-supplied session ids.
-const maxSessionIDLen = 128
 
 // sessionIDRe matches the safe session-id charset — letters, digits, dots,
 // dashes, underscores, colons — capped at 128 characters. Common agent
@@ -105,6 +103,11 @@ type Store struct {
 
 	mu            sync.RWMutex
 	retentionDays int
+	// jsonlPurger, when set, is called with the purge cutoff (same string
+	// used for the SQL deletes) after a successful Purge so the §8 JSONL
+	// append log is trimmed in lockstep with the SQLite rows. It is nil for
+	// standalone store users (the MCP inspector), which have no append log.
+	jsonlPurger JSONLPurger
 }
 
 // Open opens (creating if needed) the SQLite store at path with the §5 schema
@@ -118,6 +121,16 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: resolve %s: %w", path, err)
 	}
+	// modernc.org/sqlite would create the file via the DSN with umask-derived
+	// perms (0644 by default); pre-create it at 0600 so captured payloads in
+	// the DB are never world-readable. The mode only applies on creation — an
+	// existing file's perms are left untouched (the MCP inspector opens the
+	// same DB with the exact same code path).
+	f, err := os.OpenFile(absPath, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("store: create %s: %w", path, err)
+	}
+	f.Close()
 	u := &url.URL{Scheme: "file", Path: absPath}
 	q := u.Query()
 	q.Add("_pragma", "foreign_keys(1)")

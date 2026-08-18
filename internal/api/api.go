@@ -53,9 +53,11 @@ type API struct {
 	updateMu  sync.Mutex
 	startedAt time.Time
 	// modelsMu guards modelsCache, the in-memory provider model-fetch cache
-	// keyed by instance alias (TTL 5 min; invalidated on PATCH/DELETE).
-	modelsMu    sync.Mutex
-	modelsCache map[string]modelsCacheEntry
+	// keyed by instance alias (TTL 5 min; invalidated on PATCH/DELETE), and
+	// modelsFlight, the in-flight fetches that dedupe concurrent misses.
+	modelsMu     sync.Mutex
+	modelsCache  map[string]modelsCacheEntry
+	modelsFlight map[string]*modelsFlightCall
 	// quota fetches per-provider account quota/balance for the UI with its
 	// own getter-based TTL cache (internal/quota; invalidated on PATCH/DELETE).
 	quota *quota.Fetcher
@@ -65,7 +67,7 @@ type API struct {
 // store, and the secrets store. configPath is the gateway.toml path written
 // back on config mutations.
 func New(mgr *config.ConfigManager, configPath string, st *store.Store, sec *secrets.Store, logger *logging.Logger) *API {
-	return &API{mgr: mgr, path: configPath, store: st, sec: sec, logger: logger, startedAt: time.Now(), modelsCache: map[string]modelsCacheEntry{}, quota: quota.New(mgr.Get, sec)}
+	return &API{mgr: mgr, path: configPath, store: st, sec: sec, logger: logger, startedAt: time.Now(), modelsCache: map[string]modelsCacheEntry{}, modelsFlight: map[string]*modelsFlightCall{}, quota: quota.New(mgr.Get, sec)}
 }
 
 // Handler returns the §6.2 router.

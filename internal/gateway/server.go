@@ -15,10 +15,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
-	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"shimmer-llmgateway/internal/api"
@@ -32,6 +33,30 @@ import (
 
 // endpoint is the gateway-facing capture surface path recorded on every row.
 const endpoint = "/v1/chat/completions"
+
+// noRedirect is the CheckRedirect policy for the outbound provider client:
+// return the 3xx response as-is instead of following it, so a redirecting
+// base_url can never redirect a request to an internal endpoint.
+func noRedirect(*http.Request, []*http.Request) error {
+	return http.ErrUseLastResponse
+}
+
+// providerTransport bounds the outbound provider connections. ResponseHeaderTimeout is
+// the key limit: it only bounds the wait for the first response headers, after
+// which a long-running chat stream runs to completion. A total
+// http.Client.Timeout is deliberately NOT set — it would impose a hard
+// deadline on the whole exchange and cut off legitimate long-running streams
+// (and their SSE chunk flow).
+var providerTransport = &http.Transport{
+	DialContext: (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext,
+	TLSHandshakeTimeout:   10 * time.Second,
+	ResponseHeaderTimeout: 30 * time.Second,
+	ExpectContinueTimeout: 1 * time.Second,
+	IdleConnTimeout:       90 * time.Second,
+}
 
 // Server is the capture-only gateway. It serves all configured instances;
 // config swaps are atomic via the ConfigManager.
@@ -65,16 +90,24 @@ func New(cfg *config.ConfigManager, st *store.Store, logger *logging.Logger, con
 	if err != nil {
 		return nil, fmt.Errorf("gateway: open append log %s.jsonl: %w", st.Path(), err)
 	}
+	// Tie the §8 append-log trim into the store's retention purge so the JSONL
+	// never retains data past retention_days (W1). The callback runs under the
+	// append log's own lock, so it cannot race with capture appends.
+	st.SetJSONLPurger(ap.trim)
 	sec, err := secrets.Open(st.Path()+".secrets.json", masterKey)
 	if err != nil {
 		ap.Close()
 		return nil, fmt.Errorf("gateway: open secrets %s.secrets.json: %w", st.Path(), err)
 	}
 	return &Server{
-		cfg:            cfg,
-		store:          st,
-		logger:         logger,
-		client:         &http.Client{},
+		cfg:    cfg,
+		store:  st,
+		logger: logger,
+		// Refuse to follow upstream redirects: a redirecting or malicious
+		// base_url must not bounce the request to an internal endpoint. The
+		// shared transport bounds connection/header timeouts without imposing
+		// a total request deadline (see providerTransport).
+		client:         &http.Client{Transport: providerTransport, CheckRedirect: noRedirect},
 		append:         ap,
 		secrets:        sec,
 		api:            api.New(cfg, configPath, st, sec, logger),
@@ -167,15 +200,30 @@ func (s *Server) accessLog(next http.Handler) http.Handler {
 	})
 }
 
+// indexHTML caches the embedded single-page UI; it is read from embed.FS once
+// (first request) instead of on every request. indexHTML is nil only when the
+// embedded asset is missing.
+var (
+	indexHTMLOnce sync.Once
+	indexHTML     []byte
+)
+
 // handleUI serves the embedded single-page HTML UI (§6.1).
 func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
-	data, err := web.FS.ReadFile("index.html")
-	if err != nil {
+	indexHTMLOnce.Do(func() {
+		data, err := web.FS.ReadFile("index.html")
+		if err != nil {
+			indexHTML = nil
+			return
+		}
+		indexHTML = data
+	})
+	if indexHTML == nil {
 		http.Error(w, "embedded UI missing", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(data)
+	w.Write(indexHTML)
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -396,12 +444,8 @@ func (s *Server) filterRequestBody(ctx context.Context, chain *plugins.Chain, bo
 // reported to the caller. cfg is the request's config snapshot.
 func (s *Server) resolvedKey(cfg *config.Config, inst *config.Instance) (string, error) {
 	env := inst.EffectiveAPIKeyEnv(cfg)
-	if env != "" {
-		if key := os.Getenv(env); key != "" {
-			return key, nil
-		}
-	}
-	if key, ok := s.secrets.Get(inst.Alias); ok {
+	key, ok := s.secrets.ResolveKey(env, inst.Alias)
+	if ok {
 		return key, nil
 	}
 	if env != "" {
@@ -845,10 +889,11 @@ func durationMS(start time.Time) int64 {
 	return time.Since(start).Milliseconds()
 }
 
-// snippet truncates s to n bytes.
+// snippet truncates s to at most n code points without splitting a UTF-8 rune.
 func snippet(s string, n int) string {
-	if len(s) <= n {
+	rs := []rune(s)
+	if len(rs) <= n {
 		return s
 	}
-	return s[:n]
+	return string(rs[:n])
 }

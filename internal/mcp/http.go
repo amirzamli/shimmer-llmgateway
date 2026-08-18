@@ -3,11 +3,17 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"mime"
 	"net/http"
 	"strings"
 	"time"
 )
+
+// maxRequestBody caps the MCP HTTP request body so handleHTTP never reads an
+// unbounded body (a generous cap for JSON-RPC batches; query tool arguments
+// are far smaller).
+const maxRequestBody = 1 << 20 // 1 MiB
 
 // Handler returns the streamable-http handler for the MCP surface: one POST
 // endpoint (any path) accepting application/json. Per the plan, HTTP
@@ -47,8 +53,26 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("MCP-Protocol-Version", negotiatedVersion(r.Header.Get("MCP-Protocol-Version")))
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
+	// Cap the body at maxRequestBody, reading one extra byte to detect
+	// truncation before decoding.
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBody+1))
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(errorResponse(json.RawMessage("null"), codeInvalidRequest,
+			"failed to read request body"))
+		return
+	}
+	if len(body) > maxRequestBody {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(errorResponse(json.RawMessage("null"), codeInvalidRequest,
+			"request body too large"))
+		return
+	}
+
 	var req rpcRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(body, &req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(errorResponse(json.RawMessage("null"), codeParseError,

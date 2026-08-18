@@ -31,6 +31,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -534,8 +535,30 @@ func (e *ValidationError) Error() string {
 	return "invalid config: " + strings.Join(e.Problems, "; ")
 }
 
+// ValidateBaseURL reports whether baseURL is an absolute http(s) URL usable
+// as a provider base. The scheme plus non-empty-host checks reject file://,
+// gopher://, empty, and relative URLs without blocking the legitimately
+// loopback/private providers (ollama, vllm).
+func ValidateBaseURL(baseURL string) error {
+	if baseURL == "" {
+		return errors.New("base_url is required")
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return fmt.Errorf("invalid base_url: %v", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("base_url %q must use scheme http or https", baseURL)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("base_url %q must include a host", baseURL)
+	}
+	return nil
+}
+
 // Validate enforces the §4.2 alias rules and config invariants:
-//   - template names match [a-z0-9._-]+ (they seed auto-named aliases);
+//   - template names match [a-z0-9._-]+ (they seed auto-named aliases) and
+//     template base_url values are absolute http(s) URLs;
 //   - every instance references a known template;
 //   - aliases are unique and match [a-z0-9._-]+;
 //   - per-instance api_key_env values are valid env var names;
@@ -556,6 +579,9 @@ func Validate(c *Config) error {
 		}
 		if !aliasRe.MatchString(name) {
 			problems = append(problems, fmt.Sprintf("template name %q must match %s", name, AliasPattern))
+		}
+		if err := ValidateBaseURL(t.BaseURL); err != nil {
+			problems = append(problems, fmt.Sprintf("template %q: %v", name, err))
 		}
 	}
 

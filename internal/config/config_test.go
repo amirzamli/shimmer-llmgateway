@@ -1086,3 +1086,52 @@ model_aliases = { small = "gpt-4o-mini" }
 		t.Error("original model_aliases gained a key from the clone")
 	}
 }
+
+func TestValidateBaseURL(t *testing.T) {
+	valid := []string{
+		"https://api.openai.com/v1",
+		"http://localhost:11434/v1", // ollama is legitimately loopback
+		"http://127.0.0.1:8000/v1",  // vllm is legitimately loopback
+	}
+	for _, u := range valid {
+		if err := ValidateBaseURL(u); err != nil {
+			t.Errorf("ValidateBaseURL(%q) = %v, want nil", u, err)
+		}
+	}
+
+	invalid := []string{
+		"", // empty
+		"file:///etc/passwd",
+		"gopher://example.com",
+		"ftp://example.com/v1",
+		"//example.com/v1",  // scheme-less
+		"example.com/v1",    // relative
+		"/chat/completions", // relative
+		"https:///no-host",  // no host
+	}
+	for _, u := range invalid {
+		if err := ValidateBaseURL(u); err == nil {
+			t.Errorf("ValidateBaseURL(%q) = nil, want error", u)
+		}
+	}
+}
+
+// TestParseRejectsNonHTTPBaseURL verifies a bad base_url fails at config load
+// with a ValidationError, not at request time.
+func TestParseRejectsNonHTTPBaseURL(t *testing.T) {
+	for _, data := range []string{
+		"[providers.bad]\nbase_url = \"file:///etc/passwd\"\n",
+		"[providers.bad]\nbase_url = \"gopher://example.com\"\n",
+		"[providers.bad]\nbase_url = \"example.com/v1\"\n",
+		"[providers.empty]\n",
+	} {
+		_, err := Parse([]byte(data))
+		if err == nil {
+			t.Fatalf("Parse accepted config with non-http(s) base_url:\n%s", data)
+		}
+		var ve *ValidationError
+		if !errors.As(err, &ve) {
+			t.Errorf("Parse err = %T, want *ValidationError:\n%s", err, data)
+		}
+	}
+}

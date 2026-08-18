@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -28,8 +27,15 @@ const (
 	modelsSourceConfig   = "config"
 )
 
-// modelsClient fetches provider /models endpoints with a bounded timeout.
-var modelsClient = &http.Client{Timeout: modelsFetchTimeout}
+// modelsClient fetches provider /models endpoints with a bounded timeout and
+// redirect-following disabled: a redirecting or malicious provider base_url
+// must not bounce the /models fetch to an internal endpoint.
+var modelsClient = &http.Client{
+	Timeout: modelsFetchTimeout,
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
 
 // instanceModels is the GET /api/instances/{alias}/models response. Source is
 // "provider" when the list came from a live fetch and "config" when the fetch
@@ -50,6 +56,14 @@ type modelsCacheEntry struct {
 	models    []string
 	fetchedAt time.Time
 	err       string
+}
+
+// modelsFlightCall is one in-flight /models fetch for an alias. Concurrent
+// callers that arrive while it runs wait on done and reuse its entry instead of
+// duplicating the upstream call. The entry is set before done is closed.
+type modelsFlightCall struct {
+	done  chan struct{}
+	entry modelsCacheEntry
 }
 
 // handleInstanceModels serves the provider model list for an instance, from the
@@ -83,17 +97,44 @@ func (a *API) fetchInstanceModels(cfg *config.Config, inst *config.Instance, ref
 		a.modelsMu.Unlock()
 	}
 
-	models, fetchedAt, err := a.fetchProviderModels(cfg, inst)
-	entry := modelsCacheEntry{models: models, fetchedAt: fetchedAt, err: err}
-	if err != "" {
-		entry.models = inst.EffectiveModels(cfg)
-	}
+	entry := a.flightModelsFetch(cfg, inst)
 
 	a.modelsMu.Lock()
 	a.modelsCache[inst.Alias] = entry
 	a.modelsMu.Unlock()
 
 	return instanceModels{Alias: inst.Alias, Models: entry.models, Source: modelsSourceOf(entry.err), FetchedAt: entry.fetchedAt, Error: entry.err}
+}
+
+// flightModelsFetch is a small singleflight for provider /models fetches:
+// the first caller for an alias runs the fetch, later callers wait on the
+// shared done channel and reuse its result, so concurrent misses never
+// duplicate the upstream call. golang.org/x/sync/singleflight is deliberately
+// not imported — a mutex + in-flight map is ~20 lines and avoids a new
+// dependency for this one call site.
+func (a *API) flightModelsFetch(cfg *config.Config, inst *config.Instance) modelsCacheEntry {
+	a.modelsMu.Lock()
+	if c, ok := a.modelsFlight[inst.Alias]; ok {
+		a.modelsMu.Unlock()
+		<-c.done
+		return c.entry
+	}
+	c := &modelsFlightCall{done: make(chan struct{})}
+	a.modelsFlight[inst.Alias] = c
+	a.modelsMu.Unlock()
+
+	models, fetchedAt, err := a.fetchProviderModels(cfg, inst)
+	entry := modelsCacheEntry{models: models, fetchedAt: fetchedAt, err: err}
+	if err != "" {
+		entry.models = inst.EffectiveModels(cfg)
+	}
+	c.entry = entry
+	close(c.done)
+
+	a.modelsMu.Lock()
+	delete(a.modelsFlight, inst.Alias)
+	a.modelsMu.Unlock()
+	return entry
 }
 
 // invalidateModels drops the cached fetch result for an alias (called after a
@@ -177,15 +218,8 @@ func (a *API) fetchProviderModels(cfg *config.Config, inst *config.Instance) ([]
 // empty result means the provider is keyless and the fetch proceeds without an
 // Authorization header.
 func (a *API) fetchKey(cfg *config.Config, inst *config.Instance) string {
-	if env := inst.EffectiveAPIKeyEnv(cfg); env != "" {
-		if key := os.Getenv(env); key != "" {
-			return key
-		}
-	}
-	if key, ok := a.sec.Get(inst.Alias); ok {
-		return key
-	}
-	return ""
+	key, _ := a.sec.ResolveKey(inst.EffectiveAPIKeyEnv(cfg), inst.Alias)
+	return key
 }
 
 // modelsSourceOf maps a cached error to the response source: a successful

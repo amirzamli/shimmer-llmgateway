@@ -7,6 +7,26 @@ import (
 	"time"
 )
 
+// JSONLPurger trims the §8 JSONL append log after a retention purge. cutoff is
+// the already-formatted ISO-8601 UTC ms cutoff the SQL deletes used, so the
+// two stores converge on the same boundary. The callback is registered by the
+// gateway (which owns the append log); standalone store users never set it.
+type JSONLPurger func(cutoff string) error
+
+// SetJSONLPurger registers the append-log trimmer invoked after each
+// successful Purge.
+func (s *Store) SetJSONLPurger(p JSONLPurger) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.jsonlPurger = p
+}
+
+func (s *Store) purger() JSONLPurger {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.jsonlPurger
+}
+
 // SetRetention sets the retention window in days used by Purge. Values <= 0
 // disable purging.
 func (s *Store) SetRetention(days int) {
@@ -79,6 +99,16 @@ func (s *Store) Purge(ctx context.Context) (int, error) {
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
+	}
+	// Trim the §8 JSONL append log with the same cutoff so log data does not
+	// outlive its SQLite rows. A trim failure is surfaceable (the startup
+	// purge logs it and the daily loop retries; the SQL purge already
+	// committed, so the next tick's SQL pass is a no-op and only the log
+	// rewrite runs again).
+	if p := s.purger(); p != nil {
+		if err := p(cutoff); err != nil {
+			return int(n), fmt.Errorf("store: purge jsonl: %w", err)
+		}
 	}
 	return int(n), nil
 }

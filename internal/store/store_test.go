@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,6 +20,21 @@ func openTestStore(t *testing.T) *Store {
 	}
 	t.Cleanup(func() { st.Close() })
 	return st
+}
+
+func TestOpenCreatesDBWith0600(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	if _, err := Open(path); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	// W1: the store holds request payloads; it must not be world-readable.
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("store file mode = %o, want 0600", perm)
+	}
 }
 
 func TestNormalizeSessionID(t *testing.T) {
@@ -954,11 +971,17 @@ func TestPurge(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Fresh session B.
+	// Fresh session B. baseRecord's CreatedAt is a fixed date, so both
+	// sessions are pinned relative to now: the assertion must hold on any
+	// date, not just before the fixed date ages past the "old" one.
 	b := baseRecord()
 	b.ID = "req-p2"
 	b.SessionID = "sess-new"
 	mustCapture(t, st, b)
+	newTS := formatTS(time.Now().UTC())
+	if _, err := st.db.Exec(`UPDATE sessions SET created_at = ? WHERE id = ?`, newTS, "sess-new"); err != nil {
+		t.Fatal(err)
+	}
 
 	st.SetRetention(1)
 	n, err := st.Purge(context.Background())
@@ -1001,6 +1024,70 @@ func TestPurge(t *testing.T) {
 	n, err = st.Purge(context.Background())
 	if err != nil || n != 0 {
 		t.Errorf("disabled purge = (%d, %v), want (0, nil)", n, err)
+	}
+}
+
+// TestPurgeInvokesJSONLPurger verifies the §8 append-log trimmer is called
+// with the purge cutoff (W1: JSONL data must not outlive its SQLite rows),
+// and that a failing trimmer surfaces an error.
+func TestPurgeInvokesJSONLPurger(t *testing.T) {
+	st := openTestStore(t)
+
+	old := baseRecord()
+	old.ID = "req-jsonl-old"
+	old.SessionID = "sess-jsonl-old"
+	mustCapture(t, st, old)
+	oldTS := formatTS(time.Now().UTC().AddDate(0, 0, -10))
+	if _, err := st.db.Exec(`UPDATE sessions SET created_at = ? WHERE id = ?`, oldTS, "sess-jsonl-old"); err != nil {
+		t.Fatal(err)
+	}
+	recent := baseRecord()
+	recent.ID = "req-jsonl-new"
+	recent.SessionID = "sess-jsonl-new"
+	mustCapture(t, st, recent)
+	newTS := formatTS(time.Now().UTC())
+	if _, err := st.db.Exec(`UPDATE sessions SET created_at = ? WHERE id = ?`, newTS, "sess-jsonl-new"); err != nil {
+		t.Fatal(err)
+	}
+
+	var cutoffs []string
+	st.SetJSONLPurger(func(cutoff string) error {
+		cutoffs = append(cutoffs, cutoff)
+		return nil
+	})
+	st.SetRetention(1)
+	n, err := st.Purge(context.Background())
+	if err != nil || n != 1 {
+		t.Fatalf("Purge = (%d, %v), want (1, nil)", n, err)
+	}
+	if len(cutoffs) != 1 {
+		t.Fatalf("JSONL purger called %d times, want 1", len(cutoffs))
+	}
+	// The cutoff sits between the old and the newest session timestamp.
+	if !(cutoffs[0] > oldTS && cutoffs[0] <= newTS) {
+		t.Errorf("purge cutoff = %q, want between %q and %q", cutoffs[0], oldTS, newTS)
+	}
+
+	// A failing JSONL trim surfaces as a purge error (the SQL purge already
+	// committed; the daily loop retries just the trim next tick).
+	st.SetJSONLPurger(func(string) error { return errors.New("jsonl boom") })
+	if _, err := st.Purge(context.Background()); err == nil {
+		t.Error("Purge returned nil error despite failing JSONL purger")
+	}
+}
+
+// TestPurgeSkipsJSONLPurgerWhenDisabled verifies the trimmer is not invoked
+// when retention is disabled (no data is being purged).
+func TestPurgeSkipsJSONLPurgerWhenDisabled(t *testing.T) {
+	st := openTestStore(t)
+	st.SetRetention(0)
+	called := false
+	st.SetJSONLPurger(func(string) error { called = true; return nil })
+	if _, err := st.Purge(context.Background()); err != nil {
+		t.Fatalf("Purge: %v", err)
+	}
+	if called {
+		t.Error("JSONL purger called with retention disabled")
 	}
 }
 

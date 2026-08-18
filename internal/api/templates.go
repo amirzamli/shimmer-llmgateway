@@ -60,6 +60,10 @@ func (a *API) handleTemplatesCreate(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "name and base_url are required")
 		return
 	}
+	if err := config.ValidateBaseURL(req.BaseURL); err != nil {
+		a.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return
+	}
 	err := a.update(func(c *config.Config) error {
 		if _, ok := c.Templates[req.Name]; ok {
 			return badRequest("template %q already exists", req.Name)

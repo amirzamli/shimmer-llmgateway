@@ -415,3 +415,40 @@ func TestOpenInvalidJSON(t *testing.T) {
 		t.Fatalf("Open of malformed secrets file = %v, want ErrCorrupted", err)
 	}
 }
+
+// TestResolveKey verifies the single env-var-then-secrets-file key resolution
+// shared by the gateway forward path, the /models fetch, and the quota fetcher.
+func TestResolveKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gateway.db.secrets.json")
+	s, err := Open(path, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Set("openai", "sk-stored"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Env var wins over the secrets file.
+	t.Setenv("TEST_KEY_1", "sk-env")
+	if key, ok := s.ResolveKey("TEST_KEY_1", "openai"); !ok || key != "sk-env" {
+		t.Errorf("ResolveKey with env set = (%q, %v), want (sk-env, true)", key, ok)
+	}
+
+	// 2. Env var unset (or empty) falls back to the secrets file.
+	t.Setenv("TEST_KEY_1", "")
+	if key, ok := s.ResolveKey("TEST_KEY_1", "openai"); !ok || key != "sk-stored" {
+		t.Errorf("ResolveKey with empty env = (%q, %v), want (sk-stored, true)", key, ok)
+	}
+
+	// 3. No env configured (keyless provider) and no stored key → not found.
+	if key, ok := s.ResolveKey("", "ollama"); ok || key != "" {
+		t.Errorf("ResolveKey keyless = (%q, %v), want ('', false)", key, ok)
+	}
+
+	// 4. Env configured-but-unset and no stored key → not found (callers turn
+	//    this into a misconfiguration error).
+	t.Setenv("NEVER_SET_ENV", "")
+	if key, ok := s.ResolveKey("NEVER_SET_ENV", "openai-2"); ok || key != "" {
+		t.Errorf("ResolveKey missing = (%q, %v), want ('', false)", key, ok)
+	}
+}

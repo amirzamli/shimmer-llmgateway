@@ -122,8 +122,16 @@ func New(getCfg func() *config.Config, sec *secrets.Store) *Fetcher {
 	return &Fetcher{
 		getCfg: getCfg,
 		sec:    sec,
-		client: &http.Client{Timeout: quotaFetchTimeout},
-		cache:  map[string]Result{},
+		// Redirect-following is disabled so a redirecting or malicious
+		// provider base_url cannot bounce the quota fetch to an internal
+		// endpoint; the 3xx response is returned as-is.
+		client: &http.Client{
+			Timeout: quotaFetchTimeout,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		cache: map[string]Result{},
 	}
 }
 
@@ -206,15 +214,8 @@ func (f *Fetcher) store(alias string, res Result) {
 // api_key_env environment variable first, then the UI-managed secrets file.
 // An empty result means no key is available anywhere.
 func (f *Fetcher) fetchKey(cfg *config.Config, inst *config.Instance) string {
-	if env := inst.EffectiveAPIKeyEnv(cfg); env != "" {
-		if key := os.Getenv(env); key != "" {
-			return key
-		}
-	}
-	if key, ok := f.sec.Get(inst.Alias); ok {
-		return key
-	}
-	return ""
+	key, _ := f.sec.ResolveKey(inst.EffectiveAPIKeyEnv(cfg), inst.Alias)
+	return key
 }
 
 // fetchWindows GETs the provider's quota endpoint (base_url + strategy

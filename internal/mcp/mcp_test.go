@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -884,6 +885,40 @@ func TestHTTPRejectsNonJSON(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+// TestHTTPRejectsOversizedBody verifies handleHTTP caps the request body
+// instead of reading it unboundedly.
+func TestHTTPRejectsOversizedBody(t *testing.T) {
+	st := openTestStore(t)
+	s := New(st, "")
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	// A body larger than maxRequestBody: pad a valid JSON-RPC request with a
+	// huge string parameter so it would decode fine if read fully.
+	pad := strings.Repeat("x", maxRequestBody+1)
+	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "ping", "params": map[string]any{"pad": pad}})
+	if len(body) <= maxRequestBody {
+		t.Fatalf("test body (%d bytes) does not exceed the cap (%d)", len(body), maxRequestBody)
+	}
+	r, err := http.NewRequest("POST", ts.URL+"/mcp", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	rb, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(rb), "too large") {
+		t.Errorf("error body = %q, want a 'too large' message", rb)
 	}
 }
 

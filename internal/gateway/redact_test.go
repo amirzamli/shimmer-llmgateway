@@ -1,9 +1,13 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"shimmer-llmgateway/internal/plugins"
 )
@@ -151,5 +155,85 @@ func TestRedactPayloadPreservesMetadata(t *testing.T) {
 	}
 	if strings.Contains(string(out), "system instructions") || strings.Contains(string(out), "Paris") {
 		t.Errorf("redacted payload leaked content: %s", out)
+	}
+}
+
+// TestRedactPayloadMasksSensitiveFieldsAndPatterns asserts the console-log
+// redaction shares the plugin redactor's coverage: credential-typed fields are
+// masked wholesale and sensitive strings (email, SSN) are regex-redacted even
+// under keys the field list does not name.
+func TestRedactPayloadMasksSensitiveFieldsAndPatterns(t *testing.T) {
+	in := json.RawMessage(`{"model":"gpt-4o","api_key":"sk-super-secret-key","messages":[{"role":"user","content":"hi"}],"metadata":"contact alice@example.com or ssn 123-45-6789"}`)
+	out := redactPayload(in)
+	m := decodeMap(t, out)
+	if got := m["api_key"]; got != plugins.Redacted {
+		t.Errorf("api_key = %v, want %q", got, plugins.Redacted)
+	}
+	if got := m["metadata"]; got != "contact "+plugins.Redacted+" or ssn "+plugins.Redacted {
+		t.Errorf("metadata = %v, want email and SSN regex-redacted", got)
+	}
+	if s := string(out); strings.Contains(s, "sk-super-secret-key") || strings.Contains(s, "alice@example.com") || strings.Contains(s, "123-45-6789") {
+		t.Errorf("redacted payload leaked a sensitive value: %s", s)
+	}
+}
+
+// TestSnippetTruncatesByRune verifies snippet() never splits a UTF-8 rune when
+// truncating (the previous byte-based slice could cut a multibyte character).
+func TestSnippetTruncatesByRune(t *testing.T) {
+	s := "héllo wörld"
+	if got := snippet(s, 5); got != "héllo" {
+		t.Errorf("snippet(%q, 5) = %q, want %q (cut at a rune boundary)", s, got, "héllo")
+	}
+	if got := snippet(s, len(s)); got != s {
+		t.Errorf("snippet(%q, %d) = %q, want unchanged", s, len(s), got)
+	}
+	// A cut in the middle of a 2-byte rune yields a valid, shorter string
+	// rather than a corrupt UTF-8 suffix.
+	if got := snippet(s, 4); !utf8.ValidString(got) {
+		t.Errorf("snippet(%q, 4) = %q, not valid UTF-8", s, got)
+	}
+}
+
+// TestLogPayloadsMasksSensitiveFields drives the real log_payloads path: the
+// request/response payloads logged to the console must not contain the api_key
+// field value, an email, or an SSN.
+func TestLogPayloadsMasksSensitiveFields(t *testing.T) {
+	cfg := `
+[settings]
+log_payloads = true
+
+[[instances]]
+alias = "openai"
+template = "openai"
+api_key_env = "TEST_KEY_1"
+`
+	provider := newFakeProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"reply to bob@example.com"},"finish_reason":"stop"}]}`))
+	})
+	var buf bytes.Buffer
+	srv, _ := newGatewayServer(t, provider, cfg, defaultEnv, &buf)
+	gs := httptest.NewServer(srv.Handler())
+	t.Cleanup(gs.Close)
+
+	resp := postChat(t, gs, `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"api_key":"sk-super-secret-key","metadata":"contact alice@example.com or 123-45-6789"}`, map[string]string{"X-Session-Id": "sess-redacted-log"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	drainClose(t, resp)
+
+	raw := buf.String()
+	if !strings.Contains(raw, "request_payloads") {
+		t.Fatalf("no request_payloads record logged:\n%s", raw)
+	}
+	for _, leak := range []string{"sk-super-secret-key", "alice@example.com", "bob@example.com", "123-45-6789"} {
+		if strings.Contains(raw, leak) {
+			t.Errorf("log_payloads output leaked %q:\n%s", leak, raw)
+		}
+	}
+	// The log record's fields are JSON-marshaled, so the api_key key appears
+	// with escaped quotes inside the request field.
+	if !strings.Contains(raw, `\"api_key\":\"[REDACTED]\"`) {
+		t.Errorf("log_payloads output did not mask the api_key field:\n%s", raw)
 	}
 }

@@ -7,18 +7,22 @@ import (
 	"context"
 	"encoding/base64"
 	"flag"
+	"fmt"
+	"net"
 	"net/http"
 	"os"
 
 	"shimmer-llmgateway/internal/config"
 	"shimmer-llmgateway/internal/gateway"
 	"shimmer-llmgateway/internal/logging"
+	"shimmer-llmgateway/internal/netutil"
 	"shimmer-llmgateway/internal/secrets"
 	"shimmer-llmgateway/internal/store"
 )
 
 func main() {
 	configPath := flag.String("config", "gateway.toml", "path to gateway.toml")
+	allowRemote := flag.Bool("allow-remote", false, "allow binding to a non-loopback listen address")
 	flag.Parse()
 
 	logger := logging.New(os.Stderr)
@@ -42,6 +46,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	if !*allowRemote {
+		if err := checkLoopbackListen(cfg.Listen); err != nil {
+			logger.Error("listen_rejected", map[string]any{"listen": cfg.Listen, "error": err.Error()})
+			os.Exit(1)
+		}
+	}
+
 	mgr := config.New(cfg)
 
 	st, err := store.Open(cfg.Store)
@@ -52,21 +63,24 @@ func main() {
 	defer st.Close()
 	st.SetRetention(cfg.RetentionDays)
 
-	// Startup retention purge; the daily loop handles subsequent purges.
-	if n, err := st.Purge(context.Background()); err != nil {
-		logger.Warn("retention_purge_failed", map[string]any{"error": err.Error()})
-	} else if n > 0 {
-		logger.Info("retention_purged", map[string]any{"sessions": n})
-	}
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
-	st.StartRetentionLoop(ctx, 0)
 
 	srv, err := gateway.New(mgr, st, logger, *configPath, masterKey)
 	if err != nil {
 		logger.Error("gateway_new_failed", map[string]any{"error": err.Error()})
 		os.Exit(1)
 	}
+
+	// Startup retention purge; the daily loop handles subsequent purges. The
+	// gateway is built first so its §8 append-log trimmer is registered and
+	// the JSONL is purged in lockstep with the SQLite rows.
+	if n, err := st.Purge(context.Background()); err != nil {
+		logger.Warn("retention_purge_failed", map[string]any{"error": err.Error()})
+	} else if n > 0 {
+		logger.Info("retention_purged", map[string]any{"sessions": n})
+	}
+	st.StartRetentionLoop(ctx, 0)
 
 	logger.Info("startup", map[string]any{
 		"listen":         cfg.Listen,
@@ -81,4 +95,23 @@ func main() {
 		logger.Error("listen_failed", map[string]any{"error": err.Error()})
 		os.Exit(1)
 	}
+}
+
+// checkLoopbackListen verifies that a cfg.Listen host:port binds to a
+// loopback address only (localhost, 127.0.0.0/8, ::1). An empty host (":8787")
+// is a wildcard bind over all interfaces, which would silently defeat the
+// loopback-only default, so it is refused here too; -allow-remote overrides
+// both cases.
+func checkLoopbackListen(listen string) error {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return fmt.Errorf("invalid listen address %q: %v", listen, err)
+	}
+	if host == "" {
+		return fmt.Errorf("refusing to bind wildcard address %q; use -allow-remote to override", listen)
+	}
+	if !netutil.IsLoopbackHost(host) {
+		return fmt.Errorf("refusing to bind non-loopback address %q; use -allow-remote to override", listen)
+	}
+	return nil
 }

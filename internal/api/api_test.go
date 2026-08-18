@@ -177,6 +177,39 @@ func TestTemplatesListAndCreate(t *testing.T) {
 	}
 }
 
+// TestTemplatesCreateRejectsBadBaseURL verifies POST /api/templates returns a
+// 400 for non-http(s) base_url values instead of persisting a template whose
+// base_url is unusable or unsafe (file://, gopher://, relative).
+func TestTemplatesCreateRejectsBadBaseURL(t *testing.T) {
+	gs, _, _, _ := newAPITest(t, apiTestTOML, testMasterKey)
+
+	for name, body := range map[string]string{
+		"file":     `{"name":"bad-file","base_url":"file:///etc/passwd"}`,
+		"gopher":   `{"name":"bad-gopher","base_url":"gopher://example.com"}`,
+		"relative": `{"name":"bad-relative","base_url":"example.com/v1"}`,
+		"no-host":  `{"name":"bad-nohost","base_url":"https:///v1"}`,
+	} {
+		status, out := doJSON(t, gs, "POST", "/api/templates", body)
+		if status != http.StatusBadRequest {
+			t.Errorf("%s base_url: POST status = %d, want 400 (body %v)", name, status, out)
+		}
+		if out["code"] != "INVALID_ARGUMENT" {
+			t.Errorf("%s base_url: code = %v, want INVALID_ARGUMENT", name, out["code"])
+		}
+	}
+
+	// The rejected templates never reached the config.
+	status, list := doJSON(t, gs, "GET", "/api/templates", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET /api/templates status = %d", status)
+	}
+	for _, x := range list["templates"].([]any) {
+		if n := x.(map[string]any)["name"]; n == "bad-file" || n == "bad-gopher" || n == "bad-relative" || n == "bad-nohost" {
+			t.Errorf("rejected template %v persisted anyway", n)
+		}
+	}
+}
+
 func TestInstanceCreateAutoNamingAndKeyMasking(t *testing.T) {
 	gs, _, _, cfgPath := newAPITest(t, `
 [settings]
@@ -645,6 +678,66 @@ func TestMasterKeyProvidedKeyNotExposed(t *testing.T) {
 	}
 	if out["key"] != nil {
 		t.Errorf("GET master-key must never return a user-provided key, got %v", out["key"])
+	}
+}
+
+// TestMasterKeyLoopbackGuard verifies the master-key surface rejects requests
+// from non-loopback remote addresses with 403 (defense in depth for
+// -allow-remote deployments) while loopback sources are unaffected. The
+// handlers are invoked directly with a crafted RemoteAddr, so no sockets are
+// bound.
+func TestMasterKeyLoopbackGuard(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "gateway.toml")
+	if err := os.WriteFile(cfgPath, []byte(apiTestTOML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	mgr := config.New(cfg)
+	st, err := store.Open(filepath.Join(dir, "gateway.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	// nil master key → generated-key path, so a loopback GET would be 200.
+	sec, err := secrets.Open(st.Path()+".secrets.json", nil)
+	if err != nil {
+		t.Fatalf("secrets.Open: %v", err)
+	}
+	apiSrv := New(mgr, cfgPath, st, sec, logging.New(io.Discard))
+
+	for _, addr := range []string{"127.0.0.1:4321", "[::1]:4321", "localhost:4321", "127.8.8.8:99"} {
+		req := httptest.NewRequest("GET", "/api/secrets/master-key", nil)
+		req.RemoteAddr = addr
+		rec := httptest.NewRecorder()
+		apiSrv.handleMasterKeyGet(rec, req)
+		if rec.Code == http.StatusForbidden {
+			t.Errorf("GET master-key from %q denied; want allowed", addr)
+		}
+	}
+
+	for _, addr := range []string{"203.0.113.5:4321", "10.0.0.9:4321", "192.168.1.7:4321", "8.8.8.8", ""} {
+		req := httptest.NewRequest("GET", "/api/secrets/master-key", nil)
+		req.RemoteAddr = addr
+		rec := httptest.NewRecorder()
+		apiSrv.handleMasterKeyGet(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("GET master-key from %q status = %d, want 403", addr, rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), "FORBIDDEN") {
+			t.Errorf("GET master-key 403 body = %q, want code FORBIDDEN", rec.Body.String())
+		}
+
+		req = httptest.NewRequest("POST", "/api/secrets/master-key/ack", nil)
+		req.RemoteAddr = addr
+		rec = httptest.NewRecorder()
+		apiSrv.handleMasterKeyAck(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("POST master-key/ack from %q status = %d, want 403", addr, rec.Code)
+		}
 	}
 }
 

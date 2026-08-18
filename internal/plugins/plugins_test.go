@@ -104,9 +104,6 @@ func TestChainErrorWrapsPluginName(t *testing.T) {
 }
 
 func TestRegistryKnownIncludesRedact(t *testing.T) {
-	if !IsKnown("redact") {
-		t.Fatal("redact is not registered")
-	}
 	known := Known()
 	if len(known) != 1 || known[0] != "redact" {
 		t.Errorf("Known() = %v, want [redact]", known)

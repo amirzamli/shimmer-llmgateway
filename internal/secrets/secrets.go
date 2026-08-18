@@ -255,6 +255,21 @@ func (s *Store) Get(alias string) (string, bool) {
 	return key, ok
 }
 
+// ResolveKey returns the provider key for an instance with §6.2 precedence:
+// the api_key_env environment variable first, then this secrets file. envName
+// is the instance's effective api_key_env ("" for keyless providers). ok is
+// false when neither source has a key; callers decide whether that is a
+// keyless provider or a misconfiguration. This is the single implementation
+// shared by the gateway forward path, the /models fetch, and the quota fetcher.
+func (s *Store) ResolveKey(envName, alias string) (key string, ok bool) {
+	if envName != "" {
+		if k := os.Getenv(envName); k != "" {
+			return k, true
+		}
+	}
+	return s.Get(alias)
+}
+
 // Set stores (or replaces) the key for alias and persists atomically.
 func (s *Store) Set(alias, key string) error {
 	if key == "" {

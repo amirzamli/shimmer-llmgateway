@@ -144,9 +144,3 @@ func Known() []string {
 	sort.Strings(names)
 	return names
 }
-
-// IsKnown reports whether name is a registered plugin.
-func IsKnown(name string) bool {
-	_, ok := registry[name]
-	return ok
-}
