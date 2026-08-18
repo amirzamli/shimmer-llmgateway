@@ -3,7 +3,7 @@ package gateway
 import (
 	"encoding/json"
 
-	"shimmer-llmgateway/internal/plugins"
+	"github.com/amirzamli/shimmer-llmgateway/internal/plugins"
 )
 
 // redactPayload returns a copy of payload safe for console logging: values at

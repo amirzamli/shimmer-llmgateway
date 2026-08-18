@@ -9,7 +9,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"shimmer-llmgateway/internal/plugins"
+	"github.com/amirzamli/shimmer-llmgateway/internal/plugins"
 )
 
 // decodeMap unmarshals b into a map, failing the test on invalid JSON.

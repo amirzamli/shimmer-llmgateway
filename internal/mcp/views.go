@@ -3,7 +3,7 @@ package mcp
 import (
 	"encoding/json"
 
-	"shimmer-llmgateway/internal/store"
+	"github.com/amirzamli/shimmer-llmgateway/internal/store"
 )
 
 // sessionSummaryView is a list_sessions item: a session summary with the §5

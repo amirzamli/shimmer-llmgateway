@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"shimmer-llmgateway/internal/store"
+	"github.com/amirzamli/shimmer-llmgateway/internal/store"
 )
 
 // ---------------------------------------------------------------------------

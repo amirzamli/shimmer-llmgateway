@@ -20,7 +20,7 @@ import (
 	"io"
 	"sync"
 
-	"shimmer-llmgateway/internal/store"
+	"github.com/amirzamli/shimmer-llmgateway/internal/store"
 )
 
 // Server is the §7 inspection MCP server. It is safe for concurrent use

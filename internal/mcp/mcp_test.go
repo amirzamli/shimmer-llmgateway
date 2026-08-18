@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"shimmer-llmgateway/internal/store"
+	"github.com/amirzamli/shimmer-llmgateway/internal/store"
 )
 
 // ---------------------------------------------------------------------------

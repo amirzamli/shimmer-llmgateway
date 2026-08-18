@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"shimmer-llmgateway/internal/config"
+	"github.com/amirzamli/shimmer-llmgateway/internal/config"
 )
 
 // Model-fetch tuning: the provider /models list is cached in-memory for

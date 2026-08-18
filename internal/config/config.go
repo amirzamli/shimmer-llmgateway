@@ -42,7 +42,7 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 
-	"shimmer-llmgateway/internal/plugins"
+	"github.com/amirzamli/shimmer-llmgateway/internal/plugins"
 )
 
 // AliasPattern is the §4.2 alias rule: a user alias must match [a-z0-9._-]+.

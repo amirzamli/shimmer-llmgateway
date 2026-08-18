@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"shimmer-llmgateway/internal/store"
+	"github.com/amirzamli/shimmer-llmgateway/internal/store"
 )
 
 // toolError is a tool execution failure surfaced as

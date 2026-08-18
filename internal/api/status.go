@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"time"
 
-	"shimmer-llmgateway/internal/plugins"
+	"github.com/amirzamli/shimmer-llmgateway/internal/plugins"
 )
 
 // handleStatus reports the §7.1 gateway_status surface: store stats, disk

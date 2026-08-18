@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"shimmer-llmgateway/internal/config"
-	"shimmer-llmgateway/internal/logging"
-	"shimmer-llmgateway/internal/store"
+	"github.com/amirzamli/shimmer-llmgateway/internal/config"
+	"github.com/amirzamli/shimmer-llmgateway/internal/logging"
+	"github.com/amirzamli/shimmer-llmgateway/internal/store"
 )
 
 // ---- fake OpenAI-compatible provider ----

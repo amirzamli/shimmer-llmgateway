@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	"shimmer-llmgateway/internal/store"
+	"github.com/amirzamli/shimmer-llmgateway/internal/store"
 )
 
 // completionAssembler reassembles chat.completion.chunk SSE events into a

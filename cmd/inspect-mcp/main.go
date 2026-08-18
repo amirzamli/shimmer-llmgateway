@@ -16,8 +16,8 @@ import (
 	"syscall"
 	"time"
 
-	"shimmer-llmgateway/internal/mcp"
-	"shimmer-llmgateway/internal/store"
+	"github.com/amirzamli/shimmer-llmgateway/internal/mcp"
+	"github.com/amirzamli/shimmer-llmgateway/internal/store"
 )
 
 func main() {

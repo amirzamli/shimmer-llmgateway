@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"shimmer-llmgateway/internal/config"
+	"github.com/amirzamli/shimmer-llmgateway/internal/config"
 )
 
 // settingsView is the §6.2 settings item. Listen and store path are read-only

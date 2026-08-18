@@ -4,7 +4,7 @@ import (
 	"net"
 	"net/http"
 
-	"shimmer-llmgateway/internal/netutil"
+	"github.com/amirzamli/shimmer-llmgateway/internal/netutil"
 )
 
 // requireLoopbackSource rejects requests whose remote address is not a

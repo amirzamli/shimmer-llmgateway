@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"shimmer-llmgateway/internal/store"
+	"github.com/amirzamli/shimmer-llmgateway/internal/store"
 )
 
 // The get_conversation replay. It is built from the stored request/response

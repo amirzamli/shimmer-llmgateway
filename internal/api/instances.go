@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"net/http"
 
-	"shimmer-llmgateway/internal/config"
-	"shimmer-llmgateway/internal/secrets"
+	"github.com/amirzamli/shimmer-llmgateway/internal/config"
+	"github.com/amirzamli/shimmer-llmgateway/internal/secrets"
 )
 
 // instanceView is the §6.2 instance item. KeyMasked is the UI-managed stored

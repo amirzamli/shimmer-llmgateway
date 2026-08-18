@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"shimmer-llmgateway/internal/store"
+	"github.com/amirzamli/shimmer-llmgateway/internal/store"
 )
 
 // appendLog writes the §8 canonical JSONL events to <store>.jsonl during

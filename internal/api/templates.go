@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"sort"
 
-	"shimmer-llmgateway/internal/config"
+	"github.com/amirzamli/shimmer-llmgateway/internal/config"
 )
 
 // templateView is the §6.2 GET /api/templates item.

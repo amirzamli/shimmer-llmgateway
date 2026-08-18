@@ -22,13 +22,13 @@ import (
 	"sync"
 	"time"
 
-	"shimmer-llmgateway/internal/api"
-	"shimmer-llmgateway/internal/config"
-	"shimmer-llmgateway/internal/logging"
-	"shimmer-llmgateway/internal/plugins"
-	"shimmer-llmgateway/internal/secrets"
-	"shimmer-llmgateway/internal/store"
-	"shimmer-llmgateway/web"
+	"github.com/amirzamli/shimmer-llmgateway/internal/api"
+	"github.com/amirzamli/shimmer-llmgateway/internal/config"
+	"github.com/amirzamli/shimmer-llmgateway/internal/logging"
+	"github.com/amirzamli/shimmer-llmgateway/internal/plugins"
+	"github.com/amirzamli/shimmer-llmgateway/internal/secrets"
+	"github.com/amirzamli/shimmer-llmgateway/internal/store"
+	"github.com/amirzamli/shimmer-llmgateway/web"
 )
 
 // endpoint is the gateway-facing capture surface path recorded on every row.

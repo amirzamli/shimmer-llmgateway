@@ -12,12 +12,12 @@ import (
 	"net/http"
 	"os"
 
-	"shimmer-llmgateway/internal/config"
-	"shimmer-llmgateway/internal/gateway"
-	"shimmer-llmgateway/internal/logging"
-	"shimmer-llmgateway/internal/netutil"
-	"shimmer-llmgateway/internal/secrets"
-	"shimmer-llmgateway/internal/store"
+	"github.com/amirzamli/shimmer-llmgateway/internal/config"
+	"github.com/amirzamli/shimmer-llmgateway/internal/gateway"
+	"github.com/amirzamli/shimmer-llmgateway/internal/logging"
+	"github.com/amirzamli/shimmer-llmgateway/internal/netutil"
+	"github.com/amirzamli/shimmer-llmgateway/internal/secrets"
+	"github.com/amirzamli/shimmer-llmgateway/internal/store"
 )
 
 func main() {

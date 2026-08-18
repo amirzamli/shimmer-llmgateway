@@ -1,4 +1,4 @@
-module shimmer-llmgateway
+module github.com/amirzamli/shimmer-llmgateway
 
 go 1.26.2
 

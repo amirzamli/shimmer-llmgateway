@@ -22,8 +22,8 @@ import (
 	"sync"
 	"time"
 
-	"shimmer-llmgateway/internal/config"
-	"shimmer-llmgateway/internal/secrets"
+	"github.com/amirzamli/shimmer-llmgateway/internal/config"
+	"github.com/amirzamli/shimmer-llmgateway/internal/secrets"
 )
 
 const (

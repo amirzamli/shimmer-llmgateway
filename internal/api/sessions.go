@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"shimmer-llmgateway/internal/store"
+	"github.com/amirzamli/shimmer-llmgateway/internal/store"
 )
 
 // sessionSummaryView is the §6.2 GET /api/sessions item.

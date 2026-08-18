@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"shimmer-llmgateway/internal/config"
-	"shimmer-llmgateway/internal/secrets"
+	"github.com/amirzamli/shimmer-llmgateway/internal/config"
+	"github.com/amirzamli/shimmer-llmgateway/internal/secrets"
 )
 
 // quotaTestKey is a fixed 32-byte AES-256 key mirroring the secrets/api test

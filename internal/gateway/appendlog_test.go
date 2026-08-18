@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"shimmer-llmgateway/internal/store"
+	"github.com/amirzamli/shimmer-llmgateway/internal/store"
 )
 
 func testRec(id, session string, seq int, at time.Time) *store.CaptureRecord {
