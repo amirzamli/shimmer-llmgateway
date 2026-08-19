@@ -110,19 +110,12 @@ Key rules:
   records a copy of the seed as the instance's `plugins` line, so defaults are
   explicit in the file. Lists apply to both the request and response sides.
 - **`retry_empty`** is a control plugin: it is valid config (listed by
-  `plugins.Known()` / `GET /api/status`) but never transforms payloads.
-  When active it makes the gateway re-issue an upstream chat-completion
-  request — stream or non-stream — when the provider returns a
-  premature-empty result (no content, no tool calls, empty/missing
-  finish_reason), up to 3 attempts, transparently to the client. It is **on
-  by default for `opencode_go` instances**: the built-in template seeds
-  `plugins = ["retry_empty"]` and the gateway materializes that seed into the
-  config file's `plugins` line for each `opencode_go` instance on write-back,
-  so the default-on is visible in `gateway.toml`. Off everywhere else. At
-  runtime, an instance with **no `plugins` line has retrying OFF**; enable it
-  with `plugins = ["retry_empty"]` and disable it durably with `plugins = []`.
-  Reasoning-only streams never count as content, so an `opencode_go` stream
-  that emits reasoning and then nothing is held and re-issued.
+  `plugins.Known()` / `GET /api/status`) but never transforms payloads. When
+  active it re-issues an upstream request that comes back prematurely empty
+  (no content, no tool calls, empty/missing `finish_reason`), up to 3
+  attempts, so the client sees a completed turn instead of a reasoning trace
+  followed by silence. It is **on by default for `opencode_go` instances** and
+  off everywhere else — see [The `retry_empty` control plugin](#the-retry_empty-control-plugin) below.
 - **API keys never live in `gateway.toml`.** Per-instance keys come from the
   `api_key_env` environment variable, or from the UI-managed secrets file
   `<store>.secrets.json`, which is an AES-256-GCM encrypted envelope (`chmod
@@ -133,6 +126,45 @@ Key rules:
   `gateway.toml` and applied atomically to the next request — no restart.
   The file is rewritten wholesale, so hand-edited comments and formatting are
   not preserved.
+
+#### The `retry_empty` control plugin
+
+**What it is for.** Some providers (notably those behind `opencode_go`
+instances) intermittently stream reasoning/thinking deltas and then stop with
+**no content, no tool calls, and an empty/missing `finish_reason`** — the
+client sees a reasoning trace followed by silence and often needs a manual
+"continue". `retry_empty` re-issues the upstream request when it detects this
+premature-empty result, so the turn completes without operator intervention.
+
+**How it works.** Only a 2xx response whose trimmed message content is empty
+(whitespace-only counts) **and** has no `tool_calls` **and** an empty/missing
+`finish_reason` is considered empty; reasoning/thinking tokens never count as
+content, and `len(choices) == 0` also counts as empty. Transport errors and
+non-2xx responses are **never** retried. On a match the gateway re-issues the
+identical upstream request — stream or non-stream — up to **3 attempts total**
+(constant cap, no config knob). For streams the client sees `200` + SSE
+headers and then nothing until an attempt returns non-empty (the stream is
+held/buffered); the final attempt — even if still empty — is emitted to the
+client. Exactly one capture row is written per client request; retries are
+logged via `logger.Warn` ("retry_empty", with request id, alias, attempt).
+
+**Enabling / disabling.** `retry_empty` is a control plugin: it is valid
+config (listed by `plugins.Known()` / `GET /api/status`) but never transforms
+payloads, and a per-instance `plugins` line applies it to both the request and
+response sides. It is **on by default for `opencode_go` instances**: the
+built-in template seeds `plugins = ["retry_empty"]` and the gateway
+materializes that seed into each instance's `plugins` line on config
+write-back, so the default-on is visible in `gateway.toml`. All other
+templates default **off**. Set `plugins = ["retry_empty"]` on an instance to
+turn it on; an explicit `plugins = []` turns it off durably. An instance with
+**no `plugins` line has retrying OFF** at runtime (it resolves from the global
+`settings.request_plugins` / `settings.response_plugins`, empty by default).
+
+**When it does NOT help.** It does not retry upstream transport errors or
+4xx/5xx responses, and a deterministic provider failure (e.g. context
+exhaustion in a very long session) may still end empty after 3 attempts — the
+empty result is then passed through. It masks intermittent stops; it does not
+cure provider-side aborts.
 
 ### Model aliases
 
@@ -399,8 +431,10 @@ tools are live (`/mcp` or the tools list) and try `list_sessions`.
 ## Notes
 
 - Only `/v1/chat/completions` is proxied; any other `/v1/*` path returns 404.
-- Streaming is forwarded line-by-line (never fully buffered); on client
-  disconnect the captured response is marked `truncated`.
+- Streaming is forwarded line-by-line (never fully buffered) unless a control
+  plugin such as `retry_empty` is active, in which case the stream is
+  held/buffered until the attempt completes; on client disconnect the captured
+  response is marked `truncated`.
 - Response plugins run post-reassembly (buffer mode); the store always keeps
   both original and filtered payloads plus `plugins_applied`.
 - Sessions older than `retention_days` are purged at startup and daily.
