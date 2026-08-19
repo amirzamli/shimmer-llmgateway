@@ -3,6 +3,11 @@
 // runner that applies request plugins in config order before forward and
 // response plugins in config order after reassembly, and the built-in plugin
 // registry (redact in v1; external loading is explicitly out of scope per §2).
+//
+// The package also recognizes a small set of control plugins: names that are
+// valid config values and appear in Known(), but are not transforms. They are
+// never built into the chain; the proxy path reads them directly to flip
+// behavior (currently retry_empty).
 package plugins
 
 import (
@@ -126,8 +131,23 @@ func Register(name string, f Factory) {
 	registry[name] = f
 }
 
-// Build constructs a plugin by name, applying the optional config.
+// controlPlugins are recognized control-flow plugin names: they are valid
+// config values and are listed by Known(), but never build into the transform
+// chain — the proxy path reads them directly (retry_empty flips upstream
+// premature-empty retrying).
+var controlPlugins = map[string]bool{"retry_empty": true}
+
+// IsControl reports whether name is a recognized control plugin (a valid
+// non-transform plugin value).
+func IsControl(name string) bool { return controlPlugins[name] }
+
+// Build constructs a plugin by name, applying the optional config. Control
+// plugin names are rejected here — they are skipped earlier by the proxy's
+// chain builder — as a defensive backstop for any caller that forgets.
 func Build(name string, opts Options) (Plugin, error) {
+	if IsControl(name) {
+		return nil, fmt.Errorf("plugins: %q is a control plugin, not a transform", name)
+	}
 	f, ok := registry[name]
 	if !ok {
 		return nil, fmt.Errorf("plugins: unknown plugin %q; available plugins: %s", name, strings.Join(Known(), ", "))
@@ -135,10 +155,14 @@ func Build(name string, opts Options) (Plugin, error) {
 	return f(opts)
 }
 
-// Known returns the registered plugin names, sorted.
+// Known returns every valid plugin name — registered transforms plus control
+// plugins — sorted.
 func Known() []string {
-	names := make([]string, 0, len(registry))
+	names := make([]string, 0, len(registry)+len(controlPlugins))
 	for n := range registry {
+		names = append(names, n)
+	}
+	for n := range controlPlugins {
 		names = append(names, n)
 	}
 	sort.Strings(names)

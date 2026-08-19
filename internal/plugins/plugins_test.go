@@ -105,8 +105,30 @@ func TestChainErrorWrapsPluginName(t *testing.T) {
 
 func TestRegistryKnownIncludesRedact(t *testing.T) {
 	known := Known()
-	if len(known) != 1 || known[0] != "redact" {
-		t.Errorf("Known() = %v, want [redact]", known)
+	want := []string{"redact", "retry_empty"}
+	if strings.Join(known, ",") != strings.Join(want, ",") {
+		t.Errorf("Known() = %v, want %v", known, want)
+	}
+}
+
+func TestIsControl(t *testing.T) {
+	if !IsControl("retry_empty") {
+		t.Error("IsControl(retry_empty) = false, want true")
+	}
+	for _, name := range []string{"redact", "nope", ""} {
+		if IsControl(name) {
+			t.Errorf("IsControl(%q) = true, want false", name)
+		}
+	}
+}
+
+func TestBuildControlPluginRejected(t *testing.T) {
+	_, err := Build("retry_empty", Options{})
+	if err == nil {
+		t.Fatal("Build(retry_empty) returned no error")
+	}
+	if !strings.Contains(err.Error(), "control plugin") {
+		t.Errorf("error %q should identify the name as a control plugin", err)
 	}
 }
 

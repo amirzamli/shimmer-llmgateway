@@ -23,7 +23,7 @@ func (s *Store) Capture(ctx context.Context, rec *CaptureRecord) error {
 	// the safe charset is replaced with a fresh UUID (see NormalizeSessionID).
 	rec.SessionID = NormalizeSessionID(rec.SessionID)
 	if rec.ID == "" {
-		rec.ID = newID()
+		rec.ID = NewID()
 	}
 	createdAt := rec.CreatedAt
 	if createdAt.IsZero() {

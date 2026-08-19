@@ -83,7 +83,7 @@ func TestParseSpecExample(t *testing.T) {
 	if got := inst2.EffectiveAPIKeyEnv(cfg); got != "OPENAI_API_KEY_2" {
 		t.Errorf("instance 2 api_key_env = %q, want OPENAI_API_KEY_2", got)
 	}
-	if len(inst2.Plugins) != 1 || inst2.Plugins[0] != "redact" {
+	if inst2.Plugins == nil || len(*inst2.Plugins) != 1 || (*inst2.Plugins)[0] != "redact" {
 		t.Errorf("instance 2 plugins = %v, want [redact]", inst2.Plugins)
 	}
 	// Template list is the default for instances without a subset.
@@ -1133,5 +1133,359 @@ func TestParseRejectsNonHTTPBaseURL(t *testing.T) {
 		if !errors.As(err, &ve) {
 			t.Errorf("Parse err = %T, want *ValidationError:\n%s", err, data)
 		}
+	}
+}
+
+// ---- retry_empty: template-level default plugins ----
+
+func TestOpenCodeGoTemplateDefaultsRetryEmpty(t *testing.T) {
+	cfg := mustParse(t, "")
+	tmpl := cfg.Templates["opencode_go"]
+	if tmpl == nil {
+		t.Fatal("built-in opencode_go template missing")
+	}
+	if strings.Join(tmpl.DefaultPlugins, ",") != "retry_empty" {
+		t.Errorf("opencode_go.DefaultPlugins = %v, want [retry_empty]", tmpl.DefaultPlugins)
+	}
+	// The other built-ins carry no template default plugins.
+	if cfg.Templates["openai"].DefaultPlugins != nil {
+		t.Errorf("openai.DefaultPlugins = %v, want nil", cfg.Templates["openai"].DefaultPlugins)
+	}
+}
+
+func TestEffectivePluginsTwoTierResolution(t *testing.T) {
+	// Two tiers: a non-nil instance plugins list (including explicit empty)
+	// wins; otherwise the settings request/response plugins apply. There is no
+	// template-default runtime fallback: an absent instance plugins list never
+	// auto-activates from a template's DefaultPlugins seed.
+	cfg := mustParse(t, `
+[settings]
+request_plugins = ["redact"]
+response_plugins = ["redact"]
+
+[[instances]]
+alias = "a"
+template = "openai"
+
+[[instances]]
+alias = "b"
+template = "openai"
+plugins = []
+
+[[instances]]
+alias = "c"
+template = "openai"
+plugins = ["retry_empty"]
+
+[[instances]]
+alias = "d"
+template = "opencode_go"
+`)
+	for _, tc := range []struct {
+		alias    string
+		wantReq  string
+		wantResp string
+	}{
+		{"a", "redact", "redact"},           // absent → settings defaults
+		{"b", "", ""},                       // explicit empty → off (durable)
+		{"c", "retry_empty", "retry_empty"}, // instance list → active
+		{"d", "redact", "redact"},           // opencode_go absent → settings only, no seed fallback
+	} {
+		inst := cfg.Instances[aliasIndex(t, cfg, tc.alias)]
+		req, resp := inst.EffectivePlugins(cfg)
+		if strings.Join(req, ",") != tc.wantReq || strings.Join(resp, ",") != tc.wantResp {
+			t.Errorf("instance %s effective plugins = (%v, %v), want (%s, %s)", tc.alias, req, resp, tc.wantReq, tc.wantResp)
+		}
+	}
+}
+
+func TestEffectivePluginsOpenCodeGoAbsentOffExplicitOn(t *testing.T) {
+	// The built-in opencode_go template carries the ["retry_empty"] seed, but
+	// the seed is a write-back materialization seed only: an instance with no
+	// plugins line resolves from settings (empty by default → no retry at
+	// runtime), while explicit ["retry_empty"] / [] behave as on / off.
+	cfg := mustParse(t, `
+[settings]
+request_plugins = []
+response_plugins = []
+
+[[instances]]
+alias = "go"
+template = "opencode_go"
+
+[[instances]]
+alias = "go-on"
+template = "opencode_go"
+plugins = ["retry_empty"]
+
+[[instances]]
+alias = "go-off"
+template = "opencode_go"
+plugins = []
+`)
+	req, resp := cfg.Instances[aliasIndex(t, cfg, "go")].EffectivePlugins(cfg)
+	if len(req) != 0 || len(resp) != 0 {
+		t.Errorf("absent opencode_go instance effective plugins = (%v, %v), want empty (no runtime fallback)", req, resp)
+	}
+	req, resp = cfg.Instances[aliasIndex(t, cfg, "go-on")].EffectivePlugins(cfg)
+	if strings.Join(req, ",") != "retry_empty" || strings.Join(resp, ",") != "retry_empty" {
+		t.Errorf("explicit opencode_go instance effective plugins = (%v, %v), want (retry_empty, retry_empty)", req, resp)
+	}
+	req, resp = cfg.Instances[aliasIndex(t, cfg, "go-off")].EffectivePlugins(cfg)
+	if len(req) != 0 || len(resp) != 0 {
+		t.Errorf("explicit-empty opencode_go instance effective plugins = (%v, %v), want empty (durable off)", req, resp)
+	}
+}
+
+func aliasIndex(t *testing.T, cfg *Config, alias string) int {
+	t.Helper()
+	for i, inst := range cfg.Instances {
+		if inst.Alias == alias {
+			return i
+		}
+	}
+	t.Fatalf("instance %q not found", alias)
+	return -1
+}
+
+func TestValidationRetryEmptyAcceptedUnknownRejected(t *testing.T) {
+	// retry_empty is accepted everywhere control plugins are valid names:
+	// settings defaults, template seeds, and per-instance lists.
+	cfg := mustParse(t, `
+[settings]
+request_plugins = ["retry_empty"]
+response_plugins = ["retry_empty"]
+
+[providers.custom]
+base_url = "http://example.com/v1"
+plugins = ["retry_empty"]
+
+[[instances]]
+alias = "x"
+template = "custom"
+plugins = ["retry_empty"]
+`)
+	if len(cfg.Instances) != 1 {
+		t.Fatalf("valid config with retry_empty should parse: %v", cfg.Instances)
+	}
+	// Unknown names are still rejected in a template's default list.
+	_, err := Parse([]byte(`
+[providers.custom]
+base_url = "http://example.com/v1"
+plugins = ["nope"]
+`))
+	if err == nil || !IsValidationError(err) {
+		t.Fatalf("err = %v, want ValidationError", err)
+	}
+	if !strings.Contains(err.Error(), `template "custom" plugins`) {
+		t.Errorf("error %q should identify the template list", err)
+	}
+}
+
+func TestCloneDeepCopiesTemplateDefaultPlugins(t *testing.T) {
+	cfg := mustParse(t, `
+[providers.custom]
+base_url = "http://example.com/v1"
+plugins = ["retry_empty", "redact"]
+`)
+	clone := cfg.Clone()
+	clone.Templates["custom"].DefaultPlugins[0] = "mutated"
+	if got := cfg.Templates["custom"].DefaultPlugins[0]; got != "retry_empty" {
+		t.Errorf("original DefaultPlugins mutated by clone: %v", cfg.Templates["custom"].DefaultPlugins)
+	}
+}
+
+func TestClonePreservesNilVsEmptyPlugins(t *testing.T) {
+	// The `plugins = []` toggle-off must survive an in-process config swap:
+	// Clone keeps an explicitly-empty (non-nil) list non-nil and keeps an
+	// unset (nil) list nil, for both template defaults and instances.
+	cfg := mustParse(t, `
+[providers.empty]
+base_url = "http://example.com/v1"
+models = ["m1"]
+plugins = []
+
+[providers.unset]
+base_url = "http://example.com/v2"
+models = ["m2"]
+
+[[instances]]
+alias = "a"
+template = "empty"
+plugins = []
+
+[[instances]]
+alias = "b"
+template = "unset"
+
+[[instances]]
+alias = "c"
+template = "unset"
+plugins = ["retry_empty"]
+`)
+	cl := cfg.Clone()
+	if cl.Templates["empty"].DefaultPlugins == nil || len(cl.Templates["empty"].DefaultPlugins) != 0 {
+		t.Errorf("template plugins = [] after Clone = %#v, want non-nil empty", cl.Templates["empty"].DefaultPlugins)
+	}
+	if cl.Templates["unset"].DefaultPlugins != nil {
+		t.Errorf("template with no plugins after Clone = %#v, want nil", cl.Templates["unset"].DefaultPlugins)
+	}
+	a := cl.Instances[aliasIndex(t, cl, "a")]
+	if a.Plugins == nil || len(*a.Plugins) != 0 {
+		t.Errorf("instance plugins = [] after Clone = %#v, want non-nil empty", a.Plugins)
+	}
+	b := cl.Instances[aliasIndex(t, cl, "b")]
+	if b.Plugins != nil {
+		t.Errorf("instance with no plugins after Clone = %#v, want nil", b.Plugins)
+	}
+	c := cl.Instances[aliasIndex(t, cl, "c")]
+	if c.Plugins == nil || strings.Join(*c.Plugins, ",") != "retry_empty" {
+		t.Errorf("instance plugins = [retry_empty] after Clone = %#v, want non-nil [retry_empty]", c.Plugins)
+	}
+	// The clone's pointers are deep copies: mutating one never touches the
+	// other (or the original).
+	cl.Instances[aliasIndex(t, cl, "c")].Plugins = nil
+	if cfg.Instances[aliasIndex(t, cfg, "c")].Plugins == nil {
+		t.Error("original instance plugins mutated by clone")
+	}
+	// The toggle-off semantics survive the clone: the cloned empty list still
+	// resolves to an explicit (non-nil) empty chain.
+	req, resp := a.EffectivePlugins(cl)
+	if req == nil || len(req) != 0 || resp == nil || len(resp) != 0 {
+		t.Errorf("effective plugins after Clone of plugins = [] = (%v, %v), want (non-nil empty, non-nil empty)", req, resp)
+	}
+}
+
+func TestMarshalRoundTripsTemplatePlugins(t *testing.T) {
+	cfg := mustParse(t, `
+[providers.custom]
+base_url = "http://example.com/v1"
+models = ["m1"]
+plugins = ["retry_empty", "redact"]
+`)
+	out, err := Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(out), "retry_empty") {
+		t.Errorf("Marshal did not write the template plugins list: %s", out)
+	}
+	re, err := Parse(out)
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	if got := strings.Join(re.Templates["custom"].DefaultPlugins, ","); got != "retry_empty,redact" {
+		t.Errorf("round-tripped DefaultPlugins = %v, want [retry_empty redact]", re.Templates["custom"].DefaultPlugins)
+	}
+}
+
+func TestToRawMaterializesTemplateDefaultPlugins(t *testing.T) {
+	// An opencode_go instance with no plugins line gets the built-in seed
+	// materialized as its own plugins entry on write-back, so the file records
+	// plugins = ["retry_empty"] explicitly (default-on is visible in the
+	// file). The live config is left untouched — the seed applies only to the
+	// persisted form.
+	cfg := mustParse(t, `
+[[instances]]
+alias = "go"
+template = "opencode_go"
+`)
+	raw := cfg.toRaw()
+	if raw.Instances[0].Plugins == nil {
+		t.Fatal("toRaw did not materialize the seed onto the unset opencode_go instance")
+	}
+	if strings.Join(*raw.Instances[0].Plugins, ",") != "retry_empty" {
+		t.Errorf("materialized instance plugins = %v, want [retry_empty]", *raw.Instances[0].Plugins)
+	}
+	if cfg.Instances[0].Plugins != nil {
+		t.Error("toRaw mutated the live config")
+	}
+	out, err := Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(out), "retry_empty") {
+		t.Errorf("Marshal output does not record the materialized default: %s", out)
+	}
+	// A reload of the written file sees the default explicitly active.
+	re, err := Parse(out)
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	inst := re.Instances[aliasIndex(t, re, "go")]
+	if inst.Plugins == nil || strings.Join(*inst.Plugins, ",") != "retry_empty" {
+		t.Errorf("reloaded instance plugins = %#v, want explicit [retry_empty]", inst.Plugins)
+	}
+}
+
+func TestToRawDoesNotOverwriteExplicitEmptyPlugins(t *testing.T) {
+	// An explicit plugins = [] is a durable off-switch: write-back keeps it
+	// empty and never materializes the template seed onto it.
+	cfg := mustParse(t, `
+[[instances]]
+alias = "go"
+template = "opencode_go"
+plugins = []
+`)
+	raw := cfg.toRaw()
+	if raw.Instances[0].Plugins == nil || len(*raw.Instances[0].Plugins) != 0 {
+		t.Errorf("explicit empty plugins after toRaw = %#v, want non-nil empty", raw.Instances[0].Plugins)
+	}
+	out, err := Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(out), "plugins = []") {
+		t.Errorf("Marshal did not preserve the explicit empty off-switch: %s", out)
+	}
+	re, err := Parse(out)
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	inst := re.Instances[aliasIndex(t, re, "go")]
+	if inst.Plugins == nil || len(*inst.Plugins) != 0 {
+		t.Errorf("round-tripped explicit empty plugins = %#v, want non-nil empty", inst.Plugins)
+	}
+}
+
+func TestMarshalParseRoundTripPreservesNilVsEmptyInstancePlugins(t *testing.T) {
+	// The pointer field distinguishes "absent" (nil) from "explicit empty"
+	// (non-nil pointer to []) through a full Marshal → Parse round trip. The
+	// openai template has no DefaultPlugins seed, so toRaw leaves every
+	// instance's pointer state exactly as parsed.
+	cfg := mustParse(t, `
+[[instances]]
+alias = "a"
+template = "openai"
+
+[[instances]]
+alias = "b"
+template = "openai"
+plugins = []
+
+[[instances]]
+alias = "c"
+template = "openai"
+plugins = ["retry_empty"]
+`)
+	out, err := Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	re, err := Parse(out)
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	a := re.Instances[aliasIndex(t, re, "a")]
+	if a.Plugins != nil {
+		t.Errorf("absent instance plugins after round trip = %#v, want nil", a.Plugins)
+	}
+	b := re.Instances[aliasIndex(t, re, "b")]
+	if b.Plugins == nil || len(*b.Plugins) != 0 {
+		t.Errorf("explicit empty instance plugins after round trip = %#v, want non-nil empty", b.Plugins)
+	}
+	c := re.Instances[aliasIndex(t, re, "c")]
+	if c.Plugins == nil || strings.Join(*c.Plugins, ",") != "retry_empty" {
+		t.Errorf("non-empty instance plugins after round trip = %#v, want [retry_empty]", c.Plugins)
 	}
 }

@@ -75,6 +75,7 @@ response_plugins = []
 base_url = 'https://api.openai.com/v1'
 api_key_env = 'OPENAI_API_KEY'  # default for the first instance
 models = ['gpt-4o', 'gpt-4o-mini']
+plugins = ['retry_empty']       # template-level seed (see plugin resolution below)
 
 [[instances]]                   # INSTANCE 1 of openai — alias defaults to "openai"
 alias = 'openai'
@@ -97,6 +98,31 @@ Key rules:
 - **Aliases** are the routing key: a model named `alias/model` routes to that
   instance; an unprefixed model resolves via `settings.default_alias` (then
   the first instance listing it). Auto-naming: `openai`, `openai-2`, `openai-3`, …
+- **Plugin resolution.** Each instance's effective plugin chain comes from the
+  instance's own `plugins` list when set — `plugins = ["retry_empty"]` turns a
+  plugin on, an explicit `plugins = []` turns all plugins off for that account
+  (and survives write-backs) — else the global `settings.request_plugins` /
+  `settings.response_plugins`. An instance with **no `plugins` line resolves
+  from the global settings only, which are empty by default = OFF**: there is
+  no hidden code-level or template-level runtime fallback. A template-level
+  `plugins` list (`[providers.<name>]`) is a *materialization seed*: when an
+  instance of that template has no `plugins` of its own, a config write-back
+  records a copy of the seed as the instance's `plugins` line, so defaults are
+  explicit in the file. Lists apply to both the request and response sides.
+- **`retry_empty`** is a control plugin: it is valid config (listed by
+  `plugins.Known()` / `GET /api/status`) but never transforms payloads.
+  When active it makes the gateway re-issue an upstream chat-completion
+  request — stream or non-stream — when the provider returns a
+  premature-empty result (no content, no tool calls, empty/missing
+  finish_reason), up to 3 attempts, transparently to the client. It is **on
+  by default for `opencode_go` instances**: the built-in template seeds
+  `plugins = ["retry_empty"]` and the gateway materializes that seed into the
+  config file's `plugins` line for each `opencode_go` instance on write-back,
+  so the default-on is visible in `gateway.toml`. Off everywhere else. At
+  runtime, an instance with **no `plugins` line has retrying OFF**; enable it
+  with `plugins = ["retry_empty"]` and disable it durably with `plugins = []`.
+  Reasoning-only streams never count as content, so an `opencode_go` stream
+  that emits reasoning and then nothing is held and re-issued.
 - **API keys never live in `gateway.toml`.** Per-instance keys come from the
   `api_key_env` environment variable, or from the UI-managed secrets file
   `<store>.secrets.json`, which is an AES-256-GCM encrypted envelope (`chmod

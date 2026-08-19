@@ -24,6 +24,22 @@ base_url = "http://localhost:11434/v1"
 api_key_env = ""
 models = ["llama3.1"]
 
+# Template-level `plugins` (optional) is a materialization seed only: when an
+# instance of this template has no `plugins` of its own, a write-back records
+# a copy of this list as the instance's `plugins` line, so the file states the
+# default explicitly. It is never consulted at runtime — an instance with no
+# `plugins` line resolves from the global settings (empty by default = OFF).
+# The built-in opencode_go template seeds ["retry_empty"], a control plugin
+# that re-issues an upstream request when the provider returns a premature-
+# empty result (no content, no tool calls, empty finish) — up to 3 attempts.
+# Enable it per instance with `plugins = ["retry_empty"]`; disable it durably
+# with an explicit `plugins = []`.
+[providers.opencode_go]
+base_url = "https://opencode.ai/zen/go/v1"
+api_key_env = "OPENCODE_API_KEY"
+models = ["kimi-k2", "deepseek-chat"]
+plugins = ["retry_empty"]
+
 [[instances]]                   # INSTANCE 1 of openai — alias defaults to "openai"
 alias = "openai"
 template = "openai"

@@ -17,7 +17,7 @@ type instanceView struct {
 	Template     string            `json:"template"`
 	APIKeyEnv    string            `json:"api_key_env"`
 	Models       []string          `json:"models,omitempty"`
-	Plugins      []string          `json:"plugins,omitempty"`
+	Plugins      *[]string         `json:"plugins,omitempty"`
 	ModelAliases map[string]string `json:"model_aliases,omitempty"`
 	Disabled     bool              `json:"disabled"`
 	KeyMasked    string            `json:"key_masked,omitempty"`
@@ -53,14 +53,16 @@ func (a *API) handleInstancesList(w http.ResponseWriter, r *http.Request) {
 // instanceCreateReq is the POST /api/instances body. An empty alias triggers
 // server-side auto-naming per §4.2 (first instance of a template takes the
 // template name, each further instance the next free name-N). An optional Key
-// is stored in the secrets file (never in gateway.toml).
+// is stored in the secrets file (never in gateway.toml). Plugins mirrors the
+// config semantics: absent/null → unset (the template's materialization seed,
+// if any, is written into the file on write-back); explicit [] → durable off.
 type instanceCreateReq struct {
-	Alias     string   `json:"alias"`
-	Template  string   `json:"template"`
-	APIKeyEnv string   `json:"api_key_env"`
-	Models    []string `json:"models"`
-	Plugins   []string `json:"plugins"`
-	Key       string   `json:"key"`
+	Alias     string    `json:"alias"`
+	Template  string    `json:"template"`
+	APIKeyEnv string    `json:"api_key_env"`
+	Models    []string  `json:"models"`
+	Plugins   *[]string `json:"plugins"`
+	Key       string    `json:"key"`
 }
 
 func (a *API) handleInstancesCreate(w http.ResponseWriter, r *http.Request) {

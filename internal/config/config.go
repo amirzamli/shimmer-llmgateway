@@ -75,7 +75,15 @@ type Template struct {
 	BaseURL   string   `toml:"base_url"`
 	APIKeyEnv string   `toml:"api_key_env"`
 	Models    []string `toml:"models"`
-	Docs      string   `toml:"docs,omitempty"`
+	// DefaultPlugins is a materialization seed only: when an instance of this
+	// template has no plugins of its own (nil), toRaw writes a copy of this
+	// list into the instance's plugins line so the config file records the
+	// default explicitly. It is never consulted at runtime — an instance with
+	// an absent plugins list resolves from settings alone (empty by default =
+	// no plugins). The built-in opencode_go template seeds
+	// ["retry_empty"] so that default-on is visible in the file.
+	DefaultPlugins []string `toml:"plugins,omitempty"`
+	Docs           string   `toml:"docs,omitempty"`
 }
 
 // Instance is a concrete account of a template: alias, template, api_key_env,
@@ -90,8 +98,13 @@ type Instance struct {
 	// name is omitted from write-back.
 	APIKeyEnv string `toml:"api_key_env,omitempty"`
 	// Models optionally narrows the template's model list for this instance.
-	Models  []string `toml:"models,omitempty"`
-	Plugins []string `toml:"plugins,omitempty"`
+	Models []string `toml:"models,omitempty"`
+	// Plugins is the instance's own plugin list. The pointer keeps "absent"
+	// (nil — no plugins line in the file, resolved from settings only, so
+	// nothing is active by default) distinct from "explicit empty" (non-nil
+	// pointer to an empty slice — `plugins = []` in the file, a durable
+	// off-switch). A non-nil list applies to both request and response sides.
+	Plugins *[]string `toml:"plugins,omitempty"`
 	// ModelAliases maps a user-facing alias name to a concrete model string
 	// (e.g. "small" → "gpt-4o-mini"). Keys must match AliasPattern; values are
 	// non-empty concrete model strings (slashes allowed) that are forwarded
@@ -135,8 +148,9 @@ func (c *Config) MarkUserTemplate(name string) {
 
 // Clone returns a copy of the config safe to mutate before a Swap: templates,
 // instances, and the user-template marker set are copied so mutation never
-// races with readers of the live config. The plugins tables are shared
-// read-only (the API never mutates them).
+// races with readers of the live config. Slice fields preserve nil-vs-empty so
+// an explicit `plugins = []` toggle-off survives the copy. The plugins tables
+// are shared read-only (the API never mutates them).
 func (c *Config) Clone() *Config {
 	out := &Config{
 		Listen:        c.Listen,
@@ -150,13 +164,23 @@ func (c *Config) Clone() *Config {
 	}
 	for name, t := range c.Templates {
 		tc := *t
-		tc.Models = append([]string(nil), t.Models...)
+		if t.Models != nil {
+			tc.Models = append([]string{}, t.Models...)
+		}
+		if t.DefaultPlugins != nil {
+			tc.DefaultPlugins = append([]string{}, t.DefaultPlugins...)
+		}
 		out.Templates[name] = &tc
 	}
 	for i, inst := range c.Instances {
 		ic := *inst
-		ic.Models = append([]string(nil), inst.Models...)
-		ic.Plugins = append([]string(nil), inst.Plugins...)
+		if inst.Models != nil {
+			ic.Models = append([]string{}, inst.Models...)
+		}
+		if inst.Plugins != nil {
+			cp := append([]string{}, (*inst.Plugins)...)
+			ic.Plugins = &cp
+		}
 		if inst.ModelAliases != nil {
 			ic.ModelAliases = make(map[string]string, len(inst.ModelAliases))
 			for k, v := range inst.ModelAliases {
@@ -203,13 +227,17 @@ func (inst *Instance) EffectiveAPIKeyEnv(c *Config) string {
 	return ""
 }
 
-// EffectivePlugins returns the instance's plugin chain (§4.5 scope): a
-// non-nil per-instance plugins list overrides the global settings defaults for
-// both sides (empty list = no plugins for that account); nil (unset) falls
-// back to settings.request_plugins / settings.response_plugins.
+// EffectivePlugins returns the instance's plugin chain (§4.5 scope), resolved
+// in two tiers: a non-nil per-instance plugins list wins (empty list = no
+// plugins for that account, a durable off-switch); otherwise the global
+// settings.request_plugins / settings.response_plugins apply. An absent
+// instance plugins list never auto-activates from a template default — the
+// opencode_go default is a write-back materialization seed only (see toRaw),
+// so "no plugins line" means no plugins at runtime (settings are empty by
+// default). An instance list applies to both sides.
 func (inst *Instance) EffectivePlugins(c *Config) (request, response []string) {
 	if inst.Plugins != nil {
-		return inst.Plugins, inst.Plugins
+		return *inst.Plugins, *inst.Plugins
 	}
 	return c.Settings.RequestPlugins, c.Settings.ResponsePlugins
 }
@@ -476,10 +504,11 @@ func builtinTemplates() map[string]Template {
 			Docs:      "https://opencode.ai/docs/zen/",
 		},
 		"opencode_go": {
-			BaseURL:   "https://opencode.ai/zen/go/v1",
-			APIKeyEnv: "OPENCODE_API_KEY",
-			Models:    []string{"kimi-k2", "deepseek-chat"},
-			Docs:      "https://opencode.ai/docs/go/",
+			BaseURL:        "https://opencode.ai/zen/go/v1",
+			APIKeyEnv:      "OPENCODE_API_KEY",
+			Models:         []string{"kimi-k2", "deepseek-chat"},
+			DefaultPlugins: []string{"retry_empty"},
+			Docs:           "https://opencode.ai/docs/go/",
 		},
 	}
 }
@@ -564,8 +593,9 @@ func ValidateBaseURL(baseURL string) error {
 //   - per-instance api_key_env values are valid env var names;
 //   - per-instance model_aliases keys match [a-z0-9._-]+ and values are
 //     non-empty;
-//   - every plugin name (settings defaults or per-instance list) is known to
-//     the built-in registry (§4.5).
+//   - every plugin name (settings defaults, template defaults, or per-instance
+//     list) is known to the built-in registry or the control-plugin set
+//     (§4.5).
 //
 // Instances with an empty alias are auto-named in place: the first instance
 // of a template takes the template name, and each further instance takes the
@@ -650,7 +680,12 @@ func Validate(c *Config) error {
 	checkPlugins(c.Settings.ResponsePlugins, "settings.response_plugins")
 	for _, inst := range c.Instances {
 		if inst.Plugins != nil {
-			checkPlugins(inst.Plugins, fmt.Sprintf("instance %q plugins", inst.Alias))
+			checkPlugins(*inst.Plugins, fmt.Sprintf("instance %q plugins", inst.Alias))
+		}
+	}
+	for name, t := range c.Templates {
+		if t.DefaultPlugins != nil {
+			checkPlugins(t.DefaultPlugins, fmt.Sprintf("template %q plugins", name))
 		}
 	}
 
@@ -735,7 +770,11 @@ func (m *ConfigManager) Update(path string, c *Config) error {
 // rawConfig). Every instance carries its resolved alias explicitly, so the
 // persisted file reflects the live routing state after auto-naming. Only
 // user-defined templates are written back; built-ins are implicit and re-merged
-// on load.
+// on load. An instance whose plugins list is unset (nil) whose template
+// carries DefaultPlugins gets a copy of that seed materialized as its plugins
+// line, so template defaults (e.g. opencode_go's ["retry_empty"]) are recorded
+// explicitly in the file. An explicitly-set instance plugins list — including
+// an explicit empty `plugins = []` off-switch — is never overwritten.
 func (c *Config) toRaw() *rawConfig {
 	raw := &rawConfig{
 		Listen:        c.Listen,
@@ -754,7 +793,14 @@ func (c *Config) toRaw() *rawConfig {
 		}
 	}
 	for i, inst := range c.Instances {
-		raw.Instances[i] = *inst
+		ic := *inst
+		if ic.Plugins == nil {
+			if t, ok := c.Templates[inst.Template]; ok && t.DefaultPlugins != nil {
+				seed := append([]string{}, t.DefaultPlugins...)
+				ic.Plugins = &seed
+			}
+		}
+		raw.Instances[i] = ic
 	}
 	return raw
 }

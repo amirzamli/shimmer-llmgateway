@@ -173,8 +173,10 @@ func (s *Store) createSchema(ctx context.Context) error {
 	return nil
 }
 
-// newID returns a UUIDv4 string.
-func newID() string { return uuid.NewString() }
+// NewID returns a UUIDv4 string. The gateway pre-generates the request id via
+// NewID so retry log lines and the final capture share one id; Capture also
+// falls back to NewID when a record id is left empty.
+func NewID() string { return uuid.NewString() }
 
 // NormalizeSessionID validates a client-supplied session id against the safe
 // charset, returning it verbatim when it matches, and a fresh UUID otherwise
@@ -185,7 +187,7 @@ func NormalizeSessionID(id string) string {
 	if sessionIDRe.MatchString(id) {
 		return id
 	}
-	return newID()
+	return NewID()
 }
 
 // formatTS formats t as the §-wide ISO-8601 UTC timestamp.
