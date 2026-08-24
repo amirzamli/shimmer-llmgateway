@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/amirzamli/shimmer-llmgateway/internal/config"
 	"github.com/amirzamli/shimmer-llmgateway/internal/secrets"
@@ -13,30 +15,88 @@ import (
 // key masked for display ("sk-…abcd"), present only when a key is stored in
 // the secrets file; keys from api_key_env are shown as the env var name.
 type instanceView struct {
-	Alias        string            `json:"alias"`
-	Template     string            `json:"template"`
-	APIKeyEnv    string            `json:"api_key_env"`
-	Models       []string          `json:"models,omitempty"`
-	Plugins      *[]string         `json:"plugins,omitempty"`
-	ModelAliases map[string]string `json:"model_aliases,omitempty"`
-	Disabled     bool              `json:"disabled"`
-	KeyMasked    string            `json:"key_masked,omitempty"`
+	Alias    string `json:"alias"`
+	Template string `json:"template"`
+	// Style is the template's upstream protocol ("openai"/"anthropic").
+	Style string `json:"style"`
+	// BaseURL is the template's endpoint (the resolved custom endpoint for
+	// custom providers), for display.
+	BaseURL        string            `json:"base_url"`
+	APIKeyEnv      string            `json:"api_key_env"`
+	Models         []string          `json:"models,omitempty"`
+	Plugins        *[]string         `json:"plugins,omitempty"`
+	ModelAliases   map[string]string `json:"model_aliases,omitempty"`
+	ModelReasoning map[string]string `json:"model_reasoning,omitempty"`
+	Disabled       bool              `json:"disabled"`
+	Priority       int               `json:"priority,omitempty"`
+	KeyMasked      string            `json:"key_masked,omitempty"`
 }
 
 func (a *API) instanceViewOf(cfg *config.Config, inst *config.Instance) instanceView {
 	v := instanceView{
-		Alias:        inst.Alias,
-		Template:     inst.Template,
-		APIKeyEnv:    inst.EffectiveAPIKeyEnv(cfg),
-		Models:       inst.Models,
-		Plugins:      inst.Plugins,
-		ModelAliases: inst.ModelAliases,
-		Disabled:     inst.Disabled,
+		Alias:          inst.Alias,
+		Template:       inst.Template,
+		APIKeyEnv:      inst.EffectiveAPIKeyEnv(cfg),
+		Models:         inst.Models,
+		Plugins:        inst.Plugins,
+		ModelAliases:   inst.ModelAliases,
+		ModelReasoning: inst.ModelReasoning,
+		Disabled:       inst.Disabled,
+		Priority:       inst.Priority,
+	}
+	if t, ok := cfg.Templates[inst.Template]; ok {
+		v.Style = styleOf(t.Style)
+		v.BaseURL = t.BaseURL
 	}
 	if key, ok := a.sec.Get(inst.Alias); ok {
 		v.KeyMasked = secrets.MaskKey(key)
 	}
 	return v
+}
+
+// instanceOrderReq is the PUT /api/instances/order body: the full desired
+// ordering of every instance alias (enabled and disabled), first = highest
+// priority. The server maps list position to a 1-based instance priority, so
+// a UI drag-reorder becomes the routing order for unprefixed model names
+// without reordering the file or sending N patches.
+type instanceOrderReq struct {
+	Aliases []string `json:"aliases"`
+}
+
+func (a *API) handleInstancesOrder(w http.ResponseWriter, r *http.Request) {
+	var req instanceOrderReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		a.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "invalid body: "+err.Error())
+		return
+	}
+	err := a.update(func(c *config.Config) error {
+		if len(req.Aliases) != len(c.Instances) {
+			return badRequest("order must list every instance alias exactly once (%d aliases, have %d)", len(c.Instances), len(req.Aliases))
+		}
+		pos := make(map[string]int, len(req.Aliases))
+		for i, alias := range req.Aliases {
+			if alias == "" {
+				return badRequest("alias at position %d is empty", i+1)
+			}
+			if _, dup := pos[alias]; dup {
+				return badRequest("duplicate alias %q in order", alias)
+			}
+			pos[alias] = i
+		}
+		for _, inst := range c.Instances {
+			i, ok := pos[inst.Alias]
+			if !ok {
+				return badRequest("order is missing instance %q", inst.Alias)
+			}
+			inst.Priority = i + 1
+		}
+		return nil
+	})
+	if err != nil {
+		a.writeUpdateError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleInstancesList returns every instance in config order, including
@@ -63,6 +123,12 @@ type instanceCreateReq struct {
 	Models    []string  `json:"models"`
 	Plugins   *[]string `json:"plugins"`
 	Key       string    `json:"key"`
+	Priority  int       `json:"priority"`
+	// BaseURL supplies the provider endpoint (required for the custom_openai
+	// / custom_anthropic placeholders, optional as an override for any other
+	// template). It resolves to a concrete per-endpoint custom template before
+	// the instance is created; see resolveCustomTemplate.
+	BaseURL string `json:"base_url"`
 }
 
 func (a *API) handleInstancesCreate(w http.ResponseWriter, r *http.Request) {
@@ -79,10 +145,45 @@ func (a *API) handleInstancesCreate(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "alias must match [a-z0-9._-]+")
 		return
 	}
+	if req.BaseURL != "" {
+		if err := config.ValidateBaseURL(req.BaseURL); err != nil {
+			a.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+			return
+		}
+	}
 
 	err := a.update(func(c *config.Config) error {
-		if _, ok := c.Templates[req.Template]; !ok {
+		src, ok := c.Templates[req.Template]
+		if !ok {
 			return badRequest("unknown template %q", req.Template)
+		}
+		if req.BaseURL != "" {
+			// A custom endpoint resolves to a concrete per-endpoint template
+			// (named after the endpoint, styled after the source template) so
+			// the config file records a real provider the gateway can route
+			// to. The same endpoint+protocol reuses the template; a different
+			// endpoint under the same generated name is refused loudly.
+			name := customTemplateName(src.Style, req.BaseURL)
+			if existing, ok := c.Templates[name]; ok {
+				if existing.BaseURL != req.BaseURL {
+					return badRequest("endpoint template %q already exists with a different base url (%s)", name, existing.BaseURL)
+				}
+				if existing.Style != src.Style {
+					return badRequest("endpoint template %q already exists with a different protocol", name)
+				}
+			} else {
+				c.Templates[name] = &config.Template{
+					Name:    name,
+					BaseURL: req.BaseURL,
+					Style:   src.Style,
+					Models:  append([]string{}, src.Models...),
+				}
+				c.MarkUserTemplate(name)
+			}
+			req.Template = name
+		}
+		if config.IsCustomTemplatePlaceholder(req.Template) {
+			return badRequest("template %q requires an endpoint URL", req.Template)
 		}
 		for _, inst := range c.Instances {
 			if req.Alias != "" && inst.Alias == req.Alias {
@@ -95,6 +196,7 @@ func (a *API) handleInstancesCreate(w http.ResponseWriter, r *http.Request) {
 			APIKeyEnv: req.APIKeyEnv,
 			Models:    req.Models,
 			Plugins:   req.Plugins,
+			Priority:  req.Priority,
 		})
 		return nil
 	})
@@ -120,10 +222,17 @@ func (a *API) handleInstancesCreate(w http.ResponseWriter, r *http.Request) {
 type instancePatchReq struct {
 	Alias    *string `json:"alias"`
 	Disabled *bool   `json:"disabled"`
+	// Priority replaces the routing priority when provided (0 clears it back
+	// to file order). Absent → unchanged.
+	Priority *int `json:"priority"`
 	// ModelAliases replaces the whole model_aliases map when provided (an empty
 	// map clears it); absent → unchanged. Validation runs via config.Validate
 	// in ConfigManager.Update (bad key → 400 INVALID_ARGUMENT).
 	ModelAliases *map[string]string `json:"model_aliases"`
+	// ModelReasoning replaces the whole model_reasoning map when provided (an empty
+	// map clears it); absent → unchanged. Validation runs via config.Validate
+	// in ConfigManager.Update (bad key or invalid effort level → 400 INVALID_ARGUMENT).
+	ModelReasoning *map[string]string `json:"model_reasoning"`
 	// Key replaces the stored key when non-empty and clears it when present
 	// and empty (the UI sends "" to forget a stored key). Absent → unchanged.
 	Key *string `json:"key"`
@@ -164,8 +273,14 @@ func (a *API) handleInstancePatch(w http.ResponseWriter, r *http.Request) {
 		if req.Disabled != nil {
 			inst.Disabled = *req.Disabled
 		}
+		if req.Priority != nil {
+			inst.Priority = *req.Priority
+		}
 		if req.ModelAliases != nil {
 			inst.ModelAliases = *req.ModelAliases
+		}
+		if req.ModelReasoning != nil {
+			inst.ModelReasoning = *req.ModelReasoning
 		}
 		return nil
 	})
@@ -258,4 +373,51 @@ func aliasPatternOK(alias string) bool {
 		}
 	}
 	return true
+}
+
+// customTemplateName derives the concrete template name for a user-supplied
+// endpoint: "custom-" + protocol style + "-" + host (and port when non-default)
+// + first path segments, lowercased and sanitized to [a-z0-9._-]+. The same
+// endpoint+protocol always maps to the same name, so repeated adds reuse the
+// template instead of duplicating it.
+func customTemplateName(style, baseURL string) string {
+	if style == "" {
+		style = config.StyleOpenAI
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		// Unreachable: the caller validated the URL first.
+		return "custom-" + style + "-" + slugify(baseURL)
+	}
+	name := "custom-" + style + "-" + slugify(u.Hostname())
+	if port := u.Port(); port != "" && port != "80" && port != "443" {
+		name += "-" + port
+	}
+	segs := make([]string, 0, 2)
+	for _, s := range strings.Split(strings.Trim(u.Path, "/"), "/") {
+		if s == "" {
+			continue
+		}
+		segs = append(segs, slugify(s))
+		if len(segs) >= 2 {
+			break
+		}
+	}
+	if len(segs) > 0 {
+		name += "-" + strings.Join(segs, "-")
+	}
+	return name
+}
+
+// slugify maps s to lowercase [a-z0-9._-]+ (every other rune becomes '_').
+func slugify(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r + ('a' - 'A')
+		}
+		return '_'
+	}, s)
 }

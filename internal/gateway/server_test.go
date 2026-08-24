@@ -1300,3 +1300,44 @@ model_aliases = { small = "gpt-4o" }
 		t.Error("models list missing the prefixed alias id openai-2/small")
 	}
 }
+
+func TestChatCompletionsRewritesReasoningEffort(t *testing.T) {
+	provider := newFakeProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"c1","choices":[{"message":{"role":"assistant","content":"hello"}}]}`))
+	})
+	instances := `
+[[instances]]
+alias = "openai"
+template = "openai"
+api_key_env = "TEST_KEY_1"
+model_aliases = { small = "deepseek-reasoner" }
+model_reasoning = { small = "high" }
+`
+	gs, _ := newGatewayTest(t, provider, instances, defaultEnv)
+
+	// Post chat with unprefixed model alias "small"
+	resp := postChat(t, gs, `{"model":"small","messages":[{"role":"user","content":"hi"}]}`, map[string]string{"X-Session-Id": "sess-reasoning"})
+	drainClose(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	seen := provider.requests()
+	if len(seen) != 1 {
+		t.Fatalf("provider requests = %d, want 1", len(seen))
+	}
+	var sent struct {
+		Model           string `json:"model"`
+		ReasoningEffort string `json:"reasoning_effort"`
+	}
+	if err := json.Unmarshal(seen[0].Body, &sent); err != nil {
+		t.Fatalf("provider body: %v", err)
+	}
+	if sent.Model != "deepseek-reasoner" {
+		t.Errorf("upstream model = %q, want deepseek-reasoner", sent.Model)
+	}
+	if sent.ReasoningEffort != "high" {
+		t.Errorf("upstream reasoning_effort = %q, want high", sent.ReasoningEffort)
+	}
+}

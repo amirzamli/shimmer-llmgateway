@@ -48,6 +48,11 @@ import (
 // AliasPattern is the §4.2 alias rule: a user alias must match [a-z0-9._-]+.
 const AliasPattern = `[a-z0-9._-]+`
 
+// genericReasoningLevels is the fallback effort vocabulary for models whose
+// template advertises no ModelReasoningOptions. Sentinels ("", "default",
+// "none") are handled separately in Validate.
+var genericReasoningLevels = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
+
 var (
 	aliasRe   = regexp.MustCompile(`^` + AliasPattern + `$`)
 	envNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -71,10 +76,16 @@ type Settings struct {
 // dropdown entry). Name is the map key, not a TOML body field, so it is
 // excluded from write-back serialization.
 type Template struct {
-	Name      string   `toml:"-"`
-	BaseURL   string   `toml:"base_url"`
-	APIKeyEnv string   `toml:"api_key_env"`
-	Models    []string `toml:"models"`
+	Name      string `toml:"-"`
+	BaseURL   string `toml:"base_url"`
+	APIKeyEnv string `toml:"api_key_env"`
+	// Style selects the upstream protocol the gateway speaks to this
+	// provider: "" or "openai" (default) forwards to <base_url>/chat/completions
+	// with an OpenAI-shaped body, "anthropic" forwards to <base_url>/messages
+	// and translates between the OpenAI chat format and the Anthropic Messages
+	// API (request, non-stream response, and SSE stream).
+	Style  string   `toml:"style,omitempty"`
+	Models []string `toml:"models"`
 	// DefaultPlugins is a materialization seed only: when an instance of this
 	// template has no plugins of its own (nil), toRaw writes a copy of this
 	// list into the instance's plugins line so the config file records the
@@ -83,7 +94,12 @@ type Template struct {
 	// no plugins). The built-in opencode_go template seeds
 	// ["retry_empty"] so that default-on is visible in the file.
 	DefaultPlugins []string `toml:"plugins,omitempty"`
-	Docs           string   `toml:"docs,omitempty"`
+	// ModelReasoningOptions advertises the valid reasoning effort levels per
+	// model of this template (e.g. "deepseek-v4-pro": ["high", "max"]). It is
+	// data only: validation consults it to gate instance model_reasoning
+	// values, and the UI renders the advertised list per model.
+	ModelReasoningOptions map[string][]string `toml:"model_reasoning_options,omitempty"`
+	Docs                  string              `toml:"docs,omitempty"`
 }
 
 // Instance is a concrete account of a template: alias, template, api_key_env,
@@ -110,10 +126,18 @@ type Instance struct {
 	// non-empty concrete model strings (slashes allowed) that are forwarded
 	// verbatim — expansion is single-level, never re-expanded.
 	ModelAliases map[string]string `toml:"model_aliases,omitempty"`
+	// ModelReasoning maps a model alias name to a reasoning effort level
+	// (e.g. "small" → "high", "medium", "low", "none", "default", "").
+	ModelReasoning map[string]string `toml:"model_reasoning,omitempty"`
 	// Disabled excludes the instance from routing (§6.2 PATCH disable). It
 	// stays visible to the API/UI for re-enabling, but Resolve never routes
 	// to it.
 	Disabled bool `toml:"disabled,omitempty"`
+	// Priority orders unprefixed (alias-key) model resolution: a lower value
+	// wins over a higher one, and any instance with an explicit priority wins
+	// over instances without one (0 = unset), which keep config file order
+	// among themselves. Prefixed "alias/model" routing is never affected.
+	Priority int `toml:"priority,omitempty"`
 }
 
 // Config is a parsed and validated gateway.toml.
@@ -170,6 +194,12 @@ func (c *Config) Clone() *Config {
 		if t.DefaultPlugins != nil {
 			tc.DefaultPlugins = append([]string{}, t.DefaultPlugins...)
 		}
+		if t.ModelReasoningOptions != nil {
+			tc.ModelReasoningOptions = make(map[string][]string, len(t.ModelReasoningOptions))
+			for k, v := range t.ModelReasoningOptions {
+				tc.ModelReasoningOptions[k] = append([]string{}, v...)
+			}
+		}
 		out.Templates[name] = &tc
 	}
 	for i, inst := range c.Instances {
@@ -185,6 +215,12 @@ func (c *Config) Clone() *Config {
 			ic.ModelAliases = make(map[string]string, len(inst.ModelAliases))
 			for k, v := range inst.ModelAliases {
 				ic.ModelAliases[k] = v
+			}
+		}
+		if inst.ModelReasoning != nil {
+			ic.ModelReasoning = make(map[string]string, len(inst.ModelReasoning))
+			for k, v := range inst.ModelReasoning {
+				ic.ModelReasoning[k] = v
 			}
 		}
 		out.Instances[i] = &ic
@@ -270,6 +306,43 @@ func (c *Config) Instance(alias string) (*Instance, bool) {
 	return inst, ok
 }
 
+// EffectiveReasoning returns the configured reasoning level for the given model key
+// (e.g. "small" -> "high"). Returns "" if not set or default.
+func (inst *Instance) EffectiveReasoning(modelKey string) string {
+	if inst.ModelReasoning == nil {
+		return ""
+	}
+	r := inst.ModelReasoning[modelKey]
+	if r == "default" {
+		return ""
+	}
+	return r
+}
+
+// routingOrder returns the instances ordered for unprefixed model resolution:
+// instances with an explicit Priority come first (ascending priority), then
+// instances without one in config file order. The sort is stable, so file
+// order is preserved within each group. Disabled instances are not filtered
+// here — callers skip them.
+func (c *Config) routingOrder() []*Instance {
+	out := make([]*Instance, len(c.Instances))
+	copy(out, c.Instances)
+	sort.SliceStable(out, func(i, j int) bool {
+		pi, pj := out[i].Priority, out[j].Priority
+		switch {
+		case pi > 0 && pj > 0:
+			return pi < pj
+		case pi > 0:
+			return true
+		case pj > 0:
+			return false
+		default:
+			return false
+		}
+	})
+	return out
+}
+
 // Resolve routes a client model string to an instance and the model name to
 // forward. Disabled instances are not routable: a prefixed model naming a
 // disabled alias returns an *UnknownAliasError (listing the enabled aliases),
@@ -283,10 +356,10 @@ func (c *Config) Instance(alias string) (*Instance, bool) {
 // no-membership-check behavior).
 //
 // Unprefixed form: resolve via settings.default_alias if that instance maps or
-// lists the model, else the first enabled instance (in config order) that maps
-// or lists the model, else an *UnknownModelError. An alias mapping shadows a
-// literal model membership, and the mapped value is forwarded verbatim
-// (single-level expansion).
+// lists the model, else the first enabled instance — in routingOrder (explicit
+// priority ascending, then file order) — that maps or lists the model, else an
+// *UnknownModelError. An alias mapping shadows a literal model membership, and
+// the mapped value is forwarded verbatim (single-level expansion).
 func (c *Config) Resolve(model string) (*Instance, string, error) {
 	if i := strings.IndexByte(model, '/'); i >= 0 {
 		alias, rest := model[:i], model[i+1:]
@@ -308,7 +381,7 @@ func (c *Config) Resolve(model string) (*Instance, string, error) {
 			}
 		}
 	}
-	for _, inst := range c.Instances {
+	for _, inst := range c.routingOrder() {
 		if inst.Disabled {
 			continue
 		}
@@ -321,7 +394,7 @@ func (c *Config) Resolve(model string) (*Instance, string, error) {
 			return inst, model, nil
 		}
 	}
-	for _, inst := range c.Instances {
+	for _, inst := range c.routingOrder() {
 		if inst.Disabled {
 			continue
 		}
@@ -333,14 +406,15 @@ func (c *Config) Resolve(model string) (*Instance, string, error) {
 }
 
 // AliasModelIDs returns the routable model-alias ids to advertise in
-// /v1/models: for each enabled instance in config order, the deduped unprefixed
-// key plus the "alias/key" prefixed form, with keys sorted within an instance
-// for a deterministic order. Disabled instances contribute nothing.
+// /v1/models: for each enabled instance in routing order, the deduped
+// unprefixed key plus the "alias/key" prefixed form, with keys sorted within
+// an instance for a deterministic order. Disabled instances contribute
+// nothing.
 func (c *Config) AliasModelIDs() []string {
 	var out []string
 	seenUnprefixed := map[string]bool{}
 	seenAliased := map[string]bool{}
-	for _, inst := range c.Instances {
+	for _, inst := range c.routingOrder() {
 		if inst.Disabled {
 			continue
 		}
@@ -465,8 +539,12 @@ func builtinTemplates() map[string]Template {
 		"deepseek": {
 			BaseURL:   "https://api.deepseek.com",
 			APIKeyEnv: "DEEPSEEK_API_KEY",
-			Models:    []string{"deepseek-chat", "deepseek-reasoner"},
-			Docs:      "https://api-docs.deepseek.com",
+			Models:    []string{"deepseek-chat", "deepseek-reasoner", "deepseek-v4-pro", "deepseek-v4-flash"},
+			ModelReasoningOptions: map[string][]string{
+				"deepseek-v4-flash": {"low", "high", "max"},
+				"deepseek-v4-pro":   {"high", "max"},
+			},
+			Docs: "https://api-docs.deepseek.com",
 		},
 		"gemini": {
 			// The catalog's OpenAI-compatible base, not the native
@@ -510,7 +588,50 @@ func builtinTemplates() map[string]Template {
 			DefaultPlugins: []string{"retry_empty"},
 			Docs:           "https://opencode.ai/docs/go/",
 		},
+		// commandcode: hybrid gateway (OpenAI-compatible /chat/completions and
+		// Anthropic-style /messages on one base); the catalog entry is
+		// analogous to opencode_go/opencode_zen.
+		"commandcode": {
+			BaseURL:   "https://api.commandcode.ai/provider/v1",
+			APIKeyEnv: "COMMANDCODE_API_KEY",
+			Models:    []string{"claude-sonnet-5", "gpt-5.6-sol", "deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-flash"},
+			ModelReasoningOptions: map[string][]string{
+				"deepseek/deepseek-v4-flash": {"low", "high", "max"},
+				"deepseek/deepseek-v4-pro":   {"high", "max"},
+			},
+			Docs: "https://commandcode.ai/docs/provider",
+		},
+		// custom_openai / custom_anthropic are placeholders for user-supplied
+		// endpoints (any provider, including local servers such as llama.cpp or
+		// a local Anthropic-compatible proxy). They carry no base_url — the
+		// endpoint is required when creating an instance — and the API resolves
+		// the placeholder to a concrete custom template (named after the
+		// endpoint) before the instance is created.
+		"custom_openai": {
+			Models: []string{"my-model"},
+		},
+		"custom_anthropic": {
+			Style:  "anthropic",
+			Models: []string{"claude-sonnet-4"},
+		},
 	}
+}
+
+// CustomOpenAI and CustomAnthropic are the built-in placeholder templates that
+// the add-instance flow resolves into concrete per-endpoint templates. They
+// are exempt from the base_url requirement at config load (their endpoint is
+// user-supplied at instance creation).
+const (
+	CustomOpenAI    = "custom_openai"
+	CustomAnthropic = "custom_anthropic"
+	StyleOpenAI     = "openai"
+	StyleAnthropic  = "anthropic"
+)
+
+// IsCustomTemplatePlaceholder reports whether name is one of the endpoint-less
+// placeholder templates that get resolved into a concrete custom template.
+func IsCustomTemplatePlaceholder(name string) bool {
+	return name == CustomOpenAI || name == CustomAnthropic
 }
 
 // fromRaw merges built-in templates with the file's providers (a file entry
@@ -610,14 +731,24 @@ func Validate(c *Config) error {
 		if !aliasRe.MatchString(name) {
 			problems = append(problems, fmt.Sprintf("template name %q must match %s", name, AliasPattern))
 		}
-		if err := ValidateBaseURL(t.BaseURL); err != nil {
-			problems = append(problems, fmt.Sprintf("template %q: %v", name, err))
+		if t.Style != "" && t.Style != StyleOpenAI && t.Style != StyleAnthropic {
+			problems = append(problems, fmt.Sprintf("template %q: style must be %q, %q, or empty", name, StyleOpenAI, StyleAnthropic))
+		}
+		// The custom placeholders are endpoint-less by design; their endpoint
+		// is supplied (and validated) when an instance is created.
+		if !IsCustomTemplatePlaceholder(name) {
+			if err := ValidateBaseURL(t.BaseURL); err != nil {
+				problems = append(problems, fmt.Sprintf("template %q: %v", name, err))
+			}
 		}
 	}
 
 	for i, inst := range c.Instances {
 		if _, ok := c.Templates[inst.Template]; !ok {
 			problems = append(problems, fmt.Sprintf("instance %d: unknown template %q", i+1, inst.Template))
+		}
+		if IsCustomTemplatePlaceholder(inst.Template) {
+			problems = append(problems, fmt.Sprintf("instance %d: template %q is a placeholder — an endpoint URL must be provided so it resolves to a concrete custom template", i+1, inst.Template))
 		}
 	}
 
@@ -652,6 +783,9 @@ func Validate(c *Config) error {
 		if !aliasRe.MatchString(inst.Alias) {
 			problems = append(problems, fmt.Sprintf("alias %q must match %s", inst.Alias, AliasPattern))
 		}
+		if inst.Priority < 0 {
+			problems = append(problems, fmt.Sprintf("instance %q: priority must be >= 0", inst.Alias))
+		}
 		if inst.APIKeyEnv != "" && !envNameRe.MatchString(inst.APIKeyEnv) {
 			problems = append(problems, fmt.Sprintf("instance %q: invalid api_key_env %q", inst.Alias, inst.APIKeyEnv))
 		}
@@ -661,6 +795,42 @@ func Validate(c *Config) error {
 			}
 			if value == "" {
 				problems = append(problems, fmt.Sprintf("instance %q: model alias %q has an empty model value", inst.Alias, key))
+			}
+		}
+		for key, value := range inst.ModelReasoning {
+			if !aliasRe.MatchString(key) {
+				problems = append(problems, fmt.Sprintf("instance %q: model reasoning key %q must match %s", inst.Alias, key, AliasPattern))
+			}
+			// Two-tier reasoning validation: sentinels are always accepted;
+			// anything else must be either an extended generic level or a
+			// value the instance's template advertises for the resolved model.
+			switch value {
+			case "", "default", "none":
+			default:
+				valid := false
+				var advertised []string
+				if t, ok := c.Templates[inst.Template]; ok {
+					model := key
+					if mapped, ok := inst.ModelAliases[key]; ok {
+						model = mapped
+					}
+					if opts, ok := t.ModelReasoningOptions[model]; ok {
+						advertised = opts
+						valid = slices.Contains(opts, value)
+					}
+				}
+				// No advertised options for this model: fall back to the
+				// extended generic effort vocabulary.
+				if !valid && advertised == nil {
+					valid = slices.Contains(genericReasoningLevels, value)
+				}
+				if !valid {
+					if advertised != nil {
+						problems = append(problems, fmt.Sprintf("instance %q: model reasoning for %q has invalid value %q (must be one of: %s)", inst.Alias, key, value, strings.Join(advertised, ", ")))
+					} else {
+						problems = append(problems, fmt.Sprintf("instance %q: model reasoning for %q has invalid value %q (must be one of: default, none, minimal, low, medium, high, xhigh, max, or a value advertised by the model)", inst.Alias, key, value))
+					}
+				}
 			}
 		}
 	}

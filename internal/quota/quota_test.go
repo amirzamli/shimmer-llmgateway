@@ -195,6 +195,65 @@ func TestParseOpenRouter(t *testing.T) {
 	})
 }
 
+func TestParseCommandCode(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			"standard response",
+			`{
+				"totalCost": 1.8941,
+				"totalCredits": 1.8941,
+				"totalTokens": 7466310,
+				"totalCount": 163,
+				"successRate": 100
+			}`,
+			"$1.89 spent · 163 requests",
+		},
+		{
+			"numeric strings",
+			`{"totalCost":"2.50","totalCount":"50"}`,
+			"$2.50 spent · 50 requests",
+		},
+		{
+			"cost only",
+			`{"totalCost": 3.45}`,
+			"$3.45 spent",
+		},
+		{
+			"count only",
+			`{"totalCount": 12}`,
+			"12 requests",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			windows, err := parseCommandCode([]byte(tt.body))
+			if err != nil {
+				t.Fatalf("parseCommandCode: %v", err)
+			}
+			if got := windows["usage"].ValueLabel; got != tt.want {
+				t.Errorf("ValueLabel = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	t.Run("no quota data", func(t *testing.T) {
+		_, err := parseCommandCode([]byte(`{}`))
+		if !errors.Is(err, errNoQuotaData) {
+			t.Errorf("parseCommandCode on empty object err = %v, want errNoQuotaData", err)
+		}
+	})
+
+	t.Run("not json", func(t *testing.T) {
+		if _, err := parseCommandCode([]byte(`not json`)); err == nil {
+			t.Error("parseCommandCode succeeded on invalid json, want error")
+		}
+	})
+}
+
 func TestListClassification(t *testing.T) {
 	// Fake DeepSeek: serves /user/balance and records the Authorization header
 	// per request (List fetches serially, so order is stable).
@@ -292,5 +351,16 @@ func TestListClassification(t *testing.T) {
 	wantAuths := "Bearer sk-env-key,Bearer sk-secret-key"
 	if strings.Join(gotAuths, ",") != wantAuths {
 		t.Errorf("authorizations = %v, want %s", gotAuths, wantAuths)
+	}
+
+	// Unsupported template with usage URL:
+	cfg.Instances = append(cfg.Instances, &config.Instance{Alias: "cmd-code", Template: "commandcode"})
+	resCmd := f.List(context.Background(), false)
+	rCmd := resCmd[len(resCmd)-1]
+	if rCmd.Supported || rCmd.Configured || rCmd.Ok {
+		t.Errorf("cmd-code = %+v, want unsupported", rCmd)
+	}
+	if rCmd.UsageURL != "https://commandcode.ai/studio" {
+		t.Errorf("cmd-code usage_url = %q, want https://commandcode.ai/studio", rCmd.UsageURL)
 	}
 }

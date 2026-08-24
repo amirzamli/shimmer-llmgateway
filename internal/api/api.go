@@ -77,6 +77,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /api/templates", a.handleTemplatesCreate)
 	mux.HandleFunc("GET /api/instances", a.handleInstancesList)
 	mux.HandleFunc("POST /api/instances", a.handleInstancesCreate)
+	mux.HandleFunc("PUT /api/instances/order", a.handleInstancesOrder)
 	mux.HandleFunc("PATCH /api/instances/{alias}", a.handleInstancePatch)
 	mux.HandleFunc("DELETE /api/instances/{alias}", a.handleInstanceDelete)
 	mux.HandleFunc("GET /api/instances/{alias}/models", a.handleInstanceModels)

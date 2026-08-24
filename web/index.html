@@ -73,6 +73,38 @@
   .progress { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; height: 8px; overflow: hidden; }
   .progress-bar { background: var(--accent); height: 100%; }
   .reset-time { color: var(--muted); font-size: 11px; }
+  .aliases-instance { border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; background: rgba(255,255,255,0.015); margin-bottom: 12px; }
+  .aliases-instance summary { cursor: pointer; user-select: none; font-weight: 500; outline: none; display: flex; align-items: center; gap: 10px; padding: 4px 0; border-radius: 4px; transition: background .15s ease; }
+  .aliases-instance summary:hover { background: rgba(255,255,255,0.045); }
+  .aliases-instance summary:hover .aliases-caret { color: var(--accent); }
+  /* the whole summary row is the drag handle: dragging reorders priority */
+  .instance-summary { cursor: grab; }
+  .instance-summary:active { cursor: grabbing; }
+  .drag-grip { color: var(--muted); font-size: 12px; letter-spacing: -2px; user-select: none; }
+  .instance-row.dragging { opacity: .45; }
+  .instance-row.drop-above { box-shadow: 0 -2px 0 0 var(--accent); }
+  .instance-row.drop-below { box-shadow: 0 2px 0 0 var(--accent); }
+  .aliases-caret { display: inline-block; font-size: 10px; line-height: 1; color: var(--muted); transform: rotate(0deg); transition: transform .15s ease; }
+  .aliases-instance[open] .aliases-caret { transform: rotate(90deg); }
+  .aliases-summary-title { font-size: 14px; font-weight: 600; color: var(--text); }
+  .instance-summary .spacer { flex: 1; }
+  .instance-summary .badge { flex-shrink: 0; }
+  /* compact quota summary inline in the instance header */
+  .instance-quota { display: flex; align-items: center; }
+  .instance-quota .usage { min-width: 0; flex-direction: row; flex-wrap: wrap; gap: 2px 14px; }
+  .instance-quota .usage-item { flex-direction: row; align-items: baseline; gap: 5px; }
+  .instance-quota .progress { display: none; }
+  .instance-quota .usage-header { gap: 5px; }
+  .instance-body { margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--border); }
+  /* "Add instance" lives in the Instances panel header: blue with a subtle
+     glow; the form it reveals sits between the header and the provider rows. */
+  #add-instance-toggle { background: var(--accent); box-shadow: 0 0 10px rgba(79,140,255,.45), 0 0 2px rgba(79,140,255,.65); }
+  #add-instance-toggle:hover { box-shadow: 0 0 14px rgba(79,140,255,.6), 0 0 3px rgba(79,140,255,.8); }
+  #instances-panel > h2 { display: flex; align-items: center; gap: 10px; }
+  #instances-panel > h2 .spacer { flex: 1; }
+  #add-instance-form { border: 1px dashed var(--border); border-radius: 8px; padding: 14px; margin-bottom: 14px; background: rgba(255,255,255,0.015); }
+  #add-instance-form .row label { min-width: 150px; }
+  #add-instance-form .templates-fold { margin-top: 12px; }
 </style>
 </head>
 <body>
@@ -143,9 +175,13 @@ function jsonish(s) {
 document.addEventListener("click", function (ev) {
   const el = ev.target.closest("[data-action]");
   if (!el) return;
+  // Row buttons (Edit/Enable/Disable/Delete) live inside the draggable
+  // summary; without this the click would also toggle the aliases list.
+  if (el.closest("summary")) ev.preventDefault();
   switch (el.dataset.action) {
     case "view": switchView(el.dataset.view); break;
     case "add-instance": addInstance(); break;
+    case "toggle-add": toggleAddForm(); break;
     case "edit-instance": editInstance(el.dataset.alias); break;
     case "toggle-instance": toggleInstance(el.dataset.alias); break;
     case "delete-instance": deleteInstance(el.dataset.alias); break;
@@ -189,54 +225,10 @@ async function loadProviders() {
   await Promise.all(instances.map(x => fetchModels(x.alias)));
   const tmplOptions = templates.map(x => `<option value="${esc(x.name)}">${esc(x.name)}</option>`).join("");
   $("view-providers").innerHTML = `
-    <div class="panel">
-      <h2>Add instance</h2>
-      <div class="row">
-        <label>Template
-          <select id="add-template">${tmplOptions}</select>
-        </label>
-        <label>Alias (auto-filled)
-          <input id="add-alias" placeholder="auto">
-        </label>
-        <label>Model subset (comma-separated, optional)
-          <input id="add-models" placeholder="gpt-4o, gpt-4o-mini">
-        </label>
-        <label>Key (optional)
-          <input id="add-key" type="password" placeholder="sk-...">
-        </label>
-        <button data-action="add-instance">Add</button>
-      </div>
-      <details style="margin-top:14px"><summary class="clickable muted">Templates</summary>
-        <table style="margin-top:8px"><thead><tr><th>Name</th><th>Base URL</th><th>Key env</th><th>Models</th></tr></thead>
-        <tbody>
-          ${templates.map(x => `<tr><td>${esc(x.name)}</td><td>${esc(x.base_url)}</td><td>${esc(x.api_key_env)}</td><td class="muted">${esc((x.models||[]).join(", "))}</td></tr>`).join("")}
-        </tbody></table>
-      </details>
-    </div>
-    ${renderInstances()}
-    <div class="panel">
-      <h2>Model aliases</h2>
-      <div class="muted" style="margin-bottom:12px">Map a short name (e.g. <code>small</code>) to a model on each instance. Saved aliases appear in <code>/v1/models</code> and are expanded when routing unprefixed names.</div>
-      ${instances.map(x => `
-        <div class="aliases-instance" style="margin:14px 0 18px">
-          <div class="row" style="margin-bottom:6px;align-items:center">
-            <h3 style="margin:0;font-size:14px">${esc(x.alias)}</h3>
-            <span class="muted" id="models-status-${esc(x.alias)}">${aliasesStatus(x.alias)}</span>
-          </div>
-          <datalist id="dl-models-${esc(x.alias)}">${modelOptions(x.alias)}</datalist>
-          <table>
-            <thead><tr><th>Alias name</th><th>Model</th><th></th></tr></thead>
-            <tbody id="aliases-body-${esc(x.alias)}">${renderAliasRows(x)}</tbody>
-          </table>
-          <div class="row" style="margin-top:8px">
-            <button class="ghost" data-action="aliases-add" data-alias="${esc(x.alias)}">Add alias</button>
-            <button data-action="aliases-save" data-alias="${esc(x.alias)}">Save</button>
-          </div>
-        </div>`).join("")}
-    </div>`;
+    ${renderInstances(tmplOptions)}`;
   const sel = $("add-template");
-  sel.addEventListener("change", () => { $("add-alias").value = ""; $("add-alias").placeholder = "auto: " + suggestAlias(sel.value); });
-  $("add-alias").placeholder = "auto: " + suggestAlias(sel.value);
+  sel.addEventListener("change", applyTemplatePrefill);
+  applyTemplatePrefill();
 }
 function suggestAlias(template) {
   const count = instances.filter(i => i.template === template).length;
@@ -245,8 +237,12 @@ function suggestAlias(template) {
 }
 async function addInstance() {
   const body = { template: $("add-template").value, alias: $("add-alias").value || undefined };
-  const models = $("add-models").value.split(",").map(s => s.trim()).filter(Boolean);
-  if (models.length) body.models = models;
+  const endpoint = $("add-endpoint").value.trim();
+  if (isCustomTemplate(body.template) && !endpoint) {
+    alert("An endpoint URL is required for " + body.template + ": point it at any OpenAI- or Anthropic-compatible server, including local ones (e.g. http://localhost:8080/v1).");
+    return;
+  }
+  if (endpoint) body.base_url = endpoint;
   const key = $("add-key").value;
   if (key) body.key = key;
   try {
@@ -271,7 +267,16 @@ async function editInstance(alias) {
 }
 async function toggleInstance(alias) {
   try {
-    await api("/api/instances/" + encodeURIComponent(alias), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ disabled: !instances.find(x => x.alias === alias).disabled }) });
+    const inst = instances.find(x => x.alias === alias);
+    const disabling = !inst.disabled;
+    await api("/api/instances/" + encodeURIComponent(alias), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ disabled: disabling }) });
+    // A disabled provider's alias list collapses by default; clear any stored
+    // open state so the collapse sticks after a reload.
+    if (disabling) {
+      const s = aliasOpenState();
+      s[alias] = false;
+      try { localStorage.setItem(ALIAS_OPEN_KEY, JSON.stringify(s)); } catch {}
+    }
     await loadProviders();
   } catch (e) { alert(e.message); }
 }
@@ -283,29 +288,154 @@ async function deleteInstance(alias) {
   } catch (e) { alert(e.message); }
 }
 
-// renderInstances builds the combined Instances + Quota panel (stable id
-// "instances-panel"). Each row shows the instance and its quota inline by
-// matching quota entries on alias, so the standalone Quota panel is gone.
-// refreshQuota re-renders only this panel in place.
-function renderInstances() {
+// routingCompare mirrors the server's routing order: enabled instances before
+// disabled, then explicit priority ascending (unset = last, keeping file
+// order). Array.prototype.sort is stable, so equal items keep config order.
+function routingCompare(a, b) {
+  if (a.disabled !== b.disabled) return a.disabled ? 1 : -1;
+  const pa = a.priority || 0, pb = b.priority || 0;
+  if (pa && pb) return pa - pb;
+  if (pa) return -1;
+  if (pb) return 1;
+  return 0;
+}
+
+// instanceBlockHtml renders one provider as a collapsible row whose header is
+// the drag handle: enabled instances render above disabled ones (in routing
+// order), the alias editor lives directly under each provider, and dragging a
+// header reorders routing priority (top of the list = highest priority).
+function instanceBlockHtml(x) {
+  // Custom per-endpoint templates show the endpoint instead of the long
+  // generated template name; anthropic-style providers get a badge.
+  const tmplLabel = x.template && x.template.startsWith("custom-") && x.base_url ? x.base_url : x.template;
+  const styleBadge = x.style === "anthropic" ? `<span class="badge warn" title="Anthropic Messages API">anthropic</span>` : "";
+  return `<details class="aliases-instance instance-row" data-alias="${esc(x.alias)}" ${persistedAliasOpen(x.alias, !!x.disabled) ? "open" : ""}>
+    <summary class="instance-summary" draggable="true">
+      <span class="drag-grip" aria-hidden="true" title="Drag to reorder">⋮⋮</span>
+      <span class="aliases-caret" aria-hidden="true">▶</span>
+      <span class="aliases-summary-title">${esc(x.alias)}</span>
+      <span class="muted">${esc(tmplLabel)}</span>
+      ${styleBadge}
+      ${x.disabled ? `<span class="badge disabled">disabled</span>` : `<span class="badge ok">enabled</span>`}
+      <span class="instance-quota">${quotaCellFor(x.alias)}</span>
+      <span class="spacer"></span>
+      <button class="ghost" data-action="edit-instance" data-alias="${esc(x.alias)}">Edit</button>
+      <button class="ghost" data-action="toggle-instance" data-alias="${esc(x.alias)}">${x.disabled ? "Enable" : "Disable"}</button>
+      <button class="danger" data-action="delete-instance" data-alias="${esc(x.alias)}">Delete</button>
+    </summary>
+    <div class="instance-body">
+      <datalist id="dl-models-${esc(x.alias)}">${modelOptions(x.alias)}</datalist>
+      <div class="muted" style="margin-bottom:8px"><span id="models-status-${esc(x.alias)}">${aliasesStatus(x.alias)}</span></div>
+      <table>
+        <thead><tr><th>Alias name</th><th>Model</th><th>Reasoning</th><th></th></tr></thead>
+        <tbody id="aliases-body-${esc(x.alias)}">${renderAliasRows(x)}</tbody>
+      </table>
+      <div class="row" style="margin-top:8px">
+        <button class="ghost" data-action="aliases-add" data-alias="${esc(x.alias)}">Add alias</button>
+        <button data-action="aliases-save" data-alias="${esc(x.alias)}">Save</button>
+      </div>
+    </div>
+  </details>`;
+}
+
+// renderInstances builds the merged Providers list: each instance is a
+// collapsible row (aliases editor inside), enabled first, then disabled, each
+// group in routing order. The header carries the Add-instance toggle (blue,
+// glowing) whose click reveals the inline form with the endpoint URL field
+// for custom providers. refreshQuota re-renders only this panel in place.
+function renderInstances(tmplOptions) {
+  if (tmplOptions == null) {
+    tmplOptions = templates.map(x => `<option value="${esc(x.name)}">${esc(x.name)}</option>`).join("");
+  }
+  const sorted = instances.slice().sort(routingCompare);
   return `<div class="panel" id="instances-panel">
-    <h2>Instances <button class="ghost" data-action="quota-refresh">Refresh</button></h2>
-    <table><thead><tr><th>Alias</th><th>Template</th><th>Key</th><th>Models</th><th>Status</th><th>Quota</th><th></th></tr></thead>
-    <tbody>
-      ${instances.map(x => `<tr>
-        <td>${esc(x.alias)}</td>
-        <td>${esc(x.template)}</td>
-        <td>${x.key_masked ? esc(x.key_masked) : `<span class="muted">env ${esc(x.api_key_env)}</span>`}</td>
-        <td class="muted">${esc((x.models||[]).join(", "))}</td>
-        <td>${x.disabled ? `<span class="badge disabled">disabled</span>` : `<span class="badge ok">enabled</span>`}</td>
-        <td>${quotaCellFor(x.alias)}</td>
-        <td>
-          <button class="ghost" data-action="edit-instance" data-alias="${esc(x.alias)}">Edit</button>
-          <button class="ghost" data-action="toggle-instance" data-alias="${esc(x.alias)}">${x.disabled ? "Enable" : "Disable"}</button>
-          <button class="danger" data-action="delete-instance" data-alias="${esc(x.alias)}">Delete</button>
-        </td></tr>`).join("")}
-    </tbody></table>
+    <h2>Instances
+      <span class="spacer"></span>
+      <button id="add-instance-toggle" data-action="toggle-add">+ Add instance</button>
+      <button class="ghost" data-action="quota-refresh">Refresh</button>
+    </h2>
+    <div class="muted" style="margin-bottom:12px">Enabled providers are listed first, disabled ones below. <b>Drag a provider's header to reorder it — top of the list is highest priority</b> for unprefixed model names (e.g. <code>small</code>). Click a header to expand its model aliases.</div>
+    <div id="add-instance-form" class="hidden">
+      <div class="row">
+        <label>Template
+          <select id="add-template">${tmplOptions}</select>
+        </label>
+        <label>Alias (auto-filled)
+          <input id="add-alias" placeholder="auto">
+        </label>
+        <label>Endpoint URL <span class="muted" id="endpoint-hint"></span>
+          <input id="add-endpoint" type="url" placeholder="https://api.example.com/v1">
+        </label>
+        <label>Key (optional) <span class="muted" id="key-hint"></span>
+          <input id="add-key" type="password" placeholder="sk-...">
+        </label>
+        <button data-action="add-instance">Add</button>
+        <button class="ghost" data-action="toggle-add">Cancel</button>
+      </div>
+      <details class="templates-fold"><summary class="clickable muted">Templates</summary>
+        <table style="margin-top:8px"><thead><tr><th>Name</th><th>Style</th><th>Base URL</th><th>Key env</th><th>Models</th></tr></thead>
+        <tbody>
+          ${templates.map(x => `<tr><td>${esc(x.name)}</td><td>${esc(x.style || "openai")}</td><td>${esc(x.base_url) || '<span class="muted">endpoint required</span>'}</td><td>${esc(x.api_key_env)}</td><td class="muted">${esc((x.models||[]).join(", "))}</td></tr>`).join("")}
+        </tbody></table>
+      </details>
+    </div>
+    ${sorted.map(instanceBlockHtml).join("")}
   </div>`;
+}
+
+// isCustomTemplate reports whether the selected (or given) template is the
+// endpoint-less custom placeholder that requires an endpoint URL.
+function isCustomTemplate(template) {
+  const name = template || $("add-template").value;
+  return name === "custom_openai" || name === "custom_anthropic";
+}
+
+// applyTemplatePrefill fills the template-specific form fields when a template
+// is selected (or the form is opened): endpoint URL from the template's
+// base_url, a key-hint naming the env var the template reads, plus the
+// auto-suggested alias. The endpoint stays editable — it doubles as the
+// custom-provider override.
+function applyTemplatePrefill() {
+  const sel = $("add-template");
+  const t = templates.find(x => x.name === sel.value);
+  const endpoint = $("add-endpoint"), keyHint = $("key-hint");
+  if (t) {
+    endpoint.value = t.base_url || "";
+    keyHint.textContent = t.api_key_env ? "env: " + t.api_key_env : "";
+  } else {
+    endpoint.value = "";
+    keyHint.textContent = "";
+  }
+  $("add-key").value = "";
+  $("add-alias").value = "";
+  $("add-alias").placeholder = "auto: " + suggestAlias(sel.value);
+  updateEndpointHint();
+}
+
+// updateEndpointHint marks the endpoint URL as required for the custom
+// placeholders and explains the field otherwise.
+function updateEndpointHint() {
+  const endpoint = $("add-endpoint");
+  if (!endpoint) return;
+  if (isCustomTemplate()) {
+    endpoint.required = true;
+    $("endpoint-hint").textContent = "required for " + $("add-template").value;
+  } else {
+    endpoint.required = false;
+    $("endpoint-hint").textContent = "optional — override any provider, incl. local servers";
+  }
+}
+
+// toggleAddForm expands/collapses the inline add-instance form; opening it
+// pre-fills the template-specific fields for the current selection.
+function toggleAddForm() {
+  const form = $("add-instance-form");
+  if (!form) return;
+  const opening = form.classList.toggle("hidden");
+  if (opening) {
+    applyTemplatePrefill();
+    $("add-alias").focus();
+  }
 }
 
 /* ---------- Quota ---------- */
@@ -323,7 +453,7 @@ function quotaCellFor(alias) {
 // so the UI imposes this order for readability.
 const WINDOW_LABELS = {
   "5h": "Rolling Usage", "weekly": "Weekly Usage", "monthly": "Monthly Usage",
-  "credits_balance": "Balance", "credits": "Credits"
+  "credits_balance": "Balance", "credits": "Credits", "usage": "Usage"
 };
 const WINDOW_ORDER = ["5h", "weekly", "monthly"];
 
@@ -332,7 +462,12 @@ const WINDOW_ORDER = ["5h", "weekly", "monthly"];
 // usage card (label + value + progress bar + reset time), and balance windows
 // render as a single inline code line.
 function quotaCell(x) {
-  if (!x.supported) return `<span class="muted">not supported</span>`;
+  if (!x.supported) {
+    if (x.usage_url) {
+      return `<a class="usage-link muted" href="${esc(x.usage_url)}" target="_blank" rel="noopener noreferrer" style="text-decoration:underline">view usage ↗</a>`;
+    }
+    return `<span class="muted">not supported</span>`;
+  }
   if (!x.configured) return `<span class="muted">no key</span>`;
   if (!x.ok) return `<span class="badge err">${esc(x.error || "unknown error")}</span>`;
   const windows = x.windows || {};
@@ -394,6 +529,99 @@ async function refreshQuota() {
 }
 
 /* ---------- Model aliases editor ---------- */
+// Aliases-panel collapse state is persisted per instance in localStorage so
+// the user's collapsed/expanded choices survive refreshes and reloads:
+//   - a stored value wins outright (their explicit choice),
+//   - otherwise an enabled instance defaults to expanded and a disabled one
+//     to collapsed, so newly enabled providers show up expanded by default.
+const ALIAS_OPEN_KEY = "shimmer.aliasOpen.v1";
+function aliasOpenState() {
+  try { return JSON.parse(localStorage.getItem(ALIAS_OPEN_KEY)) || {}; } catch { return {}; }
+}
+// Stored choices win outright; aliases never explicitly toggled fall back to
+// enabled=expanded / disabled=collapsed, so newly enabled providers appear
+// expanded without clobbering explicit choices.
+function aliasOpenWithDefaults() {
+  const s = aliasOpenState();
+  (instances || []).forEach(x => { if (s[x.alias] == null) s[x.alias] = !x.disabled; });
+  return s;
+}
+function persistedAliasOpen(alias, disabled) {
+  const s = aliasOpenState();
+  return s[alias] != null ? !!s[alias] : !disabled;
+}
+function aliasOpenToggle(alias, open) {
+  const s = aliasOpenWithDefaults();
+  s[alias] = open;
+  try { localStorage.setItem(ALIAS_OPEN_KEY, JSON.stringify(s)); } catch {}
+}
+document.addEventListener("toggle", function (ev) {
+  const d = ev.target;
+  if (!(d instanceof HTMLDetailsElement) || !d.classList.contains("aliases-instance")) return;
+  // A re-render (save, refresh) removes the old <details>, which fires a
+  // toggle with open=false — that is not a user choice and must not persist,
+  // or every save would collapse panels the user had opened.
+  if (!document.contains(d)) return;
+  aliasOpenToggle(d.dataset.alias, d.open);
+});
+
+/* ---------- drag-to-reorder (routing priority) ---------- */
+// The whole provider header row is draggable: dragging reorders the merged
+// instance list, and on drop the new order is persisted via
+// PUT /api/instances/order (position → priority, top = highest).
+let dragAlias = null;
+function instanceRowFor(el) {
+  return el ? el.closest("details.instance-row") : null;
+}
+function rowDropSide(sum, ev) {
+  const rect = sum.getBoundingClientRect();
+  return ev.clientY < rect.top + rect.height / 2 ? "drop-above" : "drop-below";
+}
+document.addEventListener("dragstart", function (ev) {
+  const row = instanceRowFor(ev.target);
+  if (!row) return;
+  dragAlias = row.dataset.alias;
+  ev.dataTransfer.effectAllowed = "move";
+  try { ev.dataTransfer.setData("text/plain", dragAlias); } catch {}
+  row.classList.add("dragging");
+});
+document.addEventListener("dragend", function (ev) {
+  const row = instanceRowFor(ev.target);
+  if (row) row.classList.remove("dragging");
+  document.querySelectorAll(".instance-row.drop-above, .instance-row.drop-below").forEach(r => r.classList.remove("drop-above", "drop-below"));
+  if (!dragAlias) return;
+  dragAlias = null;
+  persistInstanceOrder();
+});
+document.addEventListener("dragover", function (ev) {
+  if (!dragAlias) return;
+  const sum = ev.target.closest("summary.instance-summary");
+  const row = instanceRowFor(sum);
+  if (!sum || !row || row.dataset.alias === dragAlias) return;
+  ev.preventDefault();
+  ev.dataTransfer.dropEffect = "move";
+  const panel = $("instances-panel");
+  const dragged = panel.querySelector(`details[data-alias="${CSS.escape(dragAlias)}"]`);
+  if (!dragged) return;
+  const before = ev.clientY < sum.getBoundingClientRect().top + sum.getBoundingClientRect().height / 2;
+  document.querySelectorAll(".instance-row.drop-above, .instance-row.drop-below").forEach(r => r.classList.remove("drop-above", "drop-below"));
+  row.classList.add(before ? "drop-above" : "drop-below");
+  if (before) panel.insertBefore(dragged, row);
+  else panel.insertBefore(dragged, row.nextElementSibling);
+});
+document.addEventListener("drop", function (ev) {
+  if (dragAlias) ev.preventDefault();
+});
+// persistInstanceOrder saves the visible list order as instance priorities.
+async function persistInstanceOrder() {
+  const panel = $("instances-panel");
+  if (!panel) return;
+  const aliases = [...panel.querySelectorAll("details.instance-row")].map(d => d.dataset.alias);
+  try {
+    await api("/api/instances/order", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ aliases }) });
+    await loadProviders();
+  } catch (e) { alert(e.message); }
+}
 // fetchModels loads GET /api/instances/{alias}/models into fetchedModels /
 // fetchedMeta, falling back to the instance's configured models when the
 // fetch is unavailable. It never throws so callers can rely on a list.
@@ -414,23 +642,59 @@ async function fetchModels(alias, refresh) {
 function modelOptions(alias) {
   return (fetchedModels[alias] || []).map(m => `<option value="${esc(m)}">`).join("");
 }
+// humanTime renders an ISO timestamp as a short relative time ("just now",
+// "3 min ago", "5 h ago") or a plain date for older values; unparseable input
+// passes through unchanged.
+function humanTime(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  const diff = Date.now() - d.getTime();
+  if (diff < 60_000) return "just now";
+  if (diff < 3600_000) return Math.round(diff / 60_000) + " min ago";
+  if (diff < 86_400_000) return Math.round(diff / 3600_000) + " h ago";
+  return d.toLocaleDateString();
+}
 // aliasesStatus is the muted source/freshness line shown next to an instance.
 function aliasesStatus(alias) {
   const meta = fetchedMeta[alias];
   if (!meta) return "";
   const src = meta.source === "provider" ? "fetched from provider" : "configured models";
   let html = esc(src);
-  if (meta.fetched_at) html += " · " + esc(meta.fetched_at);
+  if (meta.fetched_at) html += " · " + esc(humanTime(meta.fetched_at));
   if (meta.error) html += ` <span class="badge warn">${esc(meta.error)}</span>`;
   return html;
+}
+// reasoningOptionsFor returns the reasoning effort values the instance's
+// template advertises for a row's model (served by GET /api/templates as
+// model_reasoning_options), or null when unknown so callers fall back to the
+// generic list. Mirrors config validation: advertised models gate, others use
+// the extended default vocabulary.
+const GENERIC_REASONING = ["low", "medium", "high", "max"];
+function reasoningOptionsFor(inst, model) {
+  const t = (templates || []).find(x => x.name === (inst && inst.template));
+  const opts = t && t.model_reasoning_options && t.model_reasoning_options[model];
+  return Array.isArray(opts) && opts.length ? opts : null;
 }
 // aliasRowHtml renders one editable row. Keys/values come from gateway.toml
 // (user-controlled) and model ids from the provider, so all are esc()'d; the
 // model input doubles as free-typed custom model entry via the datalist.
-function aliasRowHtml(alias, key, val, i) {
+function aliasRowHtml(alias, key, val, reasoning, i, opts) {
+  const r = reasoning || "";
+  const levels = ((opts && opts.length ? opts : GENERIC_REASONING).slice());
+  if (r && !levels.includes(r)) levels.push(r); // keep a saved value selectable
+  const levelOptions = levels.map(l =>
+    `<option value="${esc(l)}" ${r === l ? "selected" : ""}>${esc(l.charAt(0).toUpperCase() + l.slice(1))}</option>`
+  ).join("");
   return `<tr>
     <td><input class="aliases-key" value="${esc(key)}" placeholder="e.g. small"></td>
     <td><input class="aliases-model" list="dl-models-${esc(alias)}" value="${esc(val)}" placeholder="choose a model or type one"></td>
+    <td>
+      <select class="aliases-reasoning">
+        <option value="" ${r === "" ? "selected" : ""}>Default</option>
+        <option value="none" ${r === "none" ? "selected" : ""}>None</option>
+        ${levelOptions}
+      </select>
+    </td>
     <td>
       <button class="ghost" data-action="models-refresh" data-alias="${esc(alias)}">Refresh</button>
       <button class="ghost" data-action="aliases-remove" data-alias="${esc(alias)}" data-row="${i}">Remove</button>
@@ -439,15 +703,18 @@ function aliasRowHtml(alias, key, val, i) {
 }
 function renderAliasRows(inst) {
   const rows = Object.entries(inst.model_aliases || {});
-  if (!rows.length) return `<tr class="no-aliases"><td colspan="3" class="muted">No aliases yet — add one below.</td></tr>`;
-  return rows.map(([key, val], i) => aliasRowHtml(inst.alias, key, val, i)).join("");
+  if (!rows.length) return `<tr class="no-aliases"><td colspan="4" class="muted">No aliases yet — add one below.</td></tr>`;
+  return rows.map(([key, val], i) => {
+    const reasoning = (inst.model_reasoning && inst.model_reasoning[key]) || "";
+    return aliasRowHtml(inst.alias, key, val, reasoning, i, reasoningOptionsFor(inst, val));
+  }).join("");
 }
 function addAliasRow(alias) {
   const tbody = $("aliases-body-" + alias);
   if (!tbody) return;
   const placeholder = tbody.querySelector("tr.no-aliases");
   if (placeholder) placeholder.remove();
-  tbody.insertAdjacentHTML("beforeend", aliasRowHtml(alias, "", "", tbody.children.length));
+  tbody.insertAdjacentHTML("beforeend", aliasRowHtml(alias, "", "", "", tbody.children.length));
 }
 // removeAliasRow drops the row client-side (unsaved until Save). It uses the
 // clicked row's DOM position rather than the data-row index so it stays
@@ -465,21 +732,32 @@ async function refreshModels(alias) {
     if (status) status.innerHTML = aliasesStatus(alias);
   } catch (e) { alert(e.message); }
 }
-// saveAliases PATCHes the whole model_aliases map (replace semantics); rows
+// saveAliases PATCHes model_aliases and model_reasoning maps (replace semantics); rows
 // with an empty alias name are dropped, invalid names/empty models are
 // rejected server-side and surfaced via the existing alert path.
 async function saveAliases(alias) {
   const map = {};
+  const reasoningMap = {};
   const tbody = $("aliases-body-" + alias);
   if (tbody) tbody.querySelectorAll("tr").forEach(tr => {
     const key = tr.querySelector(".aliases-key");
     const model = tr.querySelector(".aliases-model");
+    const reasoning = tr.querySelector(".aliases-reasoning");
     if (!key || !model) return;
     const name = key.value.trim();
-    if (name) map[name] = model.value.trim();
+    if (name) {
+      map[name] = model.value.trim();
+      if (reasoning && reasoning.value) {
+        reasoningMap[name] = reasoning.value;
+      }
+    }
   });
   try {
-    await api("/api/instances/" + encodeURIComponent(alias), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model_aliases: map }) });
+    await api("/api/instances/" + encodeURIComponent(alias), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model_aliases: map, model_reasoning: reasoningMap })
+    });
     await loadProviders();
   } catch (e) { alert(e.message); }
 }

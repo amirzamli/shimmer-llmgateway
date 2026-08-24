@@ -1119,6 +1119,124 @@
       ],
       "confidence": "high",
       "last_verified": "2026-04-27"
+    },
+    {
+      "provider": "Command Code",
+      "aliases": [
+        "CommandCode",
+        "Command Code Provider API"
+      ],
+      "provider_type": "gateway",
+      "api_style": "hybrid",
+      "supports_openai_compatible_api": true,
+      "native_api": {
+        "base_url": "https://api.commandcode.ai/provider/v1",
+        "chat_completions_endpoint": null,
+        "responses_endpoint": null,
+        "messages_endpoint": "/messages",
+        "completions_endpoint": null,
+        "embeddings_endpoint": null,
+        "images_endpoint": null,
+        "audio_endpoint": null,
+        "video_endpoint": null,
+        "batches_endpoint": null,
+        "models_endpoint": "/models",
+        "docs_url": "https://commandcode.ai/docs/provider"
+      },
+      "openai_compatible_api": {
+        "base_url": "https://api.commandcode.ai/provider/v1",
+        "chat_completions_endpoint": "/chat/completions",
+        "responses_endpoint": null,
+        "completions_endpoint": null,
+        "embeddings_endpoint": null,
+        "images_endpoint": null,
+        "audio_endpoint": null,
+        "video_endpoint": null,
+        "batches_endpoint": null,
+        "models_endpoint": "/models",
+        "compatibility_docs_url": "https://commandcode.ai/docs/provider",
+        "compatibility_status": "official"
+      },
+      "discovery": {
+        "models_endpoint": "https://api.commandcode.ai/provider/v1/models",
+        "models_page_url": "https://commandcode.ai/docs/resources/pricing-limits",
+        "api_reference_url": "https://commandcode.ai/docs/provider"
+      },
+      "pricing": {
+        "pricing_api_url": null,
+        "pricing_page_url": "https://commandcode.ai/pricing",
+        "pricing_notes": "Command Code Provider is a $15/month plan with pay-as-you-go usage, no markup on upstream model prices, deals applied automatically, and credits that roll over."
+      },
+      "auth": {
+        "authentication_method": "api_key",
+        "api_key_header": "Authorization",
+        "notes": "Users create an API key in Command Code Studio (https://commandcode.ai/studio); the same key authenticates the CLI and the API. HTTP auth uses Authorization: Bearer <CMD_API_KEY> on any route, or x-api-key for the Anthropic SDK on /messages."
+      },
+      "capabilities": {
+        "streaming": true,
+        "tool_calling": true,
+        "structured_output": null,
+        "vision": true,
+        "audio_input": false,
+        "image_generation": false,
+        "video_generation": false,
+        "embeddings": false,
+        "batch": false,
+        "prompt_caching": null,
+        "reasoning_controls": null,
+        "citations": null
+      },
+      "feature_gaps_in_compat_mode": [
+        "Claude models must use the Anthropic /messages route while OpenAI and open-source models must use /chat/completions; wrong-endpoint requests return 400.",
+        "The OpenAI and Anthropic routes expose different error envelope shapes (error.code vs error.type)."
+      ],
+      "recommended_integration_mode": "hybrid",
+      "evidence": [
+        {
+          "field": "openai_compatible_api.chat_completions_endpoint",
+          "source_type": "official_docs",
+          "url": "https://commandcode.ai/docs/provider",
+          "note": "Official Provider API docs document POST https://api.commandcode.ai/provider/v1/chat/completions with the OpenAI Chat Completions schema."
+        },
+        {
+          "field": "native_api.messages_endpoint",
+          "source_type": "official_docs",
+          "url": "https://commandcode.ai/docs/provider",
+          "note": "Official Provider API docs document POST https://api.commandcode.ai/provider/v1/messages with the Anthropic Messages schema."
+        },
+        {
+          "field": "discovery.models_endpoint",
+          "source_type": "official_docs",
+          "url": "https://commandcode.ai/docs/provider",
+          "note": "Official docs document GET https://api.commandcode.ai/provider/v1/models returning the live model catalog."
+        },
+        {
+          "field": "auth.api_key_header",
+          "source_type": "official_docs",
+          "url": "https://commandcode.ai/docs/provider",
+          "note": "Official docs document Authorization: Bearer <CMD_API_KEY> on any route, or x-api-key for the Anthropic SDK."
+        },
+        {
+          "field": "capabilities.streaming",
+          "source_type": "official_docs",
+          "url": "https://commandcode.ai/docs/provider",
+          "note": "Official docs state both endpoints support streaming (stream:true) with usage emitted in-stream and no opt-in."
+        },
+        {
+          "field": "capabilities.vision",
+          "source_type": "official_docs",
+          "url": "https://commandcode.ai/docs/provider",
+          "note": "Official FAQ states text and images are accepted; audio, file, and document parts are rejected by the schema."
+        },
+        {
+          "field": "pricing.pricing_page_url",
+          "source_type": "official_docs",
+          "url": "https://commandcode.ai/docs/provider",
+          "note": "Official docs link the pricing page describing the $15/month Provider plan with pay-as-you-go, no markup, deals, and rolling credits."
+        }
+      ],
+      "confidence": "high",
+      "last_verified": "2026-08-21"
     }
   ]
 }

@@ -165,6 +165,41 @@ func TestNonStreamRetryCapsAtThree(t *testing.T) {
 	}
 }
 
+func TestNonStreamRetryEmptyContentWithFinishStop(t *testing.T) {
+	// ox-alpha failure shape: a 2xx completion whose first choice has empty
+	// content but a populated finish_reason ("stop"). The finish_reason must
+	// not exempt it from the premature-empty predicate — an empty assistant
+	// turn is useless either way.
+	var provider *fakeProvider
+	attempt := 0
+	provider = newFakeProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		attempt++
+		w.Header().Set("Content-Type", "application/json")
+		if attempt == 1 {
+			w.Write([]byte(`{"id":"c-empty","choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"stop"}]}`))
+			return
+		}
+		w.Write([]byte(`{"id":"chatcmpl-2","choices":[{"index":0,"message":{"role":"assistant","content":"recovered"},"finish_reason":"stop"}]}`))
+	})
+	gs, st := newGatewayTest(t, provider, retryTOML, defaultEnv)
+
+	resp := postChat(t, gs, `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`, map[string]string{"X-Session-Id": "sess-retry-stop-ns"})
+	body := drainClose(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "recovered") {
+		t.Errorf("client did not receive the retried content: %q", body)
+	}
+	if len(provider.requests()) != 2 {
+		t.Errorf("provider saw %d requests, want 2 (empty-with-stop then content)", len(provider.requests()))
+	}
+	req := waitForRequest(t, st, "sess-retry-stop-ns", 5*time.Second)
+	if req.FinishReason != "stop" {
+		t.Errorf("final capture finish = %q, want stop", req.FinishReason)
+	}
+}
+
 // ---- stream retry (held mode, Phase 3) ----
 
 // dataLines extracts the "data: ..." SSE payload lines from a raw body.
@@ -210,11 +245,16 @@ func TestStreamRetryEmptyThenContent(t *testing.T) {
 	}
 	raw := string(drainClose(t, resp))
 
-	// One completion block plus [DONE]; the reasoning-only attempt must never
-	// reach the client.
+	// The reasoning delta of the empty first attempt is forwarded live (so the
+	// client never waits in silence), then the held completion of the second
+	// attempt plus [DONE]; the empty completion itself must never reach the
+	// client.
 	lines := dataLines(t, raw)
-	if len(lines) != 2 || lines[1] != "data: [DONE]" {
+	if len(lines) != 3 || lines[2] != "data: [DONE]" {
 		t.Fatalf("unexpected held SSE output: %q", raw)
+	}
+	if !strings.Contains(lines[0], "thinking...") {
+		t.Errorf("first line should be the live reasoning delta: %q", lines[0])
 	}
 	var comp struct {
 		Choices []struct {
@@ -223,8 +263,8 @@ func TestStreamRetryEmptyThenContent(t *testing.T) {
 			} `json:"message"`
 		} `json:"choices"`
 	}
-	if err := json.Unmarshal([]byte(strings.TrimPrefix(lines[0], "data: ")), &comp); err != nil {
-		t.Fatalf("emitted block is not a chat.completion: %v (%q)", err, lines[0])
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(lines[1], "data: ")), &comp); err != nil {
+		t.Fatalf("emitted block is not a chat.completion: %v (%q)", err, lines[1])
 	}
 	if len(comp.Choices) != 1 || comp.Choices[0].Message.Content != "Hello" {
 		t.Errorf("emitted completion = %+v, want content Hello", comp.Choices)
@@ -246,6 +286,59 @@ func TestStreamRetryEmptyThenContent(t *testing.T) {
 	}
 	if sess.RequestCount != 1 || len(sess.Requests) != 1 {
 		t.Errorf("session request_count/requests = %d/%d, want 1/1 (one capture per client request)", sess.RequestCount, len(sess.Requests))
+	}
+}
+
+func TestStreamRetryEmptyContentWithFinishStop(t *testing.T) {
+	// ox-alpha failure shape on the stream path: reasoning deltas, then a
+	// final chunk with an empty content delta and finish_reason "stop". The
+	// reassembled completion is empty, so the held path must re-issue.
+	var provider *fakeProvider
+	attempt := 0
+	provider = newFakeProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		attempt++
+		fl := w.(http.Flusher)
+		if attempt == 1 {
+			fmt.Fprintf(w, "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"thinking...\"},\"finish_reason\":null}]}\n\n")
+			fl.Flush()
+			fmt.Fprintf(w, "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+			fl.Flush()
+			fmt.Fprintf(w, "data: [DONE]\n\n")
+			fl.Flush()
+			return
+		}
+		fmt.Fprintf(w, "data: {\"id\":\"c2\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"recovered\"},\"finish_reason\":null}]}\n\n")
+		fl.Flush()
+		fmt.Fprintf(w, "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+		fl.Flush()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		fl.Flush()
+	})
+	gs, st := newGatewayTest(t, provider, retryTOML, defaultEnv)
+
+	resp := postChat(t, gs, `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`, map[string]string{"X-Session-Id": "sess-retry-stop-stream"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	raw := string(drainClose(t, resp))
+	lines := dataLines(t, raw)
+	if len(lines) != 3 || lines[2] != "data: [DONE]" {
+		t.Fatalf("unexpected held SSE output: %q", raw)
+	}
+	// The empty-with-stop attempt's reasoning delta is forwarded live; the
+	// retried content arrives in the final block.
+	if !strings.Contains(lines[0], "thinking...") {
+		t.Errorf("first line should be the live reasoning delta: %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "recovered") {
+		t.Errorf("client did not receive the retried content: %q", raw)
+	}
+	if len(provider.requests()) != 2 {
+		t.Errorf("provider saw %d requests, want 2 (empty-with-stop then content)", len(provider.requests()))
+	}
+	req := waitForRequest(t, st, "sess-retry-stop-stream", 5*time.Second)
+	if req.FinishReason != "stop" {
+		t.Errorf("finish_reason = %q, want stop", req.FinishReason)
 	}
 }
 
@@ -286,10 +379,15 @@ func TestStreamRetryUncleanDropThenContent(t *testing.T) {
 	}
 	raw := string(drainClose(t, resp))
 	lines := dataLines(t, raw)
-	if len(lines) != 2 || lines[1] != "data: [DONE]" {
+	if len(lines) != 3 || lines[2] != "data: [DONE]" {
 		t.Fatalf("unexpected held SSE output after unclean drop: %q", raw)
 	}
-	if !strings.Contains(raw, "recovered") {
+	// The reasoning delta of the dropped attempt was forwarded before the
+	// connection died; the recovered content arrives in the final block.
+	if !strings.Contains(lines[0], "thinking") {
+		t.Errorf("first line should be the live reasoning delta: %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "recovered") {
 		t.Errorf("client did not receive the recovered completion: %q", raw)
 	}
 
@@ -442,11 +540,13 @@ func TestStreamRetrySecondAttemptNon2xxEmitsErrorEvent(t *testing.T) {
 	}
 	raw := string(drainClose(t, resp))
 	lines := dataLines(t, raw)
-	if len(lines) != 2 || lines[1] != "data: [DONE]" {
+	if len(lines) != 3 || lines[2] != "data: [DONE]" {
 		t.Fatalf("unexpected SSE error output: %q", raw)
 	}
-	if !strings.Contains(lines[0], "error") || !strings.Contains(lines[0], "401") {
-		t.Errorf("expected an SSE error event naming the status: %q", lines[0])
+	// The empty attempt's reasoning delta was forwarded live; the 401 arrives
+	// as the SSE error event after it.
+	if !strings.Contains(lines[1], "error") || !strings.Contains(lines[1], "401") {
+		t.Errorf("expected an SSE error event naming the status: %q", lines[1])
 	}
 	if len(provider.requests()) != 2 {
 		t.Errorf("provider saw %d requests, want 2 (empty then 401)", len(provider.requests()))

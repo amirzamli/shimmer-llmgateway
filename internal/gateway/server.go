@@ -297,11 +297,12 @@ type chatRequest struct {
 
 // route is the resolved instance/model for one request.
 type route struct {
-	inst     *config.Instance
-	template *config.Template
-	model    string
-	alias    string
-	provider string
+	inst      *config.Instance
+	template  *config.Template
+	model     string
+	alias     string
+	provider  string
+	reasoning string
 }
 
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -328,13 +329,20 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		s.writeResolveError(w, err)
 		return
 	}
+	aliasKey := parsed.Model
+	if i := strings.IndexByte(parsed.Model, '/'); i >= 0 {
+		aliasKey = parsed.Model[i+1:]
+	}
+	reasoning := inst.EffectiveReasoning(aliasKey)
+
 	tmpl := cfg.Templates[inst.Template]
 	rt := &route{
-		inst:     inst,
-		template: tmpl,
-		model:    model,
-		alias:    inst.Alias,
-		provider: tmpl.Name,
+		inst:      inst,
+		template:  tmpl,
+		model:     model,
+		alias:     inst.Alias,
+		provider:  tmpl.Name,
+		reasoning: reasoning,
 	}
 
 	// §4.3 session correlation: echo the effective session id on every
@@ -374,17 +382,37 @@ func (s *Server) writeResolveError(w http.ResponseWriter, err error) {
 // to the resolved model name. cfg is the request's config snapshot. The
 // returned sentBody is the exact bytes forwarded to the provider (post-model
 // rewrite), used as request_filtered_json when request plugins ran.
+//
+// Anthropic-style templates talk the Messages API instead: the OpenAI body is
+// translated (translateOpenAIToAnthropic), the endpoint is <base_url>/messages,
+// the key rides the x-api-key header, and the anthropic-version header is set
+// (plus the extended-thinking beta header when the request enables thinking).
 func (s *Server) buildUpstream(ctx context.Context, cfg *config.Config, rt *route, body []byte) (*http.Request, []byte, error) {
 	upstreamBody := body
-	if sent, ok := modelField(body); !ok || sent != rt.model {
-		rewritten, err := rewriteModel(body, rt.model)
+	sent, ok := modelField(body)
+	if !ok || sent != rt.model || rt.reasoning != "" {
+		rewritten, err := rewriteModelAndReasoning(body, rt.model, rt.reasoning)
 		if err != nil {
 			return nil, nil, err
 		}
 		upstreamBody = rewritten
 	}
 
-	url := strings.TrimRight(rt.template.BaseURL, "/") + "/chat/completions"
+	anthropic := rt.template.Style == config.StyleAnthropic
+	if anthropic {
+		translated, err := translateOpenAIToAnthropic(upstreamBody)
+		if err != nil {
+			return nil, nil, err
+		}
+		upstreamBody = translated
+	}
+
+	url := strings.TrimRight(rt.template.BaseURL, "/")
+	if anthropic {
+		url += "/messages"
+	} else {
+		url += "/chat/completions"
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(upstreamBody))
 	if err != nil {
 		return nil, nil, err
@@ -396,7 +424,17 @@ func (s *Server) buildUpstream(ctx context.Context, cfg *config.Config, rt *rout
 		return nil, nil, err
 	}
 	if key != "" {
-		req.Header.Set("Authorization", "Bearer "+key)
+		if anthropic {
+			req.Header.Set("x-api-key", key)
+		} else {
+			req.Header.Set("Authorization", "Bearer "+key)
+		}
+	}
+	if anthropic {
+		req.Header.Set("anthropic-version", anthropicVersionHeader)
+		if bodyHasThinking(upstreamBody) {
+			req.Header.Set("anthropic-beta", anthropicThinkingBetaHeader)
+		}
 	}
 	return req, upstreamBody, nil
 }
@@ -485,6 +523,24 @@ func (s *Server) resolvedKey(cfg *config.Config, inst *config.Instance) (string,
 // total (constant, per the plan).
 const maxRetryAttempts = 3
 
+// translateUpstreamBody maps an anthropic-style provider response into the
+// OpenAI shape the gateway and its clients speak: error bodies get the OpenAI
+// error shape, 2xx completions become chat.completion objects. Non-anthropic
+// styles and unparseable bodies pass through unchanged.
+func translateUpstreamBody(style string, status int, body []byte) []byte {
+	if style != config.StyleAnthropic {
+		return body
+	}
+	if status >= 400 {
+		return translateAnthropicError(body)
+	}
+	translated, err := translateAnthropicToOpenAI(body)
+	if err != nil {
+		return body
+	}
+	return translated
+}
+
 // handleNonStream forwards the request, records the provider response, runs
 // the response plugins on the provider body, and passes the (filtered)
 // provider status/body through — error bodies included. When retry_empty is
@@ -532,7 +588,11 @@ func (s *Server) handleNonStream(w http.ResponseWriter, r *http.Request, cfg *co
 			return
 		}
 		resp, respBody = rsp, rb
-		if retryActive && attempt < maxRetryAttempts && rsp.StatusCode >= 200 && rsp.StatusCode < 300 && isEmptyCompletion(rb) {
+		// Anthropic responses are translated to the OpenAI shape before the
+		// empty-completion check, plugins, and capture, so the whole pipeline
+		// (and the client) sees one schema.
+		respBody = translateUpstreamBody(rt.template.Style, rsp.StatusCode, respBody)
+		if retryActive && attempt < maxRetryAttempts && rsp.StatusCode >= 200 && rsp.StatusCode < 300 && isEmptyCompletion(respBody) {
 			s.logger.Warn("retry_empty", map[string]any{
 				"request_id": requestID,
 				"session_id": sessionID,
@@ -597,9 +657,10 @@ func requestFilteredBody(chain *plugins.Chain, sentBody []byte) []byte {
 // reassembled, response plugins run post-reassembly, and the filtered result
 // is emitted as one SSE block. On client disconnect the upstream is canceled
 // and the partially reassembled data is persisted truncated. With retry_empty
-// active the path switches to held mode: each attempt is fully reassembled
-// without forwarding, premature-empty attempts are re-issued upstream, and the
-// final attempt is emitted once as one SSE block.
+// active the path switches to held mode: each attempt is reassembled without
+// forwarding content, premature-empty attempts are re-issued upstream,
+// reasoning/thinking deltas are forwarded live so the client never waits in
+// silence, and the final attempt is emitted once as one SSE block.
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *config.Config, rt *route, body []byte, sessionID, requestID string, start time.Time) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -647,6 +708,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *confi
 			if rerr != nil {
 				errBody = nil
 			}
+			errBody = translateUpstreamBody(rt.template.Style, resp.StatusCode, errBody)
 			s.capture(streamErrorRecord(rt, body, requestFilteredBody(chain, sentBody), sessionID, requestID, start, resp, errBody, chain.Applied()))
 			s.passthrough(w, resp, errBody)
 			return
@@ -677,6 +739,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *confi
 		if err != nil {
 			respBody = nil
 		}
+		respBody = translateUpstreamBody(rt.template.Style, resp.StatusCode, respBody)
 		rec := &store.CaptureRecord{
 			ID:             requestID,
 			SessionID:      sessionID,
@@ -721,7 +784,12 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *confi
 	}
 	emitter := s.emitterFactory(w, source, filter)
 
-	out := readStream(ctx, resp, asm, emitter.Write)
+	var out streamOutcome
+	if rt.template.Style == config.StyleAnthropic {
+		out = readAnthropicStream(ctx, resp, asm, emitter.Write)
+	} else {
+		out = readStream(ctx, resp, asm, emitter.Write)
+	}
 	_ = emitter.Done()
 
 	rec := &store.CaptureRecord{
@@ -778,8 +846,16 @@ func (s *Server) handleStreamRetry(w http.ResponseWriter, ctx context.Context, c
 	)
 	attempt := 1
 	rsp := firstResp
+	// readAttempt reads one upstream SSE attempt in held mode, translating
+	// anthropic-style streams to the OpenAI shape.
+	readAttempt := func(r *http.Response) streamOutcome {
+		if rt.template.Style == config.StyleAnthropic {
+			return readAnthropicStream(ctx, r, newAssembler(), s.holdStreamForward(w, flusher))
+		}
+		return readStream(ctx, r, newAssembler(), s.holdStreamForward(w, flusher))
+	}
 	for {
-		attemptOut := readStream(ctx, rsp, newAssembler(), discardStream)
+		attemptOut := readAttempt(rsp)
 		rsp.Body.Close()
 		if !(isEmptyCompletion(attemptOut.reassembled) && attempt < maxRetryAttempts) {
 			out = attemptOut
@@ -818,6 +894,7 @@ func (s *Server) handleStreamRetry(w http.ResponseWriter, ctx context.Context, c
 			if rerr != nil {
 				errBody = nil
 			}
+			errBody = translateUpstreamBody(rt.template.Style, rsp.StatusCode, errBody)
 			s.retryAttemptError(w, flusher, streamErrorRecord(rt, body, requestFilteredBody(chain, sentBody), sessionID, requestID, start, rsp, errBody, chain.Applied()), attempt, "UPSTREAM_ERROR", fmt.Sprintf("upstream returned non-2xx status %d", rsp.StatusCode))
 			return
 		}
@@ -918,9 +995,60 @@ func streamErrorRecord(rt *route, body, filteredBody []byte, sessionID, requestI
 	return rec
 }
 
-// discardStream is the retry-empty held-mode forward: nothing is written to
-// the client until the final attempt completes.
-func discardStream([]byte) error { return nil }
+// holdStreamForward is the retry-empty held-mode forward: reasoning/thinking
+// deltas (delta.reasoning / delta.reasoning_content) and keepalive comment
+// lines are written to the client immediately, so the connection stays
+// visibly alive across a held attempt — idle/first-token timeouts never fire
+// and the agent shows thinking progress instead of appearing hung — while
+// content, tool_calls, finish_reason, and [DONE] stay held until the attempt
+// is known non-empty. The reassembly is unaffected: the assembler never folds
+// reasoning into content.
+func (s *Server) holdStreamForward(w io.Writer, flusher http.Flusher) func([]byte) error {
+	forward := func(line []byte) error {
+		if _, err := w.Write(line); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	}
+	return func(line []byte) error {
+		payload := ssePayload(string(line))
+		if payload == nil {
+			// Keepalive comments and other non-data lines pass through.
+			return forward(line)
+		}
+		if string(payload) != "[DONE]" && carriesReasoning(payload) {
+			return forward(line)
+		}
+		return nil
+	}
+}
+
+// carriesReasoning reports whether an SSE data payload is a chunk whose delta
+// carries non-empty reasoning/thinking content. Such chunks are forwarded
+// live by the held retry path so the client sees progress during an attempt.
+func carriesReasoning(payload []byte) bool {
+	var ev struct {
+		Choices []struct {
+			Delta struct {
+				Reasoning        *string `json:"reasoning"`
+				ReasoningContent *string `json:"reasoning_content"`
+			} `json:"delta"`
+		} `json:"choices"`
+	}
+	if json.Unmarshal(payload, &ev) != nil {
+		return false
+	}
+	for _, c := range ev.Choices {
+		if c.Delta.Reasoning != nil && strings.TrimSpace(*c.Delta.Reasoning) != "" {
+			return true
+		}
+		if c.Delta.ReasoningContent != nil && strings.TrimSpace(*c.Delta.ReasoningContent) != "" {
+			return true
+		}
+	}
+	return false
+}
 
 // capture persists one request in a single store transaction and appends the
 // §8 log lines. A fresh context (not the canceled client context) is used so
@@ -1002,11 +1130,15 @@ func parseCompletionMeta(body []byte) (string, json.RawMessage) {
 
 // isEmptyCompletion reports whether a 2xx chat-completion body is
 // premature-empty: the first choice has no content (absent/nil/whitespace
-// string, or an empty array), no tool_calls, and an empty or missing
-// finish_reason. An empty choices list counts as empty; reasoning volume is
-// never present in reassembled content, so it does not count. A body that is
-// not JSON (or unparseable) is conservatively NOT empty — the retry loop only
-// fires on a provable premature-empty result.
+// string, or an empty array) and no tool_calls. An empty choices list counts
+// as empty; reasoning volume is never present in reassembled content, so it
+// does not count. The finish_reason is deliberately not consulted: providers
+// that reason and then terminate (e.g. openrouter stealth/ox-alpha) routinely
+// stop with a populated finish_reason ("stop"/"length") and an empty message,
+// and an empty assistant turn is never useful to the client, so it is retried
+// like any other premature-empty result. A body that is not JSON (or
+// unparseable) is conservatively NOT empty — the retry loop only fires on a
+// provable premature-empty result.
 func isEmptyCompletion(body []byte) bool {
 	var c struct {
 		Choices []struct {
@@ -1014,7 +1146,6 @@ func isEmptyCompletion(body []byte) bool {
 				Content   json.RawMessage   `json:"content"`
 				ToolCalls []json.RawMessage `json:"tool_calls"`
 			} `json:"message"`
-			FinishReason *string `json:"finish_reason"`
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(body, &c); err != nil {
@@ -1039,14 +1170,7 @@ func isEmptyCompletion(body []byte) bool {
 			contentEmpty = json.Unmarshal(ch.Message.Content, &arr) == nil && len(arr) == 0
 		}
 	}
-	if !contentEmpty {
-		return false
-	}
-	finish := ""
-	if ch.FinishReason != nil {
-		finish = *ch.FinishReason
-	}
-	return strings.TrimSpace(finish) == ""
+	return contentEmpty
 }
 
 // providerError extracts {code, message} from an OpenAI-shaped non-2xx body,
@@ -1134,6 +1258,12 @@ func modelField(body []byte) (string, bool) {
 // the provider sees the plain resolved model name (e.g. "gpt-4o") rather than
 // the client's "openai-2/gpt-4o" routing key.
 func rewriteModel(body []byte, model string) ([]byte, error) {
+	return rewriteModelAndReasoning(body, model, "")
+}
+
+// rewriteModelAndReasoning re-serializes the body with the model field set to model
+// and optionally reasoning_effort set to reasoning (when non-empty).
+func rewriteModelAndReasoning(body []byte, model string, reasoning string) ([]byte, error) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(body, &m); err != nil {
 		return nil, err
@@ -1143,6 +1273,13 @@ func rewriteModel(body []byte, model string) ([]byte, error) {
 		return nil, err
 	}
 	m["model"] = b
+	if reasoning != "" {
+		rb, err := json.Marshal(reasoning)
+		if err != nil {
+			return nil, err
+		}
+		m["reasoning_effort"] = rb
+	}
 	return json.Marshal(m)
 }
 

@@ -62,6 +62,17 @@ func (l *appendLog) trim(cutoff string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	// Fast path: when the oldest line is already at or after the cutoff there
+	// is nothing to remove, so skip the rewrite. The startup purge and the
+	// daily retention tick call trim even when the SQL deletes removed nothing,
+	// and rewriting a multi-GB log then would stall serving for minutes on
+	// every restart. A line that survived a previously failed trim is still
+	// older than the cutoff, so the rewrite path is taken and the retry
+	// happens as before.
+	if oldest, err := firstLineTS(l.path); err == nil && oldest != "" && oldest >= cutoff {
+		return nil
+	}
+
 	in, err := os.Open(l.path)
 	if err != nil {
 		return err
@@ -123,6 +134,33 @@ func (l *appendLog) trim(cutoff string) error {
 	old := l.file
 	l.file = nf
 	return old.Close()
+}
+
+// firstLineTS returns the ts field of the first line in the log — the oldest
+// record, since the §8 log is append-only and ts is monotonic. A "" ts means
+// an empty log; a non-nil error means the first line's ts could not be read or
+// parsed (callers fall back to the full rewrite, which never drops undateable
+// lines).
+func firstLineTS(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	line, err := bufio.NewReader(f).ReadBytes('\n')
+	if len(line) == 0 {
+		return "", nil
+	}
+	if err != nil && err != io.EOF {
+		return "", err
+	}
+	var env struct {
+		TS string `json:"ts"`
+	}
+	if jerr := json.Unmarshal(line, &env); jerr != nil {
+		return "", jerr
+	}
+	return env.TS, nil
 }
 
 // keepLine reports whether a §8 JSONL line survives at the cutoff. The ts

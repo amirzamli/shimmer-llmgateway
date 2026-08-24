@@ -295,7 +295,7 @@ func TestBuiltinTemplatesPresent(t *testing.T) {
 	want := []string{
 		"openai", "anthropic", "ollama", "groq", "vllm", "lite_llm",
 		"openrouter", "deepseek", "gemini", "mistral", "kimi", "zai",
-		"opencode_zen", "opencode_go",
+		"opencode_zen", "opencode_go", "commandcode",
 	}
 	for _, name := range want {
 		if _, ok := cfg.Templates[name]; !ok {
@@ -324,6 +324,9 @@ func TestBuiltinTemplatesPresent(t *testing.T) {
 	}
 	if cfg.Templates["openrouter"].APIKeyEnv == "" || cfg.Templates["openai"].APIKeyEnv == "" {
 		t.Error("openrouter/openai api_key_env must be non-empty")
+	}
+	if cfg.Templates["commandcode"].BaseURL != "https://api.commandcode.ai/provider/v1" {
+		t.Errorf("commandcode base_url = %q", cfg.Templates["commandcode"].BaseURL)
 	}
 }
 
@@ -962,6 +965,117 @@ model_aliases = { small = "gpt-4o-mini" }
 	}
 }
 
+func TestResolveUnprefixedPriorityOverridesFileOrder(t *testing.T) {
+	// The first instance in file order maps small but carries a higher
+	// (worse) priority; the later instance with priority 1 must win.
+	cfg := mustParse(t, `
+[[instances]]
+alias = "first"
+template = "openai"
+priority = 2
+model_aliases = { small = "gpt-4o" }
+
+[[instances]]
+alias = "second"
+template = "openai"
+priority = 1
+model_aliases = { small = "gpt-4o-mini" }
+`)
+	inst, model, err := cfg.Resolve("small")
+	if err != nil {
+		t.Fatalf("Resolve(small): %v", err)
+	}
+	if inst.Alias != "second" || model != "gpt-4o-mini" {
+		t.Errorf("got (%q, %q), want (second, gpt-4o-mini) — priority 1 beats file order", inst.Alias, model)
+	}
+}
+
+func TestResolvePriorityUnsetComesAfterPrioritized(t *testing.T) {
+	// An instance with no explicit priority keeps file order among unset
+	// instances, but any prioritized instance beats all of them.
+	cfg := mustParse(t, `
+[[instances]]
+alias = "unset-a"
+template = "openai"
+model_aliases = { small = "gpt-4o" }
+
+[[instances]]
+alias = "prio"
+template = "openai"
+priority = 5
+model_aliases = { small = "gpt-4o-mini" }
+
+[[instances]]
+alias = "unset-b"
+template = "openai"
+model_aliases = { small = "gpt-4o-turbo" }
+`)
+	inst, model, err := cfg.Resolve("small")
+	if err != nil {
+		t.Fatalf("Resolve(small): %v", err)
+	}
+	if inst.Alias != "prio" || model != "gpt-4o-mini" {
+		t.Errorf("got (%q, %q), want (prio, gpt-4o-mini) — explicit priority beats unset instances", inst.Alias, model)
+	}
+}
+
+func TestResolvePriorityUnsetKeepsFileOrderAmongItself(t *testing.T) {
+	cfg := mustParse(t, `
+[[instances]]
+alias = "unset-a"
+template = "openai"
+model_aliases = { small = "gpt-4o" }
+
+[[instances]]
+alias = "unset-b"
+template = "openai"
+model_aliases = { small = "gpt-4o-mini" }
+`)
+	inst, model, err := cfg.Resolve("small")
+	if err != nil {
+		t.Fatalf("Resolve(small): %v", err)
+	}
+	if inst.Alias != "unset-a" || model != "gpt-4o" {
+		t.Errorf("got (%q, %q), want (unset-a, gpt-4o) — file order among unset instances", inst.Alias, model)
+	}
+}
+
+func TestAliasModelIDsPriorityOrder(t *testing.T) {
+	cfg := mustParse(t, `
+[[instances]]
+alias = "low"
+template = "openai"
+priority = 2
+model_aliases = { small = "gpt-4o" }
+
+[[instances]]
+alias = "high"
+template = "openai"
+priority = 1
+model_aliases = { small = "gpt-4o-mini", tiny = "gpt-4o" }
+`)
+	ids := cfg.AliasModelIDs()
+	want := []string{"small", "high/small", "tiny", "high/tiny", "low/small"}
+	if strings.Join(ids, ",") != strings.Join(want, ",") {
+		t.Errorf("AliasModelIDs = %v, want %v (priority-ordered: high before low)", ids, want)
+	}
+}
+
+func TestValidationNegativePriority(t *testing.T) {
+	_, err := Parse([]byte(`
+[[instances]]
+alias = "x"
+template = "openai"
+priority = -1
+`))
+	if err == nil || !IsValidationError(err) {
+		t.Fatalf("err = %v, want ValidationError", err)
+	}
+	if !strings.Contains(err.Error(), "priority") {
+		t.Errorf("error %q does not mention priority", err)
+	}
+}
+
 func TestResolveUnprefixedDisabledInstanceMapSkipped(t *testing.T) {
 	cfg := mustParse(t, `
 [settings]
@@ -1075,15 +1189,176 @@ func TestCloneDeepCopiesModelAliases(t *testing.T) {
 alias = "openai"
 template = "openai"
 model_aliases = { small = "gpt-4o-mini" }
+model_reasoning = { small = "high" }
 `)
 	clone := cfg.Clone()
 	clone.Instances[0].ModelAliases["small"] = "mutated"
 	clone.Instances[0].ModelAliases["extra"] = "added"
+	clone.Instances[0].ModelReasoning["small"] = "low"
+	clone.Instances[0].ModelReasoning["extra"] = "none"
 	if got := cfg.Instances[0].ModelAliases["small"]; got != "gpt-4o-mini" {
 		t.Errorf("original model_aliases mutated by clone: %v", cfg.Instances[0].ModelAliases)
 	}
 	if _, ok := cfg.Instances[0].ModelAliases["extra"]; ok {
 		t.Error("original model_aliases gained a key from the clone")
+	}
+	if got := cfg.Instances[0].ModelReasoning["small"]; got != "high" {
+		t.Errorf("original model_reasoning mutated by clone: %v", cfg.Instances[0].ModelReasoning)
+	}
+	if _, ok := cfg.Instances[0].ModelReasoning["extra"]; ok {
+		t.Error("original model_reasoning gained a key from the clone")
+	}
+}
+
+func TestModelReasoningValidationAndEffective(t *testing.T) {
+	valid := `
+[[instances]]
+alias = "openai"
+template = "openai"
+model_aliases = { small = "gpt-4o-mini", med = "gpt-4o" }
+model_reasoning = { small = "high", med = "default" }
+`
+	cfg := mustParse(t, valid)
+	inst := cfg.Instances[0]
+	if got := inst.EffectiveReasoning("small"); got != "high" {
+		t.Errorf("EffectiveReasoning(small) = %q, want high", got)
+	}
+	if got := inst.EffectiveReasoning("med"); got != "" {
+		t.Errorf("EffectiveReasoning(med) = %q, want empty (default)", got)
+	}
+	if got := inst.EffectiveReasoning("unknown"); got != "" {
+		t.Errorf("EffectiveReasoning(unknown) = %q, want empty", got)
+	}
+
+	invalidEffort := `
+[[instances]]
+alias = "openai"
+template = "openai"
+model_reasoning = { small = "extreme" }
+`
+	if _, err := Parse([]byte(invalidEffort)); err == nil {
+		t.Fatal("Parse accepted invalid model reasoning level 'extreme'")
+	}
+
+	invalidKey := `
+[[instances]]
+alias = "openai"
+template = "openai"
+model_reasoning = { "invalid key!" = "high" }
+`
+	if _, err := Parse([]byte(invalidKey)); err == nil {
+		t.Fatal("Parse accepted invalid model reasoning key")
+	}
+}
+
+func TestModelReasoningGatedByAdvertisedOptions(t *testing.T) {
+	// The deepseek template advertises [high max] for deepseek-v4-pro: max is
+	// accepted, medium (valid on unadvertised models) is rejected with the
+	// advertised list in the error.
+	accepted := `
+[[instances]]
+alias = "ds"
+template = "deepseek"
+model_aliases = { big = "deepseek-v4-pro" }
+model_reasoning = { big = "max" }
+`
+	cfg := mustParse(t, accepted)
+	if got := cfg.Instances[0].EffectiveReasoning("big"); got != "max" {
+		t.Errorf("EffectiveReasoning(big) = %q, want max", got)
+	}
+
+	rejected := `
+[[instances]]
+alias = "ds"
+template = "deepseek"
+model_aliases = { big = "deepseek-v4-pro" }
+model_reasoning = { big = "medium" }
+`
+	_, err := Parse([]byte(rejected))
+	if err == nil {
+		t.Fatal("Parse accepted 'medium' for deepseek-v4-pro, which advertises only high/max")
+	}
+	if !strings.Contains(err.Error(), "high, max") {
+		t.Errorf("error %v should list the advertised levels", err)
+	}
+
+	// An alias whose model has no advertised options falls back to the
+	// generic vocabulary: medium passes, extreme still fails.
+	generic := `
+[[instances]]
+alias = "ds"
+template = "deepseek"
+model_aliases = { chat = "deepseek-chat" }
+model_reasoning = { chat = "medium" }
+`
+	if _, err := Parse([]byte(generic)); err != nil {
+		t.Errorf("Parse rejected generic level for unadvertised model: %v", err)
+	}
+	extreme := `
+[[instances]]
+alias = "ds"
+template = "deepseek"
+model_aliases = { chat = "deepseek-chat" }
+model_reasoning = { chat = "extreme" }
+`
+	if _, err := Parse([]byte(extreme)); err == nil {
+		t.Fatal("Parse accepted invalid model reasoning level 'extreme' via fallback")
+	}
+}
+
+func TestTemplateModelReasoningOptionsCloneAndUserGating(t *testing.T) {
+	user := `
+[providers.custom]
+base_url = "https://example.com/v1"
+models = ["m1"]
+model_reasoning_options = { m1 = ["low", "max"] }
+
+[[instances]]
+alias = "c"
+template = "custom"
+model_aliases = { a = "m1" }
+model_reasoning = { a = "low" }
+`
+	cfg := mustParse(t, user)
+
+	// Clone deep-copies the options map: mutating the clone must not touch
+	// the original.
+	clone := cfg.Clone()
+	clone.Templates["custom"].ModelReasoningOptions["m1"][0] = "mutated"
+	if got := cfg.Templates["custom"].ModelReasoningOptions["m1"][0]; got != "low" {
+		t.Errorf("original template options mutated by clone: %q", got)
+	}
+
+	// A user-defined template's advertised options gate instance values too.
+	maxCfg := `
+[providers.custom]
+base_url = "https://example.com/v1"
+models = ["m1"]
+model_reasoning_options = { m1 = ["low", "max"] }
+
+[[instances]]
+alias = "c"
+template = "custom"
+model_aliases = { a = "m1" }
+model_reasoning = { a = "max" }
+`
+	if _, err := Parse([]byte(maxCfg)); err != nil {
+		t.Errorf("Parse rejected advertised value 'max': %v", err)
+	}
+	badCfg := `
+[providers.custom]
+base_url = "https://example.com/v1"
+models = ["m1"]
+model_reasoning_options = { m1 = ["low", "max"] }
+
+[[instances]]
+alias = "c"
+template = "custom"
+model_aliases = { a = "m1" }
+model_reasoning = { a = "high" }
+`
+	if _, err := Parse([]byte(badCfg)); err == nil {
+		t.Fatal("Parse accepted 'high' although user template advertises only low/max")
 	}
 }
 
@@ -1487,5 +1762,46 @@ plugins = ["retry_empty"]
 	c := re.Instances[aliasIndex(t, re, "c")]
 	if c.Plugins == nil || strings.Join(*c.Plugins, ",") != "retry_empty" {
 		t.Errorf("non-empty instance plugins after round trip = %#v, want [retry_empty]", c.Plugins)
+	}
+}
+
+func TestTemplateStyleValidation(t *testing.T) {
+	// A bad style is rejected; the anthropic style is accepted.
+	if _, err := Parse([]byte("[providers.x]\nbase_url = \"https://x\"\nstyle = \"grpc\"\n")); err == nil {
+		t.Errorf("Parse accepted style = grpc")
+	}
+	cfg, err := Parse([]byte("[providers.x]\nbase_url = \"https://x\"\nstyle = \"anthropic\"\n"))
+	if err != nil {
+		t.Fatalf("Parse anthropic style: %v", err)
+	}
+	if cfg.Templates["x"].Style != StyleAnthropic {
+		t.Errorf("style = %q, want anthropic", cfg.Templates["x"].Style)
+	}
+}
+
+func TestCustomPlaceholderTemplates(t *testing.T) {
+	// The placeholders load without a base_url (exempt from validation).
+	cfg, err := Parse([]byte(``))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	for _, name := range []string{CustomOpenAI, CustomAnthropic} {
+		tmpl, ok := cfg.Templates[name]
+		if !ok {
+			t.Fatalf("missing placeholder template %q", name)
+		}
+		if tmpl.BaseURL != "" {
+			t.Errorf("placeholder %q base_url = %q, want empty", name, tmpl.BaseURL)
+		}
+	}
+	if cfg.Templates[CustomAnthropic].Style != StyleAnthropic {
+		t.Errorf("custom_anthropic style = %q", cfg.Templates[CustomAnthropic].Style)
+	}
+
+	// An instance referencing a placeholder is rejected (it must be resolved
+	// to a concrete per-endpoint template first).
+	_, err = Parse([]byte("[[instances]]\nalias = \"x\"\ntemplate = \"custom_openai\"\n"))
+	if err == nil {
+		t.Errorf("Parse accepted an instance of the custom_openai placeholder")
 	}
 }

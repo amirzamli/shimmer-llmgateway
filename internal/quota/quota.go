@@ -81,6 +81,7 @@ type Result struct {
 	Configured bool              `json:"configured"`
 	Ok         bool              `json:"ok"`
 	Error      string            `json:"error,omitempty"`
+	UsageURL   string            `json:"usage_url,omitempty"`
 	Windows    map[string]Window `json:"windows,omitempty"`
 	FetchedAt  time.Time         `json:"fetched_at"`
 }
@@ -93,13 +94,19 @@ type providerSpec struct {
 	parse        func([]byte) (map[string]Window, error)
 }
 
-// specs registers the quota strategies exactly for the three providers with
-// account balance/quota endpoints. Unsupported templates are reported as a
+// specs registers the quota strategies for providers with
+// account balance/quota/usage endpoints. Unsupported templates are reported as a
 // gap rather than fetched.
 var specs = map[string]providerSpec{
 	"deepseek":    {providerName: "DeepSeek", suffix: "/user/balance", parse: parseDeepSeek},
 	"opencode_go": {providerName: "OpenCode Go", suffix: "/usage", parse: parseOpenCodeGo},
 	"openrouter":  {providerName: "OpenRouter", suffix: "/credits", parse: parseOpenRouter},
+}
+
+// usageURLs maps template names to web-based usage / quota dashboard URLs
+// when API-based quota fetching is unsupported.
+var usageURLs = map[string]string{
+	"commandcode": "https://commandcode.ai/studio",
 }
 
 // Fetcher resolves per-instance quota/balance with a TTL cache keyed by
@@ -166,6 +173,7 @@ func (f *Fetcher) resultFor(ctx context.Context, cfg *config.Config, inst *confi
 			Configured: false,
 			Ok:         false,
 			Error:      quotaErrUnsupported,
+			UsageURL:   usageURLs[inst.Template],
 			FetchedAt:  time.Now(),
 		}
 	}
@@ -447,4 +455,35 @@ func parseOpenRouter(body []byte) (map[string]Window, error) {
 		}
 	}
 	return map[string]Window{"credits": w}, nil
+}
+
+// parseCommandCode parses GET {base}/usage/summary: totalCost / totalCount / totalTokens
+// or similar usage stats.
+func parseCommandCode(body []byte) (map[string]Window, error) {
+	var payload struct {
+		TotalCost    json.RawMessage `json:"totalCost"`
+		TotalCredits json.RawMessage `json:"totalCredits"`
+		TotalTokens  json.RawMessage `json:"totalTokens"`
+		TotalCount   json.RawMessage `json:"totalCount"`
+		SuccessRate  json.RawMessage `json:"successRate"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
+	}
+	cost, okCost := asFloat(payload.TotalCost)
+	count, okCount := asFloat(payload.TotalCount)
+	if !okCost && !okCount {
+		return nil, errNoQuotaData
+	}
+	var label string
+	if okCost && okCount {
+		label = fmt.Sprintf("$%.2f spent · %d requests", cost, int64(count))
+	} else if okCost {
+		label = fmt.Sprintf("$%.2f spent", cost)
+	} else {
+		label = fmt.Sprintf("%d requests", int64(count))
+	}
+	return map[string]Window{
+		"usage": {ValueLabel: label},
+	}, nil
 }

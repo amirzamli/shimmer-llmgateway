@@ -18,6 +18,11 @@ log_payloads = false            # opt-in: log redacted payloads to the console
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"  # default for the first instance
 models = ["gpt-4o", "gpt-4o-mini"]
+# Optional per-model advertised reasoning levels (model_reasoning_options):
+# gates instance `model_reasoning` values and drives the UI dropdown. Built-ins
+# seed this where known (e.g. deepseek-v4-flash: low/high/max); models without
+# metadata accept default/none/minimal/low/medium/high/xhigh/max.
+# model_reasoning_options = { "gpt-4o" = ["low", "medium", "high"] }
 
 [providers.ollama]              # keyless local provider
 base_url = "http://localhost:11434/v1"
@@ -31,9 +36,16 @@ models = ["llama3.1"]
 # `plugins` line resolves from the global settings (empty by default = OFF).
 # The built-in opencode_go template seeds ["retry_empty"], a control plugin
 # that re-issues an upstream request when the provider returns a premature-
-# empty result (no content, no tool calls, empty finish) — up to 3 attempts.
+# empty result (no content, no tool calls — regardless of finish_reason) —
+# up to 3 attempts. Also useful for OpenRouter reasoning models such as
+# stealth/ox-alpha that intermittently reason and then stop empty.
 # Enable it per instance with `plugins = ["retry_empty"]`; disable it durably
 # with an explicit `plugins = []`.
+[providers.openrouter]           # OpenRouter reasoning models (e.g. stealth/ox-alpha)
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+models = ["openrouter/auto"]
+
 [providers.opencode_go]
 base_url = "https://opencode.ai/zen/go/v1"
 api_key_env = "OPENCODE_API_KEY"
@@ -44,3 +56,5 @@ plugins = ["retry_empty"]
 alias = "openai"
 template = "openai"
 api_key_env = "OPENAI_API_KEY"
+# priority = 1                  # lower = higher routing priority for unprefixed
+                                # model names (e.g. "small"); unset = file order

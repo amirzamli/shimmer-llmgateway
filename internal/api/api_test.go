@@ -145,6 +145,22 @@ func TestTemplatesListAndCreate(t *testing.T) {
 			t.Errorf("templates list missing builtin %q", want)
 		}
 	}
+	// Seeded built-ins expose per-model advertised reasoning options so the
+	// UI can render per-model dropdowns.
+	for _, x := range out["templates"].([]any) {
+		entry := x.(map[string]any)
+		if entry["name"] != "deepseek" {
+			continue
+		}
+		opts, ok := entry["model_reasoning_options"].(map[string]any)
+		if !ok {
+			t.Fatalf("deepseek template missing model_reasoning_options: %v", entry)
+		}
+		flash, ok := opts["deepseek-v4-flash"].([]any)
+		if !ok || len(flash) != 3 || flash[0] != "low" || flash[2] != "max" {
+			t.Errorf("deepseek-v4-flash advertised options = %v, want [low high max]", flash)
+		}
+	}
 
 	status, created := doJSON(t, gs, "POST", "/api/templates", `{"name":"myprov","base_url":"https://example.com/v1","api_key_env":"","models":["m1"]}`)
 	if status != http.StatusCreated {
@@ -1180,8 +1196,8 @@ func TestInstancePatchModelAliasesValidation(t *testing.T) {
 func TestInstancePatchCombinedFields(t *testing.T) {
 	gs, _, _, _ := newAPITest(t, apiTestTOML, testMasterKey)
 
-	// Rename + disable + model_aliases together: all fields apply.
-	status, inst := doJSON(t, gs, "PATCH", "/api/instances/openai", `{"alias":"main","disabled":true,"model_aliases":{"small":"gpt-4o-mini"}}`)
+	// Rename + disable + model_aliases + model_reasoning together: all fields apply.
+	status, inst := doJSON(t, gs, "PATCH", "/api/instances/openai", `{"alias":"main","disabled":true,"model_aliases":{"small":"gpt-4o-mini"},"model_reasoning":{"small":"high"}}`)
 	if status != http.StatusOK {
 		t.Fatalf("PATCH combined status = %d, body %v", status, inst)
 	}
@@ -1190,5 +1206,185 @@ func TestInstancePatchCombinedFields(t *testing.T) {
 	}
 	if got := inst["model_aliases"].(map[string]any)["small"]; got != "gpt-4o-mini" {
 		t.Errorf("combined model_aliases = %v, want {small: gpt-4o-mini}", inst["model_aliases"])
+	}
+	if got := inst["model_reasoning"].(map[string]any)["small"]; got != "high" {
+		t.Errorf("combined model_reasoning = %v, want {small: high}", inst["model_reasoning"])
+	}
+}
+
+func TestInstanceOrderSetsPriorities(t *testing.T) {
+	// Fixture with two instances: openai then openai-2.
+	toml := apiTestTOML + `
+[[instances]]
+alias = "openai-2"
+template = "openai"
+`
+	gs, _, _, cfgPath := newAPITest(t, toml, testMasterKey)
+
+	// Reverse the order: openai-2 first (priority 1), openai second (2).
+	resp := doRaw(t, gs, "PUT", "/api/instances/order", `{"aliases":["openai-2","openai"]}`)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("PUT order status = %d, want 204", resp.StatusCode)
+	}
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload persisted config: %v", err)
+	}
+	byAlias := map[string]int{}
+	for _, inst := range reloaded.Instances {
+		byAlias[inst.Alias] = inst.Priority
+	}
+	if byAlias["openai-2"] != 1 || byAlias["openai"] != 2 {
+		t.Errorf("priorities = %v, want openai-2:1 openai:2", byAlias)
+	}
+
+	// Invalid bodies are rejected: missing aliases, duplicates, empty.
+	for _, body := range []string{
+		`{"aliases":["openai"]}`,
+		`{"aliases":["openai","openai"]}`,
+		`{"aliases":["openai",""]}`,
+		`{"aliases":["openai","openai-2","extra"]}`,
+	} {
+		status, out := doJSON(t, gs, "PUT", "/api/instances/order", body)
+		if status != http.StatusBadRequest {
+			t.Errorf("PUT order %s status = %d, want 400 (%v)", body, status, out)
+		}
+	}
+}
+
+func TestInstancePatchPriority(t *testing.T) {
+	gs, _, _, cfgPath := newAPITest(t, apiTestTOML, testMasterKey)
+
+	status, inst := doJSON(t, gs, "PATCH", "/api/instances/openai", `{"priority":7}`)
+	if status != http.StatusOK {
+		t.Fatalf("PATCH priority status = %d, body %v", status, inst)
+	}
+	if got := inst["priority"]; got != float64(7) {
+		t.Errorf("priority after PATCH = %v, want 7", got)
+	}
+
+	// The patched priority is persisted to gateway.toml.
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload persisted config: %v", err)
+	}
+	if got := reloaded.Instances[0].Priority; got != 7 {
+		t.Errorf("persisted priority = %d, want 7", got)
+	}
+
+	// Explicit 0 clears the priority back to unset (file order).
+	status, inst = doJSON(t, gs, "PATCH", "/api/instances/openai", `{"priority":0}`)
+	if status != http.StatusOK {
+		t.Fatalf("PATCH priority=0 status = %d, body %v", status, inst)
+	}
+	if _, present := inst["priority"]; present {
+		t.Errorf("priority should be omitted after clearing, got %v", inst["priority"])
+	}
+	reloaded, err = config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload persisted config after clear: %v", err)
+	}
+	if got := reloaded.Instances[0].Priority; got != 0 {
+		t.Errorf("persisted priority after clear = %d, want 0", got)
+	}
+}
+
+func TestInstanceCreateCustomEndpoint(t *testing.T) {
+	gs, _, _, cfgPath := newAPITest(t, apiTestTOML, testMasterKey)
+
+	// A custom_openai placeholder without an endpoint URL is refused.
+	status, out := doJSON(t, gs, "POST", "/api/instances", `{"template":"custom_openai","alias":"myai"}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("placeholder without endpoint status = %d, want 400 (%v)", status, out)
+	}
+
+	// With an endpoint URL the placeholder resolves into a concrete custom
+	// template and the instance is created against it.
+	status, inst := doJSON(t, gs, "POST", "/api/instances", `{"template":"custom_openai","alias":"myai","base_url":"http://localhost:8080/v1","models":["my-model"]}`)
+	if status != http.StatusCreated {
+		t.Fatalf("custom create status = %d, body %v", status, inst)
+	}
+	if got := inst["template"]; got != "custom-openai-localhost-8080-v1" {
+		t.Errorf("instance template = %v, want custom-openai-localhost-8080-v1", got)
+	}
+	if got := inst["style"]; got != "openai" {
+		t.Errorf("instance style = %v, want openai", got)
+	}
+	if got := inst["base_url"]; got != "http://localhost:8080/v1" {
+		t.Errorf("instance base_url = %v", got)
+	}
+
+	// The custom template is persisted to the config file and reusable: a
+	// second instance with the same endpoint reuses it (no duplicate).
+	status, inst2 := doJSON(t, gs, "POST", "/api/instances", `{"template":"custom_openai","alias":"myai-2","base_url":"http://localhost:8080/v1"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("second custom create status = %d, body %v", status, inst2)
+	}
+	if got := inst2["template"]; got != "custom-openai-localhost-8080-v1" {
+		t.Errorf("second instance template = %v", got)
+	}
+	status, tmplList := doJSON(t, gs, "GET", "/api/templates", "")
+	count := 0
+	for _, x := range tmplList["templates"].([]any) {
+		if x.(map[string]any)["name"] == "custom-openai-localhost-8080-v1" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("custom template count = %d, want 1 (reused, not duplicated)", count)
+	}
+
+	// Anthropic style: custom_anthropic resolves to the anthropic-styled name.
+	status, inst3 := doJSON(t, gs, "POST", "/api/instances", `{"template":"custom_anthropic","alias":"claude","base_url":"http://localhost:9000","models":["claude-sonnet-4"]}`)
+	if status != http.StatusCreated {
+		t.Fatalf("custom anthropic create status = %d, body %v", status, inst3)
+	}
+	if got := inst3["template"]; got != "custom-anthropic-localhost-9000" {
+		t.Errorf("anthropic instance template = %v, want custom-anthropic-localhost-9000", got)
+	}
+	if got := inst3["style"]; got != "anthropic" {
+		t.Errorf("anthropic instance style = %v", got)
+	}
+
+	// A user-defined anthropic template + endpoint override keeps the style.
+	status, _ = doJSON(t, gs, "POST", "/api/templates", `{"name":"my-anth","base_url":"https://api.example.com/v1","style":"anthropic","models":["m"]}`)
+	if status != http.StatusCreated {
+		t.Fatalf("template create status = %d", status)
+	}
+	status, inst4 := doJSON(t, gs, "POST", "/api/instances", `{"template":"my-anth","alias":"claude-2","base_url":"http://localhost:9001"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("override create status = %d, body %v", status, inst4)
+	}
+	if got := inst4["template"]; got != "custom-anthropic-localhost-9001" {
+		t.Errorf("override instance template = %v, want custom-anthropic-localhost-9001", got)
+	}
+
+	// An invalid endpoint URL is rejected before any write.
+	status, out = doJSON(t, gs, "POST", "/api/instances", `{"template":"custom_openai","base_url":"file:///etc/passwd"}`)
+	if status != http.StatusBadRequest {
+		t.Errorf("bad base_url status = %d, want 400 (%v)", status, out)
+	}
+
+	// The custom templates survive a full config reload.
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload persisted config: %v", err)
+	}
+	for _, want := range []string{"custom-openai-localhost-8080-v1", "custom-anthropic-localhost-9000", "custom-anthropic-localhost-9001"} {
+		if _, ok := reloaded.Templates[want]; !ok {
+			t.Errorf("reloaded config missing template %q", want)
+		}
+	}
+}
+
+func TestTemplateCreateStyleValidation(t *testing.T) {
+	gs, _, _, _ := newAPITest(t, apiTestTOML, testMasterKey)
+	status, out := doJSON(t, gs, "POST", "/api/templates", `{"name":"bad-style","base_url":"https://x","style":"grpc"}`)
+	if status != http.StatusBadRequest {
+		t.Errorf("bad style status = %d, want 400 (%v)", status, out)
+	}
+	status, out = doJSON(t, gs, "POST", "/api/templates", `{"name":"anth","base_url":"https://x","style":"anthropic"}`)
+	if status != http.StatusCreated {
+		t.Errorf("anthropic style template status = %d, want 201 (%v)", status, out)
 	}
 }

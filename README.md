@@ -98,6 +98,14 @@ Key rules:
 - **Aliases** are the routing key: a model named `alias/model` routes to that
   instance; an unprefixed model resolves via `settings.default_alias` (then
   the first instance listing it). Auto-naming: `openai`, `openai-2`, `openai-3`, …
+- **Routing priority.** Unprefixed names resolve over enabled instances in
+  config file order by default. A per-instance `priority = <n>` line reorders
+  that: a lower value wins over a higher one, and any instance with an
+  explicit priority beats instances without one (which keep file order among
+  themselves). Prefixed `alias/model` routing is never affected. Set
+  `priority = 1` on a primary account and `priority = 2` on a fallback to pin
+  which one serves unprefixed names without reordering the file. `0` (or an
+  absent line) means unset. Editable in the UI per instance.
 - **Plugin resolution.** Each instance's effective plugin chain comes from the
   instance's own `plugins` list when set — `plugins = ["retry_empty"]` turns a
   plugin on, an explicit `plugins = []` turns all plugins off for that account
@@ -112,7 +120,7 @@ Key rules:
 - **`retry_empty`** is a control plugin: it is valid config (listed by
   `plugins.Known()` / `GET /api/status`) but never transforms payloads. When
   active it re-issues an upstream request that comes back prematurely empty
-  (no content, no tool calls, empty/missing `finish_reason`), up to 3
+  (no content, no tool calls — regardless of `finish_reason`), up to 3
   attempts, so the client sees a completed turn instead of a reasoning trace
   followed by silence. It is **on by default for `opencode_go` instances** and
   off everywhere else — see [The `retry_empty` control plugin](#the-retry_empty-control-plugin) below.
@@ -130,21 +138,26 @@ Key rules:
 #### The `retry_empty` control plugin
 
 **What it is for.** Some providers (notably those behind `opencode_go`
-instances) intermittently stream reasoning/thinking deltas and then stop with
-**no content, no tool calls, and an empty/missing `finish_reason`** — the
-client sees a reasoning trace followed by silence and often needs a manual
-"continue". `retry_empty` re-issues the upstream request when it detects this
-premature-empty result, so the turn completes without operator intervention.
+instances, and OpenRouter reasoning models like `stealth/ox-alpha`)
+intermittently stream reasoning/thinking deltas and then stop with **no
+content and no tool calls** — the client sees a reasoning trace followed by
+silence and often needs a manual "continue". `retry_empty` re-issues the
+upstream request when it detects this premature-empty result, so the turn
+completes without operator intervention.
 
 **How it works.** Only a 2xx response whose trimmed message content is empty
-(whitespace-only counts) **and** has no `tool_calls` **and** an empty/missing
-`finish_reason` is considered empty; reasoning/thinking tokens never count as
-content, and `len(choices) == 0` also counts as empty. Transport errors and
-non-2xx responses are **never** retried. On a match the gateway re-issues the
-identical upstream request — stream or non-stream — up to **3 attempts total**
-(constant cap, no config knob). For streams the client sees `200` + SSE
-headers and then nothing until an attempt returns non-empty (the stream is
-held/buffered); the final attempt — even if still empty — is emitted to the
+(whitespace-only counts) **and** has no `tool_calls` is considered empty;
+reasoning/thinking tokens never count as content, and `len(choices) == 0` also
+counts as empty. The `finish_reason` is deliberately **not** consulted: an
+empty assistant turn is useless to the client whether the provider stopped
+with an empty `finish_reason` or a populated one (`stop`, `length`, …), so
+both are retried. Transport errors and non-2xx responses are **never**
+retried. On a match the gateway re-issues the identical upstream request —
+stream or non-stream — up to **3 attempts total** (constant cap, no config
+knob). For streams the client sees `200` + SSE headers and then the provider's
+reasoning/thinking deltas forwarded live (the stream is held/buffered only for
+the final content block, so the agent never waits in silence and idle timeouts
+never fire); the final attempt — even if still empty — is emitted to the
 client. Exactly one capture row is written per client request; retries are
 logged via `logger.Warn` ("retry_empty", with request id, alias, attempt).
 

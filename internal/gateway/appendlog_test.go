@@ -103,3 +103,43 @@ func TestAppendLogTrimRetention(t *testing.T) {
 		t.Errorf("post-trim append missing the new record: %v", lines)
 	}
 }
+
+func TestAppendLogTrimFastPathSkipsRewrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gateway.db.jsonl")
+	l, err := openAppendLog(path)
+	if err != nil {
+		t.Fatalf("openAppendLog: %v", err)
+	}
+	defer l.Close()
+
+	recent := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	if err := l.write(testRec("req-new", "sess-new", 1, recent)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+
+	// Cutoff at/before the oldest line: nothing to trim, so the rewrite must be
+	// skipped entirely (the rename-based rewrite would replace the inode).
+	if err := l.trim("2026-06-01T12:00:00.000Z"); err != nil {
+		t.Fatalf("trim: %v", err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if !os.SameFile(before, after) {
+		t.Error("trim rewrote the log despite nothing to trim")
+	}
+
+	// Appends after the skipped trim still land in the same file.
+	if err := l.write(testRec("req-after", "sess-new", 2, recent)); err != nil {
+		t.Fatalf("write after trim: %v", err)
+	}
+	lines := readAppendLog(t, path)
+	if len(lines) != 3 {
+		t.Fatalf("append log = %d lines, want 3: %v", len(lines), lines)
+	}
+}
