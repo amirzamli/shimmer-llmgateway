@@ -25,6 +25,7 @@ import (
 	"github.com/amirzamli/shimmer-llmgateway/internal/config"
 	"github.com/amirzamli/shimmer-llmgateway/internal/logging"
 	"github.com/amirzamli/shimmer-llmgateway/internal/plugins"
+	"github.com/amirzamli/shimmer-llmgateway/internal/pricing"
 	"github.com/amirzamli/shimmer-llmgateway/internal/secrets"
 	"github.com/amirzamli/shimmer-llmgateway/internal/store"
 	"github.com/amirzamli/shimmer-llmgateway/web"
@@ -77,6 +78,10 @@ type Server struct {
 	// emitter (reassemble → run response filters → emit one SSE block) when
 	// they are.
 	emitterFactory func(w http.ResponseWriter, source EmitterSource, filter EmitterFilter) Emitter
+	// pricing holds the embedded per-model token rates used to estimate the
+	// cost of captured traffic (nil when the table failed to load, which
+	// disables cost estimation).
+	pricing *pricing.Table
 }
 
 // New builds a gateway server over cfg/st, opening the §8 append log at
@@ -98,6 +103,10 @@ func New(cfg *config.ConfigManager, st *store.Store, logger *logging.Logger, con
 		ap.Close()
 		return nil, fmt.Errorf("gateway: open secrets %s.secrets.json: %w", st.Path(), err)
 	}
+	pt, perr := pricing.Load()
+	if perr != nil {
+		logger.Error("pricing_load_failed", map[string]any{"error": perr.Error()})
+	}
 	return &Server{
 		cfg:    cfg,
 		store:  st,
@@ -111,6 +120,7 @@ func New(cfg *config.ConfigManager, st *store.Store, logger *logging.Logger, con
 		secrets:        sec,
 		api:            api.New(cfg, configPath, st, sec, logger),
 		emitterFactory: newStreamEmitter,
+		pricing:        pt,
 	}, nil
 }
 
@@ -1052,8 +1062,11 @@ func carriesReasoning(payload []byte) bool {
 
 // capture persists one request in a single store transaction and appends the
 // §8 log lines. A fresh context (not the canceled client context) is used so
-// a disconnect never drops the record.
+// a disconnect never drops the record. The estimated cost split is derived
+// from the record's usage object here, the single chokepoint every capture
+// path shares.
 func (s *Server) capture(rec *store.CaptureRecord) {
+	s.estimateCost(rec)
 	ctx := context.Background()
 	if err := s.store.Capture(ctx, rec); err != nil {
 		s.logger.Error("capture_failed", map[string]any{"session_id": rec.SessionID, "error": err.Error()})

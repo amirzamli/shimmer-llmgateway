@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -74,8 +75,21 @@ const (
   response_filtered_json TEXT,    -- after response plugins (NULL if none)
   plugins_applied TEXT,           -- JSON array of plugin names, or NULL
   error_json TEXT,                -- NULL or {code, message}
-  truncated INTEGER DEFAULT 0
+  truncated INTEGER DEFAULT 0,
+  prompt_tokens INTEGER DEFAULT 0,     -- token counts from usage_json
+  completion_tokens INTEGER DEFAULT 0,
+  cached_tokens INTEGER DEFAULT 0,
+  cost_input REAL DEFAULT 0,           -- estimated cost split in USD
+  cost_output REAL DEFAULT 0,
+  cost_cache_read REAL DEFAULT 0,
+  cost_cache_write REAL DEFAULT 0,
+  cost_total REAL DEFAULT 0,
+  cost_priced INTEGER DEFAULT 0        -- 1 when the model was in the pricing table
 )`
+
+	// idxRequestsUsage supports the cost/usage aggregation queries over the
+	// created_at + provider + alias + model dimensions.
+	idxRequestsUsage = `CREATE INDEX IF NOT EXISTS idx_requests_usage ON requests(created_at, provider, alias, model)`
 
 	schemaToolCalls = `CREATE TABLE IF NOT EXISTS tool_calls (
   id TEXT PRIMARY KEY,            -- request id + tool_call index
@@ -95,6 +109,21 @@ const (
 	idxToolCallsSession   = `CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id)`
 	idxToolCallsToolName  = `CREATE INDEX IF NOT EXISTS idx_tool_calls_tool_name ON tool_calls(tool_name)`
 )
+
+// requestCostColumns are the columns added after the original §5 schema.
+// They are applied by migrate to pre-existing databases via ALTER TABLE, so
+// the schema above and an older on-disk DB converge on the same shape.
+var requestCostColumns = []string{
+	"prompt_tokens INTEGER DEFAULT 0",
+	"completion_tokens INTEGER DEFAULT 0",
+	"cached_tokens INTEGER DEFAULT 0",
+	"cost_input REAL DEFAULT 0",
+	"cost_output REAL DEFAULT 0",
+	"cost_cache_read REAL DEFAULT 0",
+	"cost_cache_write REAL DEFAULT 0",
+	"cost_total REAL DEFAULT 0",
+	"cost_priced INTEGER DEFAULT 0",
+}
 
 // Store is the SQLite-backed capture store. It is safe for concurrent use.
 type Store struct {
@@ -164,10 +193,46 @@ func (s *Store) createSchema(ctx context.Context) error {
 	for _, stmt := range []string{
 		schemaSessions, schemaRequests, schemaToolCalls,
 		idxSessionsCreatedAt, idxRequestsSessionSeq,
-		idxToolCallsSession, idxToolCallsToolName,
+		idxToolCallsSession, idxToolCallsToolName, idxRequestsUsage,
 	} {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("store: create schema: %w", err)
+		}
+	}
+	return s.migrate(ctx)
+}
+
+// migrate brings a pre-existing requests table up to the current column set by
+// adding any missing cost/usage columns. ALTER TABLE ADD COLUMN is a schema-only
+// change in SQLite (no table rewrite), so this is cheap even on a multi-GB
+// store; existing rows keep NULL and the cost columns default to 0 on read.
+func (s *Store) migrate(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(requests)`)
+	if err != nil {
+		return fmt.Errorf("store: migrate: read table_info: %w", err)
+	}
+	defer rows.Close()
+	have := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return fmt.Errorf("store: migrate: scan table_info: %w", err)
+		}
+		have[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, col := range requestCostColumns {
+		name := col[:strings.IndexByte(col, ' ')]
+		if have[name] {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE requests ADD COLUMN `+col); err != nil {
+			return fmt.Errorf("store: migrate: add column %s: %w", name, err)
 		}
 	}
 	return nil

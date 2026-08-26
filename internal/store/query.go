@@ -15,7 +15,10 @@ const (
 	requestSelect = `SELECT id, session_id, seq, created_at, alias, provider, model, endpoint,
 		duration_ms, status_code, finish_reason, usage_json, request_json,
 		request_filtered_json, response_json, response_filtered_json,
-		plugins_applied, error_json, truncated FROM requests`
+		plugins_applied, error_json, truncated,
+		prompt_tokens, completion_tokens, cached_tokens,
+		cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total,
+		cost_priced FROM requests`
 
 	toolCallSelect = `SELECT id, request_id, session_id, seq, tool_name, arguments_json,
 		result_is_error, result_snippet, verdict, annotation_json FROM tool_calls`
@@ -36,11 +39,14 @@ func scanSessionSummary(s rowScanner) (SessionSummary, error) {
 func scanRequest(s rowScanner) (Request, error) {
 	var r Request
 	var usage, reqJSON, reqFiltJSON, respJSON, respFiltJSON, plugins, errJSON []byte
-	var truncated int
+	var truncated, priced int
+	var costInput, costOutput, costCacheRead, costCacheWrite, costTotal float64
 	err := s.Scan(&r.ID, &r.SessionID, &r.Seq, &r.CreatedAt, &r.Alias, &r.Provider,
 		&r.Model, &r.Endpoint, &r.DurationMS, &r.StatusCode, &r.FinishReason,
 		&usage, &reqJSON, &reqFiltJSON, &respJSON, &respFiltJSON,
-		&plugins, &errJSON, &truncated)
+		&plugins, &errJSON, &truncated,
+		&r.PromptTokens, &r.CompletionTokens, &r.CachedTokens,
+		&costInput, &costOutput, &costCacheRead, &costCacheWrite, &costTotal, &priced)
 	if err != nil {
 		return r, err
 	}
@@ -50,6 +56,12 @@ func scanRequest(s rowScanner) (Request, error) {
 	r.ResponseJSON = respJSON
 	r.ResponseFilteredJSON = respFiltJSON
 	r.Truncated = truncated != 0
+	r.CostInput = costInput
+	r.CostOutput = costOutput
+	r.CostCacheRead = costCacheRead
+	r.CostCacheWrite = costCacheWrite
+	r.CostTotal = costTotal
+	r.CostPriced = priced != 0
 	if len(plugins) > 0 {
 		_ = json.Unmarshal(plugins, &r.PluginsApplied)
 	}

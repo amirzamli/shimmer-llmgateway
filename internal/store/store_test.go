@@ -175,6 +175,15 @@ func TestOpenCreatesSchemaAndPragmas(t *testing.T) {
 			{"plugins_applied", "TEXT", false, false},
 			{"error_json", "TEXT", false, false},
 			{"truncated", "INTEGER", false, false},
+			{"prompt_tokens", "INTEGER", false, false},
+			{"completion_tokens", "INTEGER", false, false},
+			{"cached_tokens", "INTEGER", false, false},
+			{"cost_input", "REAL", false, false},
+			{"cost_output", "REAL", false, false},
+			{"cost_cache_read", "REAL", false, false},
+			{"cost_cache_write", "REAL", false, false},
+			{"cost_total", "REAL", false, false},
+			{"cost_priced", "INTEGER", false, false},
 		},
 		"tool_calls": {
 			{"id", "TEXT", false, true},
@@ -242,6 +251,7 @@ func TestOpenCreatesSchemaAndPragmas(t *testing.T) {
 	for _, want := range []string{
 		"idx_sessions_created_at", "idx_requests_session_seq",
 		"idx_tool_calls_session", "idx_tool_calls_tool_name",
+		"idx_requests_usage",
 	} {
 		if !indexes[want] {
 			t.Errorf("index %q missing", want)

@@ -80,6 +80,10 @@ func main() {
 	} else if n > 0 {
 		logger.Info("retention_purged", map[string]any{"sessions": n})
 	}
+	// One-time cost backfill for requests captured before the cost columns
+	// existed (idempotent; see gateway.BackfillCosts). Runs before serving so
+	// the Usage view never shows a half-backfilled ledger.
+	gateway.BackfillCosts(context.Background(), st, logger)
 	st.StartRetentionLoop(ctx, 0)
 
 	logger.Info("startup", map[string]any{

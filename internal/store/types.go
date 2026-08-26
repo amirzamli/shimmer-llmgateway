@@ -46,6 +46,22 @@ type CaptureRecord struct {
 	// surfaces only in the §8 append-log request line.
 	ChunkCount int
 
+	// PromptTokens/CompletionTokens/CachedTokens are the token counts extracted
+	// from the provider usage object at capture time (0 when no usage).
+	PromptTokens     int64
+	CompletionTokens int64
+	CachedTokens     int64
+	// CostInput/CostOutput/CostCacheRead/CostCacheWrite are the estimated cost
+	// split in USD for this request (0 when the model is unpriced).
+	CostInput      float64
+	CostOutput     float64
+	CostCacheRead  float64
+	CostCacheWrite float64
+	CostTotal      float64
+	// CostPriced is true when the request's model was in the pricing table and
+	// the cost split is a real estimate (false for unknown or local models).
+	CostPriced bool
+
 	// Seq is the per-session request order. Capture sets it; callers may read
 	// it after Capture returns.
 	Seq int
@@ -94,6 +110,18 @@ type Request struct {
 	// ChunkCount mirrors CaptureRecord.ChunkCount for the §8 append-log line;
 	// stored rows read it as 0 because the §5 schema has no column.
 	ChunkCount int
+
+	// Token counts and estimated cost split, mirroring CaptureRecord (stored
+	// rows carry them; 0 / false when the model was unpriced).
+	PromptTokens     int64
+	CompletionTokens int64
+	CachedTokens     int64
+	CostInput        float64
+	CostOutput       float64
+	CostCacheRead    float64
+	CostCacheWrite   float64
+	CostTotal        float64
+	CostPriced       bool
 }
 
 // Request returns the requests-row view of a captured record, used by the §8
@@ -120,6 +148,15 @@ func (r *CaptureRecord) Request() *Request {
 		Error:                r.Error,
 		Truncated:            r.Truncated,
 		ChunkCount:           r.ChunkCount,
+		PromptTokens:         r.PromptTokens,
+		CompletionTokens:     r.CompletionTokens,
+		CachedTokens:         r.CachedTokens,
+		CostInput:            r.CostInput,
+		CostOutput:           r.CostOutput,
+		CostCacheRead:        r.CostCacheRead,
+		CostCacheWrite:       r.CostCacheWrite,
+		CostTotal:            r.CostTotal,
+		CostPriced:           r.CostPriced,
 	}
 }
 

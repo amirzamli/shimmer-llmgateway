@@ -75,6 +75,18 @@ func requestLines(req *Request) []map[string]any {
 	if len(req.Usage) > 0 {
 		line["usage"] = req.Usage
 	}
+	if req.PromptTokens > 0 || req.CompletionTokens > 0 {
+		line["tokens"] = map[string]any{
+			"prompt":      req.PromptTokens,
+			"completion":  req.CompletionTokens,
+			"cached":      req.CachedTokens,
+			"cost_total":  req.CostTotal,
+			"cost_input":  req.CostInput,
+			"cost_output": req.CostOutput,
+			"cost_cached": req.CostCacheRead + req.CostCacheWrite,
+			"priced":      req.CostPriced,
+		}
+	}
 	if len(req.RequestJSON) > 0 {
 		line["request"] = embedBytes(req.RequestJSON)
 	}

@@ -87,6 +87,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sessions", a.handleSessionsList)
 	mux.HandleFunc("GET /api/sessions/{id}", a.handleSessionGet)
 	mux.HandleFunc("GET /api/sessions/{id}/export", a.handleSessionExport)
+	mux.HandleFunc("GET /api/usage", a.handleUsage)
 	mux.HandleFunc("GET /api/status", a.handleStatus)
 	mux.HandleFunc("GET /api/secrets/master-key", a.handleMasterKeyGet)
 	mux.HandleFunc("POST /api/secrets/master-key/ack", a.handleMasterKeyAck)

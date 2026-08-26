@@ -101,8 +101,12 @@ func insertRequest(ctx context.Context, tx *sql.Tx, rec *CaptureRecord, ts strin
 			duration_ms, status_code, finish_reason,
 			usage_json, request_json, request_filtered_json,
 			response_json, response_filtered_json,
-			plugins_applied, error_json, truncated
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			plugins_applied, error_json, truncated,
+			prompt_tokens, completion_tokens, cached_tokens,
+			cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total,
+			cost_priced
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		rec.ID, rec.SessionID, rec.Seq, ts,
 		rec.Alias, rec.Provider, rec.Model, rec.Endpoint,
 		rec.DurationMS, rec.StatusCode, rec.FinishReason,
@@ -110,6 +114,9 @@ func insertRequest(ctx context.Context, tx *sql.Tx, rec *CaptureRecord, ts strin
 		nullBytes(rec.ResponseJSON), nullBytes(rec.ResponseFilteredJSON),
 		nullStrings(rec.PluginsApplied), nullError(rec.Error),
 		boolInt(rec.Truncated),
+		rec.PromptTokens, rec.CompletionTokens, rec.CachedTokens,
+		rec.CostInput, rec.CostOutput, rec.CostCacheRead, rec.CostCacheWrite, rec.CostTotal,
+		boolInt(rec.CostPriced),
 	)
 	return err
 }

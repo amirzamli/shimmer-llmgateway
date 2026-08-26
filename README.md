@@ -236,6 +236,38 @@ add/remove rows (alias name + model select from the fetched list, or type a
 custom model), Refresh, and Save (a PATCH replacing the whole map). Edits
 persist to `gateway.toml` like the rest of the config UI.
 
+### Usage statistics (estimated costs)
+
+The **Usage** view aggregates cost and token usage over all captured requests:
+daily, weekly, or monthly buckets, filterable per provider/alias/model, with
+the cost split on input, output, cache reads (cache writes are not derivable
+from the OpenAI usage shape, so they estimate at $0). Costs are **estimates**
+computed at capture time from the request's real token usage — including cache
+reads when the provider reports them (`prompt_tokens_details.cached_tokens`,
+or DeepSeek's `prompt_cache_hit_tokens`) — times a bundled price table (USD
+per 1M tokens, `internal/pricing/models.json`). Models not in the table count
+as unpriced ($0) and are flagged (`unpriced` badge), so a total is never
+mistaken for a complete ledger. Local models (ollama/vllm/custom) are
+intentionally unpriced, as are subscription products (opencode_go/zen), which
+have no per-token price.
+
+- The data lands in new `requests` columns (`prompt_tokens`, `cost_input`, …,
+  `cost_total`, `cost_priced`); existing stores get them via an automatic
+  schema migration on next start (cheap `ALTER TABLE`, no rewrite). Rows
+  captured before the upgrade are **backfilled automatically on the first
+  startup of the new build** (idempotent, logs `cost_backfilled`): the gateway
+  re-derives token counts and costs from each row's stored `usage_json`, so
+  historical captures show up priced too. Rows with no usage stay unpriced.
+- Surface: `GET /api/usage?granularity=day|week|month&provider=&alias=&model=&group=&since=&until=`
+  (buckets + summed totals), plus the embedded UI (Usage tab). A `group=model`
+  or `group=provider` parameter additionally splits every period's bucket by
+  the **resolved upstream model** (never the client-facing alias) or provider
+  template, which the Usage tab renders as per-period stacked token charts
+  with a per-series cost legend. Token counts and the cost split also ride the
+  §8 append-log/export request line (`tokens` object).
+- The price table is a curated snapshot and prices drift — treat totals as
+  approximations, not an invoice.
+
 ### Master key (`SHIMMER_MASTER_KEY`)
 
 The UI-managed secrets file `<store>.secrets.json` holds per-instance API keys
