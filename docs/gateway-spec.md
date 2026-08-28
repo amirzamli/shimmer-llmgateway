@@ -111,7 +111,7 @@ literal model is listed once).
 to `gateway.toml` and edit (see the Quick start in the README):
 
 ```toml
-listen = "127.0.0.1:8787"
+listen_addrs = ["127.0.0.1:8787", "192.64.0.1:8787"]  # one socket per address
 store  = "gateway.db"
 retention_days = 30
 
@@ -284,7 +284,7 @@ small REST API. **Read-only for traces; writes only for config.**
 | View        | Contents                                                                 |
 | :---------- | :----------------------------------------------------------------------- |
 | **Providers** | Dropdown of templates (built-in + user-added); "Add instance" flow: pick a template → alias auto-filled per §4.2 rules (`openai`, `openai-2`, …) → editable → optional model subset + key → save. Instance list with edit / disable / delete. |
-| **Settings** | listen addr, store path (read-only after start), retention, default alias, global plugin chain. |
+| **Settings** | listen addrs, store path (read-only after start), retention, default alias, global plugin chain. |
 | **Traces**  | Session list with filters (alias, model, status, date range) + text search; conversation view rendering messages, tool calls, results, and verdict badges (SUCCESS / RECOVERABLE / BLIND_ERROR); per-session JSONL export; per-request raw view (original vs filtered). |
 | **Status**  | Store stats, disk usage, uptime, plugin list.                            |
 

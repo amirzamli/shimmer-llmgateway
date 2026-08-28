@@ -39,7 +39,7 @@ race:
 
 # starter {{config}} template (spec §4.2 example, keyless)
 starter_config := '''
-listen = "127.0.0.1:8787"
+listen_addrs = ["127.0.0.1:8787", "100.64.0.1:8787"]   # one socket per address
 store  = "gateway.db"
 retention_days = 30
 
@@ -93,7 +93,7 @@ run:
     set -a
     source .env
     set +a
-    go run ./cmd/gateway -config {{config}}
+    go run ./cmd/gateway -config {{config}} 
 
 # run the MCP inspection server over stdio against the store
 mcp db='gateway.db':

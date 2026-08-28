@@ -7,10 +7,10 @@ import (
 	"github.com/amirzamli/shimmer-llmgateway/internal/config"
 )
 
-// settingsView is the §6.2 settings item. Listen and store path are read-only
-// after start; the rest are patchable.
+// settingsView is the §6.2 settings item. Listen addresses and store path are
+// read-only after start; the rest are patchable.
 type settingsView struct {
-	Listen          string   `json:"listen"`
+	ListenAddrs     []string `json:"listen_addrs"`
 	Store           string   `json:"store"`
 	RetentionDays   int      `json:"retention_days"`
 	DefaultAlias    string   `json:"default_alias"`
@@ -19,7 +19,7 @@ type settingsView struct {
 }
 
 // settingsPatchReq is the PATCH /api/settings body; every field is optional.
-// listen and store are intentionally absent (read-only after start).
+// listen_addrs and store are intentionally absent (read-only after start).
 type settingsPatchReq struct {
 	RetentionDays   *int      `json:"retention_days"`
 	DefaultAlias    *string   `json:"default_alias"`
@@ -30,7 +30,7 @@ type settingsPatchReq struct {
 func (a *API) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 	cfg := a.mgr.Get()
 	writeJSON(w, http.StatusOK, settingsView{
-		Listen:          cfg.Listen,
+		ListenAddrs:     cfg.Addrs(),
 		Store:           cfg.Store,
 		RetentionDays:   cfg.RetentionDays,
 		DefaultAlias:    cfg.Settings.DefaultAlias,
@@ -82,7 +82,7 @@ func (a *API) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg := a.mgr.Get()
 	writeJSON(w, http.StatusOK, settingsView{
-		Listen:          cfg.Listen,
+		ListenAddrs:     cfg.Addrs(),
 		Store:           cfg.Store,
 		RetentionDays:   cfg.RetentionDays,
 		DefaultAlias:    cfg.Settings.DefaultAlias,

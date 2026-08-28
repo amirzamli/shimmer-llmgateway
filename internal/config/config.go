@@ -142,7 +142,11 @@ type Instance struct {
 
 // Config is a parsed and validated gateway.toml.
 type Config struct {
-	Listen        string
+	// ListenAddrs are the host:port addresses the gateway serves. One listener
+	// is opened per address, so the gateway can bind localhost and a Tailscale
+	// address at once. ListenAddrs is empty when the file used the legacy
+	// single `listen` key.
+	ListenAddrs   []string
 	Store         string
 	RetentionDays int
 	Settings      Settings
@@ -177,7 +181,7 @@ func (c *Config) MarkUserTemplate(name string) {
 // are shared read-only (the API never mutates them).
 func (c *Config) Clone() *Config {
 	out := &Config{
-		Listen:        c.Listen,
+		ListenAddrs:   append([]string{}, c.ListenAddrs...),
 		Store:         c.Store,
 		RetentionDays: c.RetentionDays,
 		Settings:      c.Settings,
@@ -461,6 +465,7 @@ func (e *UnknownModelError) Error() string {
 
 // rawConfig mirrors gateway.toml for unmarshalling.
 type rawConfig struct {
+	ListenAddrs   []string                  `toml:"listen_addrs"`
 	Listen        string                    `toml:"listen"`
 	Store         string                    `toml:"store"`
 	RetentionDays int                       `toml:"retention_days"`
@@ -647,7 +652,7 @@ func fromRaw(raw *rawConfig) (*Config, error) {
 		tmap[name] = &t
 	}
 	cfg := &Config{
-		Listen:        raw.Listen,
+		ListenAddrs:   append([]string{}, raw.ListenAddrs...),
 		Store:         raw.Store,
 		RetentionDays: raw.RetentionDays,
 		Settings:      raw.Settings,
@@ -655,6 +660,19 @@ func fromRaw(raw *rawConfig) (*Config, error) {
 		Instances:     make([]*Instance, len(raw.Instances)),
 		Plugins:       raw.Plugins,
 		userTemplates: make(map[string]bool, len(raw.Providers)),
+	}
+	// The legacy single listen address keeps working when listen_addrs is
+	// absent; both keys may not be set at once. With neither key, the
+	// loopback default applies (the old behavior of binding a wildcard on a
+	// typo'd key was worse).
+	if len(raw.ListenAddrs) == 0 && raw.Listen != "" {
+		cfg.ListenAddrs = []string{raw.Listen}
+	}
+	if len(raw.ListenAddrs) > 0 && raw.Listen != "" {
+		return nil, fmt.Errorf("set listen_addrs or listen, not both")
+	}
+	if len(cfg.ListenAddrs) == 0 {
+		cfg.ListenAddrs = []string{"127.0.0.1:8787"}
 	}
 	for name := range raw.Providers {
 		cfg.userTemplates[name] = true
@@ -947,7 +965,7 @@ func (m *ConfigManager) Update(path string, c *Config) error {
 // an explicit empty `plugins = []` off-switch — is never overwritten.
 func (c *Config) toRaw() *rawConfig {
 	raw := &rawConfig{
-		Listen:        c.Listen,
+		ListenAddrs:   append([]string{}, c.ListenAddrs...),
 		Store:         c.Store,
 		RetentionDays: c.RetentionDays,
 		Settings:      c.Settings,
@@ -979,6 +997,17 @@ func (c *Config) toRaw() *rawConfig {
 // config file shape).
 func Marshal(c *Config) ([]byte, error) {
 	return toml.Marshal(c.toRaw())
+}
+
+// Addrs returns the listen addresses to bind. fromRaw normalizes the legacy
+// single `listen` key into ListenAddrs, so a parsed config always carries the
+// list; Addrs only substitutes the loopback default for hand-built configs
+// (tests) that set no addresses at all.
+func (c *Config) Addrs() []string {
+	if len(c.ListenAddrs) > 0 {
+		return c.ListenAddrs
+	}
+	return []string{"127.0.0.1:8787"}
 }
 
 // WriteFile persists the config to path atomically: it writes a temp file in

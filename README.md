@@ -39,10 +39,11 @@ UI and the MCP server both read that same store.
 ## Running the gateway
 
 ```
-usage: gateway -config <path> [-allow-remote]
+usage: gateway -config <path>
 ```
 
-The gateway loads `gateway.toml`, opens the SQLite store, and serves:
+The gateway loads `gateway.toml`, opens the SQLite store, and serves one
+listener per configured `listen_addrs` entry:
 
 | Path | Purpose |
 | :--- | :------ |
@@ -52,17 +53,21 @@ The gateway loads `gateway.toml`, opens the SQLite store, and serves:
 | `GET /v1/models` | models across all configured instances |
 | `POST /v1/chat/completions` | the only capture surface (stream + non-stream) |
 
-> **Security & binding.** The gateway binds loopback-only by default
-> (`127.0.0.1:8787`); pass `-allow-remote` to permit a non-loopback listen
-> address. The secrets master-key endpoints are localhost-only even then.
-> Provider `base_url` is trusted config: the gateway validates an http(s)
-> scheme + host and never follows redirects, but it will still forward to any
-> configured http(s) host, including local ones (ollama, vllm).
+> **Security & binding.** The gateway refuses to bind anything but loopback
+> (`127.0.0.0/8`, `::1`, `localhost`), CGNAT (`192.64.0.0/10` — the Tailscale
+> default range), and ULA (`fc00::/7`) addresses; a wildcard (`0.0.0.0`) or a
+> plain LAN address (`192.168.x.x`) is refused at startup. This lets you serve
+> localhost and a Tailscale IP side by side — `listen_addrs = ["127.0.0.1:8787",
+> "192.64.0.1:8787"]` — without opening the unauthenticated API to your whole
+> LAN. The secrets master-key endpoints are localhost-only regardless of what
+> you bind. Provider `base_url` is trusted config: the gateway validates an
+> http(s) scheme + host and never follows redirects, but it will still forward
+> to any configured http(s) host, including local ones (ollama, vllm).
 
 ### Configuration (`gateway.toml`)
 
 ```toml
-listen = '127.0.0.1:8787'
+listen_addrs = ['127.0.0.1:8787', '192.64.0.1:8787']   # one socket per address
 store  = 'gateway.db'
 retention_days = 30
 

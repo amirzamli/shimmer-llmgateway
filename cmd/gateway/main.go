@@ -1,16 +1,16 @@
 // Command gateway is the capture-only LLM gateway: it loads gateway.toml,
-// opens the SQLite capture store, and serves the §4 HTTP surface on the
-// configured listen address.
+// opens the SQLite capture store, and serves the §4 HTTP surface on each of
+// the configured listen addresses.
 package main
 
 import (
 	"context"
 	"encoding/base64"
 	"flag"
-	"fmt"
 	"net"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/amirzamli/shimmer-llmgateway/internal/config"
 	"github.com/amirzamli/shimmer-llmgateway/internal/gateway"
@@ -22,7 +22,6 @@ import (
 
 func main() {
 	configPath := flag.String("config", "gateway.toml", "path to gateway.toml")
-	allowRemote := flag.Bool("allow-remote", false, "allow binding to a non-loopback listen address")
 	flag.Parse()
 
 	logger := logging.New(os.Stderr)
@@ -46,11 +45,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	if !*allowRemote {
-		if err := checkLoopbackListen(cfg.Listen); err != nil {
-			logger.Error("listen_rejected", map[string]any{"listen": cfg.Listen, "error": err.Error()})
+	// Each listen address is bound to its own socket (see the serving loop at
+	// the bottom), so the gateway can serve localhost and a Tailscale address
+	// side by side. The addresses are validated before any state is opened.
+	var addrs []string
+	for _, a := range cfg.Addrs() {
+		host, _, splitErr := net.SplitHostPort(a)
+		if splitErr != nil {
+			logger.Error("listen_rejected", map[string]any{"listen": a, "error": splitErr.Error()})
 			os.Exit(1)
 		}
+		if !netutil.IsBindableHost(host) {
+			logger.Error("listen_rejected", map[string]any{
+				"listen": a,
+				"error":  "refusing to bind " + host + ": only loopback, CGNAT (Tailscale), and ULA addresses are allowed",
+			})
+			os.Exit(1)
+		}
+		addrs = append(addrs, a)
 	}
 
 	mgr := config.New(cfg)
@@ -87,35 +99,72 @@ func main() {
 	st.StartRetentionLoop(ctx, 0)
 
 	logger.Info("startup", map[string]any{
-		"listen":         cfg.Listen,
+		"listen":         addrs,
 		"store":          cfg.Store,
 		"retention_days": cfg.RetentionDays,
 		"instances":      len(cfg.Instances),
 		"templates":      len(cfg.Templates),
 	})
 
-	httpServer := &http.Server{Addr: cfg.Listen, Handler: srv.Handler()}
-	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		logger.Error("listen_failed", map[string]any{"error": err.Error()})
+	// One http.Server per listen address, all sharing the same handler. A
+	// bind failure on one address (e.g. the address is not currently assigned
+	// to an interface) is fatal, matching the previous single-listener
+	// behavior.
+	handler := srv.Handler()
+	serving := 0
+	for _, addr := range addrs {
+		httpServer := &http.Server{Addr: addr, Handler: handler}
+		httpServer.RegisterOnShutdown(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = httpServer.Shutdown(ctx)
+		})
+		httpServerCopy := httpServer
+		go func() {
+			logger.Info("serving", map[string]any{"listen": addr})
+			if err := httpServerCopy.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				logger.Error("listen_failed", map[string]any{"listen": addr, "error": err.Error()})
+				os.Exit(1)
+			}
+		}()
+		serving++
+	}
+	if serving == 0 {
+		logger.Error("listen_failed", map[string]any{"error": "no listen addresses configured"})
 		os.Exit(1)
 	}
+	select {}
 }
 
-// checkLoopbackListen verifies that a cfg.Listen host:port binds to a
-// loopback address only (localhost, 127.0.0.0/8, ::1). An empty host (":8787")
-// is a wildcard bind over all interfaces, which would silently defeat the
-// loopback-only default, so it is refused here too; -allow-remote overrides
-// both cases.
-func checkLoopbackListen(listen string) error {
-	host, _, err := net.SplitHostPort(listen)
-	if err != nil {
-		return fmt.Errorf("invalid listen address %q: %v", listen, err)
+// serveListeners runs one http.Server per address over handler, returning the
+// first error (including http.ErrServerClosed) from any of them. This is the
+// sequential serving path used by tests; main runs the same servers
+// concurrently so the process survives an individual listen failure and keeps
+// serving the surviving addresses.
+func serveListeners(addrs []string, handler http.Handler) error {
+	servers := make([]*http.Server, 0, len(addrs))
+	for _, addr := range addrs {
+		srv := &http.Server{Addr: addr, Handler: handler}
+		servers = append(servers, srv)
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			return err
+		}
+		go srv.Serve(ln) //nolint:errcheck // the returned error is not observable; Listen succeeded
 	}
-	if host == "" {
-		return fmt.Errorf("refusing to bind wildcard address %q; use -allow-remote to override", listen)
-	}
-	if !netutil.IsLoopbackHost(host) {
-		return fmt.Errorf("refusing to bind non-loopback address %q; use -allow-remote to override", listen)
+	for _, srv := range servers {
+		waitServed(srv)
 	}
 	return nil
+}
+
+// waitServed blocks until srv has served at least one connection; used by
+// tests to know the listener is accepting before issuing requests.
+func waitServed(srv *http.Server) <-chan struct{} {
+	done := make(chan struct{})
+	srv.RegisterOnShutdown(func() { close(done) })
+	go func() {
+		<-done
+	}()
+	return done
 }

@@ -9,8 +9,9 @@ import (
 
 // requireLoopbackSource rejects requests whose remote address is not a
 // loopback address. Used on the master-key surface, which returns key
-// material: even with -allow-remote (so the gateway is reachable from other
-// hosts), the one-time key exposure must stay a localhost-only operation.
+// material: even when a non-loopback listen_addrs entry (e.g. a Tailscale
+// address) makes the gateway reachable from other hosts, the one-time key
+// exposure must stay a localhost-only operation.
 func (a *API) requireLoopbackSource(w http.ResponseWriter, r *http.Request) bool {
 	// Fail closed: an empty (unknown) peer address must never be treated as a
 	// loopback source, even though IsLoopbackHost counts "" as loopback for

@@ -4,7 +4,14 @@
 # come from the api_key_env environment variable or the UI-managed secrets file
 # (<store>.secrets.json, encrypted at rest).
 
-listen = "127.0.0.1:8787"
+# Each address is bound to its own socket, so the gateway can serve localhost
+# and a Tailscale address side by side. Allowed hosts: loopback (127.0.0.0/8,
+# ::1, localhost), CGNAT (100.64.0.0/10 — the Tailscale default range), and
+# ULA (fc00::/7). A wildcard (0.0.0.0) is refused; a plain RFC 1918 LAN
+# address (192.168.x.x) is refused too — it would expose the unauthenticated
+# API to every host on the local network. `listen` (a single address) is still
+# accepted for backwards compatibility; set one or the other, not both.
+listen_addrs = ["127.0.0.1:8787", "100.64.0.1:8787"]
 store  = "gateway.db"
 retention_days = 30
 

@@ -64,8 +64,9 @@ func assertAliases(t *testing.T, cfg *Config, want ...string) {
 func TestParseSpecExample(t *testing.T) {
 	cfg := mustParse(t, specExample)
 
-	if cfg.Listen != "127.0.0.1:8787" {
-		t.Errorf("listen = %q, want 127.0.0.1:8787", cfg.Listen)
+	got := cfg.Addrs()
+	if len(got) != 1 || got[0] != "127.0.0.1:8787" {
+		t.Errorf("listen_addrs = %v, want [127.0.0.1:8787]", got)
 	}
 	if cfg.Store != "gateway.db" {
 		t.Errorf("store = %q, want gateway.db", cfg.Store)
@@ -89,6 +90,41 @@ func TestParseSpecExample(t *testing.T) {
 	// Template list is the default for instances without a subset.
 	if got := inst2.EffectiveModels(cfg); !contains(got, "gpt-4o") || !contains(got, "gpt-4o-mini") {
 		t.Errorf("instance 2 effective models = %v, want template defaults", got)
+	}
+}
+
+func TestParseListenAddrs(t *testing.T) {
+	// Multiple addresses: localhost and a Tailscale CGNAT address.
+	cfg := mustParse(t, `
+listen_addrs = ["127.0.0.1:8787", "100.64.0.1:8787"]
+store = "gateway.db"
+`)
+	got := cfg.Addrs()
+	if len(got) != 2 || got[0] != "127.0.0.1:8787" || got[1] != "100.64.0.1:8787" {
+		t.Errorf("listen_addrs = %v, want [127.0.0.1:8787 100.64.0.1:8787]", got)
+	}
+
+	// The legacy single listen key still parses into the list.
+	legacy := mustParse(t, `
+listen = "127.0.0.1:8787"
+`)
+	got = legacy.Addrs()
+	if len(got) != 1 || got[0] != "127.0.0.1:8787" {
+		t.Errorf("legacy listen = %v, want [127.0.0.1:8787]", got)
+	}
+
+	// Neither key defaults to the loopback address.
+	none := mustParse(t, `
+store = "gateway.db"
+`)
+	got = none.Addrs()
+	if len(got) != 1 || got[0] != "127.0.0.1:8787" {
+		t.Errorf("default listen = %v, want [127.0.0.1:8787]", got)
+	}
+
+	// Both keys at once is a config error.
+	if _, err := Parse([]byte("listen = \"127.0.0.1:8787\"\nlisten_addrs = [\"127.0.0.1:8788\"]\n")); err == nil {
+		t.Error("Parse with both listen and listen_addrs = nil, want error")
 	}
 }
 

@@ -426,7 +426,10 @@ func TestSettingsGetAndPatch(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("GET /api/settings status = %d", status)
 	}
-	if out["listen"] != "127.0.0.1:8787" || out["store"] != "gateway.db" || out["retention_days"] != float64(30) {
+	if addrs, ok := out["listen_addrs"].([]any); !ok || len(addrs) != 1 || addrs[0] != "127.0.0.1:8787" {
+		t.Errorf("settings listen_addrs = %v, want [127.0.0.1:8787]", out["listen_addrs"])
+	}
+	if out["store"] != "gateway.db" || out["retention_days"] != float64(30) {
 		t.Errorf("settings view = %v", out)
 	}
 	if out["default_alias"] != "openai" {
@@ -699,9 +702,9 @@ func TestMasterKeyProvidedKeyNotExposed(t *testing.T) {
 
 // TestMasterKeyLoopbackGuard verifies the master-key surface rejects requests
 // from non-loopback remote addresses with 403 (defense in depth for
-// -allow-remote deployments) while loopback sources are unaffected. The
-// handlers are invoked directly with a crafted RemoteAddr, so no sockets are
-// bound.
+// non-loopback listen_addrs deployments) while loopback sources are
+// unaffected. The handlers are invoked directly with a crafted RemoteAddr, so
+// no sockets are bound.
 func TestMasterKeyLoopbackGuard(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "gateway.toml")
