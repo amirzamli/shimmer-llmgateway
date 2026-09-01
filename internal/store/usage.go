@@ -166,39 +166,49 @@ type BackfilledCost struct {
 	CacheRead        float64
 	CacheWrite       float64
 	Total            float64
-	Priced           bool
+	// Priced gates the update: rows whose model has no price in the caller's
+	// table (Priced false) are left untouched so they are retried — and
+	// naturally picked up — after the table learns their price.
+	Priced bool
+	// Schema is the pricing snapshot id stamped into requests.cost_schema
+	// alongside the cost split (e.g. "models.dev@2026-08-31").
+	Schema string
 }
 
-// BackfillCosts computes and persists token counts and estimated costs for
-// requests captured before the cost columns existed. The marker is a row that
-// carries usage_json but has prompt_tokens == 0 — captures always record token
-// counts from usage, so this condition converges after one pass and makes the
-// backfill idempotent: already-processed rows and rows without usage are never
-// touched. fn derives the values from each row's model and usage object (the
-// caller owns the pricing table). Returns the number of rows updated.
-func (s *Store) BackfillCosts(ctx context.Context, fn func(model string, usage json.RawMessage) BackfilledCost) (int, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, model, usage_json FROM requests
-		WHERE usage_json IS NOT NULL AND usage_json != '' AND prompt_tokens = 0`)
+// BackfillCosts prices requests captured while their model was unpriced
+// (cost_priced = 0) using the caller's current pricing table. Already-priced
+// rows are never touched — the cost split is computed once and frozen, so a
+// table update never rewrites historical rows; only rows the table could not
+// price at capture time (unknown model, since-learned price) are filled in.
+// Rows lacking usage stay untouched and remain flagged unpriced. fn derives
+// the values from each row's model, provider, and usage object. Returns the
+// number of rows updated. Idempotent: a second pass updates nothing.
+func (s *Store) BackfillCosts(ctx context.Context, fn func(model, provider string, usage json.RawMessage) BackfilledCost) (int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, model, provider, usage_json FROM requests
+		WHERE usage_json IS NOT NULL AND usage_json != '' AND cost_priced = 0`)
 	if err != nil {
 		return 0, err
 	}
 	defer rows.Close()
 	updated := 0
 	for rows.Next() {
-		var id, model string
+		var id, model, provider string
 		var usage []byte
-		if err := rows.Scan(&id, &model, &usage); err != nil {
+		if err := rows.Scan(&id, &model, &provider, &usage); err != nil {
 			return updated, err
 		}
-		bc := fn(model, usage)
+		bc := fn(model, provider, usage)
+		if !bc.Priced {
+			continue
+		}
 		res, err := s.db.ExecContext(ctx, `UPDATE requests SET
 			prompt_tokens = ?, completion_tokens = ?, cached_tokens = ?,
 			cost_input = ?, cost_output = ?, cost_cache_read = ?, cost_cache_write = ?, cost_total = ?,
-			cost_priced = ?
-			WHERE id = ?`,
+			cost_priced = 1, cost_schema = ?
+			WHERE id = ? AND cost_priced = 0`,
 			bc.PromptTokens, bc.CompletionTokens, bc.CachedTokens,
 			bc.Input, bc.Output, bc.CacheRead, bc.CacheWrite, bc.Total,
-			boolInt(bc.Priced), id)
+			bc.Schema, id)
 		if err != nil {
 			return updated, err
 		}

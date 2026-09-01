@@ -31,6 +31,7 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"disk_usage_bytes":   st.DiskUsageBytes,
 		"retention_days":     st.RetentionDays,
 		"uptime_seconds":     int64(time.Since(a.startedAt).Seconds()),
+		"listen_addrs":       cfg.Addrs(),
 		"plugins":            plugins.Known(),
 		"aliases":            cfg.AliasList(),
 		"disabled_instances": disabled,

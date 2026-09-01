@@ -37,6 +37,11 @@ test:
 race:
     go test -race ./...
 
+# regenerate internal/pricing/models.json from models.dev (review the diff,
+# then restart the gateway — the table is loaded from disk at startup)
+update-prices:
+    go run ./cmd/genpricing
+
 # starter {{config}} template (spec §4.2 example, keyless)
 starter_config := '''
 listen_addrs = ["127.0.0.1:8787", "100.64.0.1:8787"]   # one socket per address

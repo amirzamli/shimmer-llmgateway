@@ -84,6 +84,8 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /api/quota", a.handleQuota)
 	mux.HandleFunc("GET /api/settings", a.handleSettingsGet)
 	mux.HandleFunc("PATCH /api/settings", a.handleSettingsPatch)
+	mux.HandleFunc("GET /api/plugins", a.handlePluginsList)
+	mux.HandleFunc("PATCH /api/plugins/{name}", a.handlePluginPatch)
 	mux.HandleFunc("GET /api/sessions", a.handleSessionsList)
 	mux.HandleFunc("GET /api/sessions/{id}", a.handleSessionGet)
 	mux.HandleFunc("GET /api/sessions/{id}/export", a.handleSessionExport)

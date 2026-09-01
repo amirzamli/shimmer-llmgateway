@@ -13,23 +13,37 @@ captured traffic:
   to any MCP client (opencode, Claude Desktop, Cursor) via stdio or
   streamable-http, including tool-call validation and failure classification.
 
+## Requirements
+
+- **Go 1.26+** (`go.mod` requires 1.26.2) — no CGO needed (the build uses
+  modernc.org/sqlite).
+- [just](https://github.com/casey/just) (optional) — convenient build/run task
+  shortcuts; everything is plain `go` commands underneath.
+- Network access for `just update-prices`, which downloads the models.dev
+  pricing catalog (see [Usage statistics](#usage-statistics-estimated-costs)).
+
 ## Quick start
 
 ```bash
 # 1. Build both binaries
-mkdir -p bin
-PATH=$PATH:/usr/local/go/bin go build -o bin/gateway ./cmd/gateway
-PATH=$PATH:/usr/local/go/bin go build -o bin/inspect-mcp ./cmd/inspect-mcp
+just build                                 # writes bin/gateway + bin/inspect-mcp
+# ...or without just:
+#   mkdir -p bin
+#   go build -o bin/gateway ./cmd/gateway
+#   go build -o bin/inspect-mcp ./cmd/inspect-mcp
 
-# 2. Run the gateway (capture surface)
+# 2. Generate the pricing table (used by the Usage view)
+just update-prices                         # writes internal/pricing/models.json
+
+# 3. Run the gateway (capture surface)
 ./bin/gateway -config gateway.toml          # serves http://127.0.0.1:8787
 
-# 3. Point an OpenAI-compatible client at it
+# 4. Point an OpenAI-compatible client at it
 curl http://127.0.0.1:8787/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"openai/gpt-4o","messages":[{"role":"user","content":"hi"}]}'
 
-# 4. Inspect what was captured via the MCP server (stdio)
+# 5. Inspect what was captured via the MCP server (stdio)
 ./bin/inspect-mcp -db gateway.db
 ```
 
@@ -54,11 +68,11 @@ listener per configured `listen_addrs` entry:
 | `POST /v1/chat/completions` | the only capture surface (stream + non-stream) |
 
 > **Security & binding.** The gateway refuses to bind anything but loopback
-> (`127.0.0.0/8`, `::1`, `localhost`), CGNAT (`192.64.0.0/10` — the Tailscale
+> (`127.0.0.0/8`, `::1`, `localhost`), CGNAT (`100.64.0.0/10` — the Tailscale
 > default range), and ULA (`fc00::/7`) addresses; a wildcard (`0.0.0.0`) or a
 > plain LAN address (`192.168.x.x`) is refused at startup. This lets you serve
 > localhost and a Tailscale IP side by side — `listen_addrs = ["127.0.0.1:8787",
-> "192.64.0.1:8787"]` — without opening the unauthenticated API to your whole
+> "100.64.0.1:8787"]` — without opening the unauthenticated API to your whole
 > LAN. The secrets master-key endpoints are localhost-only regardless of what
 > you bind. Provider `base_url` is trusted config: the gateway validates an
 > http(s) scheme + host and never follows redirects, but it will still forward
@@ -67,9 +81,9 @@ listener per configured `listen_addrs` entry:
 ### Configuration (`gateway.toml`)
 
 ```toml
-listen_addrs = ['127.0.0.1:8787', '192.64.0.1:8787']   # one socket per address
+listen_addrs = ['127.0.0.1:8787', '100.64.0.1:8787']   # one socket per address
 store  = 'gateway.db'
-retention_days = 30
+retention_days = 7                                     # default when unset; <= 0 disables
 
 [settings]
 default_alias = 'openai'        # used when a client sends no alias prefix
@@ -249,20 +263,36 @@ the cost split on input, output, cache reads (cache writes are not derivable
 from the OpenAI usage shape, so they estimate at $0). Costs are **estimates**
 computed at capture time from the request's real token usage — including cache
 reads when the provider reports them (`prompt_tokens_details.cached_tokens`,
-or DeepSeek's `prompt_cache_hit_tokens`) — times a bundled price table (USD
-per 1M tokens, `internal/pricing/models.json`). Models not in the table count
+or DeepSeek's `prompt_cache_hit_tokens`) — times a generated price table (USD
+per 1M tokens) loaded from disk at startup
+(`internal/pricing/models.json`). Models not in the table count
 as unpriced ($0) and are flagged (`unpriced` badge), so a total is never
-mistaken for a complete ledger. Local models (ollama/vllm/custom) are
-intentionally unpriced, as are subscription products (opencode_go/zen), which
-have no per-token price.
+mistaken for a complete ledger. Models absent from the generated table are
+unpriced — not necessarily free — and `just update-prices` refreshes the
+table from the models.dev catalog.
 
 - The data lands in new `requests` columns (`prompt_tokens`, `cost_input`, …,
-  `cost_total`, `cost_priced`); existing stores get them via an automatic
-  schema migration on next start (cheap `ALTER TABLE`, no rewrite). Rows
-  captured before the upgrade are **backfilled automatically on the first
-  startup of the new build** (idempotent, logs `cost_backfilled`): the gateway
-  re-derives token counts and costs from each row's stored `usage_json`, so
-  historical captures show up priced too. Rows with no usage stay unpriced.
+  `cost_total`, `cost_priced`, `cost_schema`); existing stores get them via an
+  automatic schema migration on next start (cheap `ALTER TABLE`, no rewrite).
+- **The price table is generated, not hand-curated**: `just update-prices`
+  (or `go run ./cmd/genpricing`) fetches the models.dev catalog
+  (https://models.dev/api.json) and rewrites `internal/pricing/models.json`;
+  the gateway loads the table from disk at startup, so restart to take
+  effect. A fresh checkout has no table until you generate one — cost
+  estimation then stays off (the gateway logs `pricing_load_failed`) and
+  requests are captured unpriced.
+  Pricing is per provider — the serving provider (the gateway template name)
+  selects the price row, and a user-defined custom endpoint whose base URL
+  matches a catalog provider's API base inherits that provider's prices.
+  Providers absent from the catalog (e.g. commandcode) are emitted with
+  prices **inherited** from the origin lab's own catalog entry, flagged
+  `inherited_from` in the JSON. Tiered context pricing is approximated with
+  the flat base rates.
+- **Historical rows are frozen**: the cost split is computed once at capture
+  time and never rewritten by a table update — `requests.cost_schema` records
+  which snapshot priced each row. Requests captured while their model was
+  unpriced (unknown or since-learned price) are priced once at startup by an
+  idempotent backfill using the current table.
 - Surface: `GET /api/usage?granularity=day|week|month&provider=&alias=&model=&group=&since=&until=`
   (buckets + summed totals), plus the embedded UI (Usage tab). A `group=model`
   or `group=provider` parameter additionally splits every period's bucket by
@@ -270,7 +300,7 @@ have no per-token price.
   template, which the Usage tab renders as per-period stacked token charts
   with a per-series cost legend. Token counts and the cost split also ride the
   §8 append-log/export request line (`tokens` object).
-- The price table is a curated snapshot and prices drift — treat totals as
+- The generated table mirrors models.dev, whose prices drift — treat totals as
   approximations, not an invoice.
 
 ### Master key (`SHIMMER_MASTER_KEY`)
@@ -487,7 +517,48 @@ tools are live (`/mcp` or the tools list) and try `list_sessions`.
   response is marked `truncated`.
 - Response plugins run post-reassembly (buffer mode); the store always keeps
   both original and filtered payloads plus `plugins_applied`.
-- Sessions older than `retention_days` are purged at startup and daily.
+- Sessions older than `retention_days` (7 by default; `<= 0` disables) have
+  their payloads expired at startup and daily: the conversation payloads
+  (`request_json`, `response_json`, filtered variants) and tool calls are
+  removed, while the sessions/requests rows stay as metadata — timestamps,
+  model, status, token counts, and costs — so the usage statistics and
+  aggregates outlive the chats. Expired sessions are flagged `expired` in the
+  API/UI ("payloads expired").
+
+## Security
+
+Shimmer LLM Gateway is a localhost developer tool, not a hardened multi-user
+service: it is not designed to be exposed to untrusted networks. The shipped
+defaults:
+
+- **Listen-address binding policy.** The gateway refuses to bind anything but
+  loopback, CGNAT (`100.64.0.0/10` — the Tailscale default range), and ULA
+  (`fc00::/7`) addresses; wildcard and plain LAN addresses are refused at
+  startup (see [Security & binding](#security--binding)).
+- **Admin API + UI request validation.** The unauthenticated `/api/*` surface
+  and the embedded UI only serve requests whose `Host` names an address the
+  gateway actually serves (a bound listen address, a loopback host, or a
+  literal loopback/CGNAT/ULA address), and reject cross-site `Origin` /
+  `Sec-Fetch-Site` requests on state-changing methods — a web page cannot
+  drive the admin API from your browser. The capture surface
+  (`/v1/chat/completions`) is not subject to these checks, so non-browser
+  clients are unaffected.
+- **Secrets at rest.** Per-instance API keys live in `<store>.secrets.json`
+  (mode `0600`), encrypted with AES-256-GCM under a master key you set via
+  `SHIMMER_MASTER_KEY` or a one-time generated key acknowledged in the UI
+  (see [Master key](#master-key-shimmer_master_key)). The master-key
+  endpoints refuse non-loopback client sources regardless of what you bind.
+- **No CORS on the MCP HTTP transport.** The `inspect-mcp` streamable-http
+  endpoint sends no `Access-Control-Allow-*` headers, so browser pages cannot
+  read captured traffic; non-browser MCP clients don't need CORS.
+- **Payload redaction.** The `redact` plugin and the opt-in console payload
+  logging mask sensitive patterns and fields (`[REDACTED]`) before data
+  leaves the process.
+- **Retention.** Payloads older than `retention_days` are purged at startup
+  and daily (see [Notes](#notes)); only request metadata survives expiry.
+
+See [SECURITY.md](SECURITY.md) for the threat model and how to report a
+vulnerability.
 
 ## License
 

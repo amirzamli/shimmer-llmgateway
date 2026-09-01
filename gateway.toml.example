@@ -13,7 +13,10 @@
 # accepted for backwards compatibility; set one or the other, not both.
 listen_addrs = ["127.0.0.1:8787", "100.64.0.1:8787"]
 store  = "gateway.db"
-retention_days = 30
+# Payload retention: after this many days a session's chat payloads are
+# removed and only usage statistics remain. Default when unset is 7;
+# <= 0 disables purging entirely.
+retention_days = 7
 
 [settings]
 default_alias = "openai"        # used when a client sends no alias prefix

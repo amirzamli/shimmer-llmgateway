@@ -111,7 +111,7 @@ literal model is listed once).
 to `gateway.toml` and edit (see the Quick start in the README):
 
 ```toml
-listen_addrs = ["127.0.0.1:8787", "192.64.0.1:8787"]  # one socket per address
+listen_addrs = ["127.0.0.1:8787", "100.64.0.1:8787"]  # one socket per address
 store  = "gateway.db"
 retention_days = 30
 

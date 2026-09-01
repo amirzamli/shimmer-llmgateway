@@ -18,7 +18,7 @@ const (
 		plugins_applied, error_json, truncated,
 		prompt_tokens, completion_tokens, cached_tokens,
 		cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total,
-		cost_priced FROM requests`
+		cost_priced, cost_schema FROM requests`
 
 	toolCallSelect = `SELECT id, request_id, session_id, seq, tool_name, arguments_json,
 		result_is_error, result_snippet, verdict, annotation_json FROM tool_calls`
@@ -31,8 +31,10 @@ type rowScanner interface {
 
 func scanSessionSummary(s rowScanner) (SessionSummary, error) {
 	var out SessionSummary
+	var expired int
 	err := s.Scan(&out.ID, &out.CreatedAt, &out.FirstAlias, &out.FirstModel,
-		&out.RequestCount, &out.ToolCallCount, &out.FailureCount)
+		&out.RequestCount, &out.ToolCallCount, &out.FailureCount, &expired)
+	out.Expired = expired != 0
 	return out, err
 }
 
@@ -46,7 +48,8 @@ func scanRequest(s rowScanner) (Request, error) {
 		&usage, &reqJSON, &reqFiltJSON, &respJSON, &respFiltJSON,
 		&plugins, &errJSON, &truncated,
 		&r.PromptTokens, &r.CompletionTokens, &r.CachedTokens,
-		&costInput, &costOutput, &costCacheRead, &costCacheWrite, &costTotal, &priced)
+		&costInput, &costOutput, &costCacheRead, &costCacheWrite, &costTotal, &priced,
+		&r.CostSchema)
 	if err != nil {
 		return r, err
 	}
@@ -122,7 +125,7 @@ func (s *Store) ListSessions(ctx context.Context, f SessionFilter) ([]*SessionSu
 		args = append(args, like, like, like, like)
 	}
 
-	q := `SELECT id, created_at, first_alias, first_model, request_count, tool_call_count, failure_count FROM sessions`
+	q := `SELECT id, created_at, first_alias, first_model, request_count, tool_call_count, failure_count, expired FROM sessions`
 	if len(conds) > 0 {
 		q += ` WHERE ` + strings.Join(conds, " AND ")
 	}
@@ -150,7 +153,7 @@ func (s *Store) ListSessions(ctx context.Context, f SessionFilter) ([]*SessionSu
 // GetSession loads a session with its requests (by seq) and tool calls.
 func (s *Store) GetSession(ctx context.Context, sessionID string) (*Session, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, created_at, first_alias, first_model, request_count, tool_call_count, failure_count
+		`SELECT id, created_at, first_alias, first_model, request_count, tool_call_count, failure_count, expired
 		 FROM sessions WHERE id = ?`, sessionID)
 	sum, err := scanSessionSummary(row)
 	if errors.Is(err, sql.ErrNoRows) {

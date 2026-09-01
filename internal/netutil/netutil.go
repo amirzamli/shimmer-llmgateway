@@ -45,6 +45,16 @@ func IsPrivateAddress(ip net.IP) bool {
 	return ip.IsLoopback() || ip.IsPrivate() || isCGNAT(ip) || isULA(ip)
 }
 
+// IsServedHostIP reports whether ip is a loopback, CGNAT (100.64.0.0/10), or
+// ULA (fc00::/7) address — exactly the families the bind policy (IsBindableHost)
+// serves. Used to validate request Host headers against the same policy.
+// Hostnames must be matched by the caller against the configured listen
+// addresses instead of resolved here: a request-path DNS lookup would be
+// attacker-influenced.
+func IsServedHostIP(ip net.IP) bool {
+	return ip != nil && (ip.IsLoopback() || isCGNAT(ip) || isULA(ip))
+}
+
 // IsBindableHost reports whether host names an interface the gateway may bind
 // without an explicit override: the loopback families, a CGNAT address (the
 // Tailscale default range, 100.64.0.0/10), or a ULA (fc00::/7, e.g. a custom

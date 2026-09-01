@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -41,10 +42,15 @@ func (s *Store) retention() int {
 	return s.retentionDays
 }
 
-// Purge deletes sessions (and their requests and tool calls) older than the
-// configured retention window. It is the startup purge; the daily ticker runs
-// StartRetentionLoop. Returns the number of sessions purged. Disabled when
-// retention is <= 0.
+// Purge expires the conversation payloads of sessions older than the
+// configured retention window while keeping the usage-statistics rows: the
+// requests rows stay (timestamps, model, status, token counts, costs —
+// everything the usage aggregates sum), but the payload columns are nulled and
+// the tool_calls rows are deleted. The sessions rows remain, flagged
+// expired = 1 so the UI/MCP can show "payloads expired" instead of an empty
+// conversation. It is the startup purge; the daily ticker runs
+// StartRetentionLoop. Returns the number of sessions newly expired. Disabled
+// when retention is <= 0.
 //
 // The cutoff is anchored to the newest session in the store rather than the
 // wall clock: retention counts backward from the most recent recorded
@@ -57,17 +63,18 @@ func (s *Store) Purge(ctx context.Context) (int, error) {
 	}
 
 	// Anchor to MAX(created_at) instead of time.Now() so the purge never
-	// classifies the newest recorded session as expired.
-	var newest string
+	// classifies the newest recorded session as expired. NULL (empty store)
+	// scans as invalid: nothing to purge.
+	var newest sql.NullString
 	if err := s.db.QueryRowContext(ctx, `SELECT MAX(created_at) FROM sessions`).Scan(&newest); err != nil {
 		return 0, err
 	}
-	if newest == "" {
+	if !newest.Valid || newest.String == "" {
 		return 0, nil // empty store: nothing to purge
 	}
-	newestTS, err := time.Parse(tsLayout, newest)
+	newestTS, err := time.Parse(tsLayout, newest.String)
 	if err != nil {
-		return 0, fmt.Errorf("store: purge: parse newest created_at %q: %w", newest, err)
+		return 0, fmt.Errorf("store: purge: parse newest created_at %q: %w", newest.String, err)
 	}
 	cutoff := formatTS(newestTS.AddDate(0, 0, -days))
 
@@ -77,19 +84,26 @@ func (s *Store) Purge(ctx context.Context) (int, error) {
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op after Commit
 
-	// tool_calls has no cascade clause in the §5 schema, so children are
-	// removed before their parents.
+	// The expired = 0 guard keeps the daily pass a no-op: sessions already
+	// expired match nothing, so their rows are not rewritten every tick.
+	// tool_calls are debug payloads with no usage value; they are dropped.
 	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM tool_calls WHERE session_id IN (SELECT id FROM sessions WHERE created_at < ?)`,
+		`DELETE FROM tool_calls WHERE session_id IN (SELECT id FROM sessions WHERE created_at < ? AND expired = 0)`,
 		cutoff); err != nil {
 		return 0, err
 	}
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM requests WHERE session_id IN (SELECT id FROM sessions WHERE created_at < ?)`,
+	// Requests keep every metadata column the usage aggregates read; only the
+	// payload columns (and the error message body) are dropped.
+	if _, err := tx.ExecContext(ctx, `UPDATE requests SET
+		request_json = NULL, request_filtered_json = NULL,
+		response_json = NULL, response_filtered_json = NULL,
+		plugins_applied = NULL, error_json = NULL
+		WHERE session_id IN (SELECT id FROM sessions WHERE created_at < ? AND expired = 0)`,
 		cutoff); err != nil {
 		return 0, err
 	}
-	res, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE created_at < ?`, cutoff)
+	res, err := tx.ExecContext(ctx,
+		`UPDATE sessions SET expired = 1 WHERE created_at < ? AND expired = 0`, cutoff)
 	if err != nil {
 		return 0, err
 	}

@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/amirzamli/shimmer-llmgateway/internal/pricing"
 	_ "modernc.org/sqlite"
 )
 
@@ -413,150 +412,88 @@ func TestCaptureCostRoundTrip(t *testing.T) {
 }
 
 func TestBackfillCosts(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "old.db")
-
-	// Seed a database with the pre-cost schema and rows exactly as the gateway
-	// would have captured them before the feature (usage present, no cost
-	// columns at all).
-	db, err := sql.Open("sqlite", "file:"+path)
-	if err != nil {
-		t.Fatalf("sql.Open: %v", err)
-	}
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS sessions (
-		id TEXT PRIMARY KEY,
-		created_at TEXT,
-		first_alias TEXT, first_model TEXT,
-		request_count INTEGER, tool_call_count INTEGER, failure_count INTEGER)`); err != nil {
-		t.Fatalf("create sessions: %v", err)
-	}
-	if _, err := db.Exec(oldSchemaRequests); err != nil {
-		t.Fatalf("create old schema: %v", err)
-	}
-	insert := func(id, model, usage string) {
-		t.Helper()
-		if _, err := db.Exec(`INSERT INTO sessions (id, created_at, first_alias, first_model, request_count, tool_call_count, failure_count)
-			VALUES (?, '2026-08-01T10:00:00.000Z', 'a', 'm', 1, 0, 0)`, id); err != nil {
-			t.Fatalf("insert session: %v", err)
-		}
-		if _, err := db.Exec(`INSERT INTO requests (id, session_id, seq, created_at, alias, provider, model, endpoint,
-			duration_ms, status_code, finish_reason, usage_json, truncated)
-			VALUES (?, ?, 1, '2026-08-01T10:00:00.000Z', 'a', 'p', ?, '/v1/chat/completions', 5, 200, 'stop', ?, 0)`,
-			id, id, model, usage); err != nil {
-			t.Fatalf("insert request: %v", err)
-		}
-	}
-	insert("r1", "gpt-4o-mini", `{"prompt_tokens":1000000,"completion_tokens":1000000,"prompt_tokens_details":{"cached_tokens":500000}}`)
-	insert("r2", "stealth/ox-alpha", `{"prompt_tokens":100,"completion_tokens":50}`)
-	insert("r3", "deepseek/deepseek-v4-flash", `{"prompt_tokens":1000,"completion_tokens":200,"prompt_cache_hit_tokens":400}`)
-	insert("r4", "llama3.1", `{"prompt_tokens":100,"completion_tokens":50}`)
-	insert("r5", "some-model", "") // no usage → must be left alone
-	if err := db.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-
-	st, err := Open(path) // migration adds the cost columns
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer st.Close()
+	st := openTestStore(t)
 	ctx := context.Background()
 
-	// The backfill callback mirrors the gateway's pricing logic: slash-prefixed
-	// ids resolve via the pricing table, local/unknown models stay unpriced.
-	tab, err := pricing.Load()
-	if err != nil {
-		t.Fatalf("pricing.Load: %v", err)
+	// unpriced-with-usage: the row the backfill must price (captured before
+	// the model's price entered the table).
+	unpriced := costTestRecord("r1", "s1", time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC),
+		"commandcode", "commandcode", "deepseek/deepseek-v4-flash", 0, 0, 0, 0, 0, 0)
+	unpriced.CostPriced = false
+	unpriced.Usage = json.RawMessage(`{"prompt_tokens":1000,"completion_tokens":200,
+		"prompt_tokens_details":{"cached_tokens":400}}`)
+	// priced: an already-priced row that must stay frozen.
+	priced := costTestRecord("r2", "s2", time.Date(2026, 8, 1, 11, 0, 0, 0, time.UTC),
+		"openai", "openai", "gpt-4o-mini", 100, 20, 0, 0.1, 0.2, 0)
+	priced.CostSchema = "models.dev@2026-01-01"
+	// no-usage: stays untouched regardless.
+	noUsage := costTestRecord("r3", "s3", time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC),
+		"openai", "openai", "gpt-4o", 0, 0, 0, 0, 0, 0)
+	noUsage.CostPriced = false
+	for _, r := range []*CaptureRecord{unpriced, priced, noUsage} {
+		if err := st.Capture(ctx, r); err != nil {
+			t.Fatalf("Capture: %v", err)
+		}
 	}
-	n, err := st.BackfillCosts(context.Background(), func(model string, usage json.RawMessage) BackfilledCost {
-		var u struct {
-			PromptTokens        int64 `json:"prompt_tokens"`
-			CompletionTokens    int64 `json:"completion_tokens"`
-			PromptTokensDetails struct {
-				CachedTokens int64 `json:"cached_tokens"`
-			} `json:"prompt_tokens_details"`
-			PromptCacheHitTokens int64 `json:"prompt_cache_hit_tokens"`
+
+	const schema = "models.dev@2026-08-31"
+	backfill := func(model, provider string) BackfilledCost {
+		if model == "deepseek/deepseek-v4-flash" {
+			return BackfilledCost{PromptTokens: 1000, CompletionTokens: 200, CachedTokens: 400,
+				Input: 0.0006, Output: 0.00022, CacheRead: 0.0000028, Total: 0.0008228,
+				Priced: true, Schema: schema}
 		}
-		_ = json.Unmarshal(usage, &u)
-		cached := u.PromptTokensDetails.CachedTokens
-		if cached == 0 {
-			cached = u.PromptCacheHitTokens
-		}
-		bc := BackfilledCost{PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens, CachedTokens: cached}
-		p, ok := tab.Lookup(model)
-		if !ok || p.Local {
-			return bc
-		}
-		s := p.Estimate(u.PromptTokens, u.CompletionTokens, cached)
-		bc.Input, bc.Output, bc.CacheRead, bc.CacheWrite, bc.Total = s.Input, s.Output, s.CacheRead, s.CacheWrite, s.Total()
-		bc.Priced = true
-		return bc
+		return BackfilledCost{}
+	}
+	n, err := st.BackfillCosts(ctx, func(model, provider string, usage json.RawMessage) BackfilledCost {
+		return backfill(model, provider)
 	})
 	if err != nil {
 		t.Fatalf("BackfillCosts: %v", err)
 	}
-	if n != 4 {
-		t.Errorf("backfilled = %d, want 4 (r5 has no usage)", n)
+	if n != 1 {
+		t.Fatalf("backfilled = %d, want 1 (r1 only)", n)
 	}
 
-	// r1: gpt-4o-mini priced with cache split.
-	req, err := st.GetRequest(ctx, "r1", 1)
+	// r1: priced with the schema stamp.
+	req, err := st.GetRequest(ctx, "s1", 1)
 	if err != nil {
 		t.Fatalf("GetRequest r1: %v", err)
 	}
-	if !req.CostPriced || !approx(req.CostInput, 0.075) || !approx(req.CostCacheRead, 0.0375) || !approx(req.CostOutput, 0.6) {
-		t.Errorf("r1 backfilled cost = %+v", req)
+	if !req.CostPriced || !approx(req.CostTotal, 0.0008228) || req.CostSchema != schema {
+		t.Errorf("r1 = priced %v total %v schema %q", req.CostPriced, req.CostTotal, req.CostSchema)
+	}
+	if req.PromptTokens != 1000 || req.CachedTokens != 400 {
+		t.Errorf("r1 tokens = %d/%d, want 1000/400", req.PromptTokens, req.CachedTokens)
 	}
 
-	// r3: slash-prefixed id still prices via the fallback.
-	req, err = st.GetRequest(ctx, "r3", 1)
+	// r2: already-priced rows keep their frozen split and original stamp.
+	req, err = st.GetRequest(ctx, "s2", 1)
+	if err != nil {
+		t.Fatalf("GetRequest r2: %v", err)
+	}
+	if !approx(req.CostTotal, 0.3) || req.CostSchema != "models.dev@2026-01-01" {
+		t.Errorf("r2 rewritten: total %v schema %q", req.CostTotal, req.CostSchema)
+	}
+
+	// r3: no usage — untouched, still unpriced.
+	req, err = st.GetRequest(ctx, "s3", 1)
 	if err != nil {
 		t.Fatalf("GetRequest r3: %v", err)
 	}
-	if !req.CostPriced || !approx(req.CostTotal, 0.27*600/1e6+0.07*400/1e6+1.1*200/1e6) {
-		t.Errorf("r3 backfilled cost = %+v", req)
+	if req.CostPriced || req.CostSchema != "" {
+		t.Errorf("r3 = priced %v schema %q, want untouched", req.CostPriced, req.CostSchema)
 	}
 
-	// r2 (unknown) and r4 (local) keep token counts but stay unpriced.
-	for _, id := range []string{"r2", "r4"} {
-		req, err = st.GetRequest(ctx, id, 1)
-		if err != nil {
-			t.Fatalf("GetRequest %s: %v", id, err)
-		}
-		if req.CostPriced || req.CostTotal != 0 || req.PromptTokens == 0 {
-			t.Errorf("%s = priced %v total %v prompt %d", id, req.CostPriced, req.CostTotal, req.PromptTokens)
-		}
-	}
-
-	// r5: no usage → untouched (still marker-eligible but harmless).
-	req, err = st.GetRequest(ctx, "r5", 1)
-	if err != nil {
-		t.Fatalf("GetRequest r5: %v", err)
-	}
-	if req.PromptTokens != 0 {
-		t.Errorf("r5 prompt tokens = %d, want 0 (no usage)", req.PromptTokens)
-	}
-
-	// Idempotence: a second pass updates nothing.
-	n2, err := st.BackfillCosts(context.Background(), func(string, json.RawMessage) BackfilledCost {
-		return BackfilledCost{Priced: true}
+	// Idempotence: a second pass updates nothing (r1 is priced now, r3's model
+	// still prices as unpriced).
+	n2, err := st.BackfillCosts(ctx, func(model, provider string, usage json.RawMessage) BackfilledCost {
+		return backfill(model, provider)
 	})
 	if err != nil {
 		t.Fatalf("second BackfillCosts: %v", err)
 	}
 	if n2 != 0 {
-		t.Errorf("second backfill updated %d rows, want 0", n2)
-	}
-
-	// Aggregation now shows priced totals.
-	buckets, err := st.AggregateUsage(context.Background(), UsageFilter{Granularity: GranularityDay})
-	if err != nil {
-		t.Fatalf("AggregateUsage: %v", err)
-	}
-	if len(buckets) != 1 || buckets[0].RequestCount != 5 || buckets[0].UnpricedRequests != 3 {
-		t.Errorf("post-backfill bucket = %+v", buckets)
-	}
-	if buckets[0].CostTotal <= 0 || buckets[0].CachedTokens != 500400 {
-		t.Errorf("post-backfill totals = %+v", buckets[0])
+		t.Errorf("second pass updated %d rows, want 0", n2)
 	}
 }

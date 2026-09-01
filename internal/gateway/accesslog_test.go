@@ -46,10 +46,13 @@ func newAccessLogServer(t *testing.T, buf *bytes.Buffer) http.Handler {
 }
 
 // serveAccess serves one request against the wrapped handler and returns the
-// response recorder.
+// response recorder. The request is addressed to a loopback Host, like a real
+// local client (httptest.NewRequest would otherwise default to example.com,
+// which the admin-surface host guard rightly refuses).
 func serveAccess(t *testing.T, h http.Handler, method, target string, body io.Reader, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, target, body)
+	req.Host = "127.0.0.1:8787"
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}

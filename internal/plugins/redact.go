@@ -19,7 +19,7 @@ type RedactConfig struct {
 	FieldNames *[]string `json:"field_names"`
 }
 
-// defaultPatterns are the plan-assumption 11 sensitive defaults: API-key-like,
+// defaultPatterns are the four built-in sensitive defaults: API-key-like,
 // email, phone, and SSN-like.
 var defaultPatterns = []string{
 	`\bsk-[A-Za-z0-9_-]{16,}\b`,                      // API key-like (OpenAI style)
@@ -176,6 +176,26 @@ func init() {
 			}
 		}
 		return NewRedact(cfg)
+	})
+	registerInfo(Info{
+		Name:         "redact",
+		Kind:         "transform",
+		Source:       "built-in",
+		Configurable: true,
+		Description:  "Masks sensitive data in message content and tool-call arguments before it leaves your machine — and again on the way back, so provider replies are scrubbed too. Every string is scanned with regex patterns (API-key-like tokens, emails, phone numbers, SSNs by default) and each match is replaced with [REDACTED]. Structure-preserving: valid JSON tool arguments stay valid JSON, only the values change. Both the original and the redacted payloads are stored, so you can always see what was filtered.",
+		ConfigFields: []ConfigField{
+			{
+				Name:        "patterns",
+				Kind:        "string_list",
+				Description: "Regexes applied to every string value (Go RE2 syntax, invalid patterns are rejected at config time). Unset uses the four built-in defaults listed below; an explicit empty list disables regex redaction entirely.",
+				Defaults:    defaultPatterns,
+			},
+			{
+				Name:        "field_names",
+				Kind:        "string_list",
+				Description: "JSON keys whose values are replaced with [REDACTED] wholesale, at any depth — use for structured secrets a regex would miss (e.g. \"password\"). Unset means no field-list masking (regex-only).",
+			},
+		},
 	})
 }
 

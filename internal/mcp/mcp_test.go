@@ -922,6 +922,54 @@ func TestHTTPRejectsOversizedBody(t *testing.T) {
 	}
 }
 
+// TestHTTPNoCORS verifies the streamable-http endpoint sends no CORS headers:
+// a browser page must never be able to read captured traffic cross-origin
+// (non-browser MCP clients don't need CORS).
+func TestHTTPNoCORS(t *testing.T) {
+	st := openTestStore(t)
+	s := New(st, "")
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	// OPTIONS (the would-be preflight) is answered with method negotiation only.
+	req, err := http.NewRequest(http.MethodOptions, ts.URL+"/mcp", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("OPTIONS status = %d, want 204", resp.StatusCode)
+	}
+	if allow := resp.Header.Get("Allow"); !strings.Contains(allow, "POST") {
+		t.Errorf("OPTIONS Allow = %q, want POST listed", allow)
+	}
+	for _, h := range []string{"Access-Control-Allow-Origin", "Access-Control-Allow-Methods", "Access-Control-Allow-Headers"} {
+		if v := resp.Header.Get(h); v != "" {
+			t.Errorf("OPTIONS response must not set %s (got %q)", h, v)
+		}
+	}
+
+	// POST responses carry no CORS headers either.
+	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "ping"})
+	req, err = http.NewRequest(http.MethodPost, ts.URL+"/mcp", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if v := resp.Header.Get("Access-Control-Allow-Origin"); v != "" {
+		t.Errorf("POST response must not set Access-Control-Allow-Origin (got %q)", v)
+	}
+}
+
 func TestHTTPNotificationSSE(t *testing.T) {
 	st := openTestStore(t)
 	s := New(st, "")

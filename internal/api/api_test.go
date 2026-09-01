@@ -19,6 +19,7 @@ import (
 
 	"github.com/amirzamli/shimmer-llmgateway/internal/config"
 	"github.com/amirzamli/shimmer-llmgateway/internal/logging"
+	"github.com/amirzamli/shimmer-llmgateway/internal/plugins"
 	"github.com/amirzamli/shimmer-llmgateway/internal/secrets"
 	"github.com/amirzamli/shimmer-llmgateway/internal/store"
 )
@@ -469,6 +470,127 @@ func TestSettingsGetAndPatch(t *testing.T) {
 	}
 	if stAt.RetentionDays != 7 {
 		t.Errorf("store retention = %d, want 7", stAt.RetentionDays)
+	}
+}
+
+// TestPluginsListAndPatch drives GET /api/plugins and PATCH
+// /api/plugins/{name}: metadata listing, global enable/disable, config
+// write-back with build-time validation, and the control-plugin guard.
+func TestPluginsListAndPatch(t *testing.T) {
+	gs, mgr, _, cfgPath := newAPITest(t, apiTestTOML, testMasterKey)
+
+	status, out := doJSON(t, gs, "GET", "/api/plugins", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET /api/plugins status = %d", status)
+	}
+	list, ok := out["plugins"].([]any)
+	if !ok || len(list) == 0 {
+		t.Fatalf("plugins list = %v", out["plugins"])
+	}
+	// Metadata must cover every known plugin name with a description.
+	for _, name := range plugins.Known() {
+		found := false
+		for _, raw := range list {
+			p := raw.(map[string]any)
+			if p["name"] == name {
+				found = true
+				if p["description"] == "" || p["source"] != "built-in" {
+					t.Errorf("plugin %q info incomplete: %+v", name, p)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("plugin %q missing from GET /api/plugins", name)
+		}
+	}
+	// redact is configurable and documents its config fields.
+	var redactInfo map[string]any
+	for _, raw := range list {
+		p := raw.(map[string]any)
+		if p["name"] == "redact" {
+			redactInfo = p
+		}
+	}
+	if redactInfo == nil || redactInfo["configurable"] != true {
+		t.Fatalf("redact info = %v, want configurable", redactInfo)
+	}
+	if fields, ok := redactInfo["config_fields"].([]any); !ok || len(fields) != 2 {
+		t.Errorf("redact config_fields = %v, want 2 fields", redactInfo["config_fields"])
+	}
+
+	// Enable: the name lands on both sides of the global chain.
+	status, out = doJSON(t, gs, "PATCH", "/api/plugins/redact", `{"enabled":true}`)
+	if status != http.StatusOK || out["enabled"] != true {
+		t.Fatalf("enable redact: status=%d out=%v", status, out)
+	}
+	reqP := mgr.Get().Settings.RequestPlugins
+	if len(reqP) != 1 || reqP[0] != "redact" {
+		t.Errorf("request_plugins = %v, want [redact]", reqP)
+	}
+	if respP := mgr.Get().Settings.ResponsePlugins; len(respP) != 1 || respP[0] != "redact" {
+		t.Errorf("response_plugins = %v, want [redact]", respP)
+	}
+
+	// Config write-back persists [plugins.redact] and hot-swaps.
+	status, _ = doJSON(t, gs, "PATCH", "/api/plugins/redact", `{"config":{"field_names":["password","api_key"]}}`)
+	if status != http.StatusOK {
+		t.Fatalf("patch redact config status = %d", status)
+	}
+	if cfg := mgr.Get().PluginConfig("redact"); cfg == nil || len(cfg) != 1 {
+		t.Errorf("live redact config = %v", mgr.Get().PluginConfig("redact"))
+	}
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload persisted config: %v", err)
+	}
+	if cfg := reloaded.PluginConfig("redact"); cfg == nil || cfg["field_names"] == nil {
+		t.Errorf("persisted redact config = %v", reloaded.PluginConfig("redact"))
+	}
+
+	// An invalid pattern is rejected at build time and nothing is persisted.
+	status, _ = doJSON(t, gs, "PATCH", "/api/plugins/redact", `{"config":{"patterns":["([bad"]}}`)
+	if status != http.StatusBadRequest {
+		t.Errorf("invalid redact pattern status = %d, want 400", status)
+	}
+
+	// Control plugins take no settings; unknown names 404.
+	status, _ = doJSON(t, gs, "PATCH", "/api/plugins/retry_empty", `{"config":{"x":1}}`)
+	if status != http.StatusBadRequest {
+		t.Errorf("retry_empty config status = %d, want 400", status)
+	}
+	status, _ = doJSON(t, gs, "PATCH", "/api/plugins/nope", `{"enabled":true}`)
+	if status != http.StatusNotFound {
+		t.Errorf("unknown plugin status = %d, want 404", status)
+	}
+
+	// Disable: both sides return to empty.
+	status, _ = doJSON(t, gs, "PATCH", "/api/plugins/redact", `{"enabled":false}`)
+	if status != http.StatusOK {
+		t.Fatalf("disable redact status = %d", status)
+	}
+	if len(mgr.Get().Settings.RequestPlugins) != 0 || len(mgr.Get().Settings.ResponsePlugins) != 0 {
+		t.Errorf("after disable: req=%v resp=%v", mgr.Get().Settings.RequestPlugins, mgr.Get().Settings.ResponsePlugins)
+	}
+}
+
+// TestSettingsLogPayloads covers the log_payloads opt-in on the settings
+// surface: GET exposes it and PATCH persists it.
+func TestSettingsLogPayloads(t *testing.T) {
+	gs, mgr, _, cfgPath := newAPITest(t, apiTestTOML, testMasterKey)
+
+	status, out := doJSON(t, gs, "PATCH", "/api/settings", `{"log_payloads":true}`)
+	if status != http.StatusOK {
+		t.Fatalf("PATCH /api/settings status = %d", status)
+	}
+	if out["log_payloads"] != true || !mgr.Get().Settings.LogPayloads {
+		t.Errorf("log_payloads = %v / live = %v, want true", out["log_payloads"], mgr.Get().Settings.LogPayloads)
+	}
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload persisted config: %v", err)
+	}
+	if !reloaded.Settings.LogPayloads {
+		t.Errorf("persisted log_payloads = false, want true")
 	}
 }
 

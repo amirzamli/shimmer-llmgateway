@@ -154,6 +154,7 @@ func TestOpenCreatesSchemaAndPragmas(t *testing.T) {
 			{"request_count", "INTEGER", false, false},
 			{"tool_call_count", "INTEGER", false, false},
 			{"failure_count", "INTEGER", false, false},
+			{"expired", "INTEGER", false, false},
 		},
 		"requests": {
 			{"id", "TEXT", false, true},
@@ -184,6 +185,7 @@ func TestOpenCreatesSchemaAndPragmas(t *testing.T) {
 			{"cost_cache_write", "REAL", false, false},
 			{"cost_total", "REAL", false, false},
 			{"cost_priced", "INTEGER", false, false},
+			{"cost_schema", "TEXT", false, false},
 		},
 		"tool_calls": {
 			{"id", "TEXT", false, true},
@@ -999,22 +1001,49 @@ func TestPurge(t *testing.T) {
 		t.Fatalf("Purge: %v", err)
 	}
 	if n != 1 {
-		t.Errorf("Purge removed %d sessions, want 1", n)
+		t.Errorf("Purge expired %d sessions, want 1", n)
 	}
 
-	sess, err := st.GetSession(context.Background(), "sess-new")
+	// The old session is expired, not deleted: metadata and usage stats
+	// remain, payloads and tool calls are gone.
+	sess, err := st.GetSession(context.Background(), "sess-old")
+	if err != nil {
+		t.Fatalf("expired session missing: %v", err)
+	}
+	if !sess.Expired {
+		t.Error("expired session not flagged")
+	}
+	if sess.RequestCount != 1 {
+		t.Errorf("expired session request_count = %d, want 1", sess.RequestCount)
+	}
+	req, err := st.GetRequest(context.Background(), "sess-old", 1)
+	if err != nil {
+		t.Fatalf("expired request missing: %v", err)
+	}
+	if len(req.RequestJSON) != 0 || len(req.ResponseJSON) != 0 {
+		t.Error("expired session still carries payloads")
+	}
+	if req.Alias != "openai" || req.Model != "gpt-4o" || req.StatusCode != 200 {
+		t.Errorf("expired request metadata lost: %+v", req)
+	}
+
+	// The fresh session is untouched.
+	fresh, err := st.GetSession(context.Background(), "sess-new")
 	if err != nil {
 		t.Errorf("fresh session purged: %v", err)
 	}
-	if err == nil && sess.RequestCount != 1 {
-		t.Errorf("fresh session request_count = %d, want 1", sess.RequestCount)
+	if err == nil && fresh.Expired {
+		t.Error("fresh session flagged expired")
+	}
+	freshReq, err := st.GetRequest(context.Background(), "sess-new", 1)
+	if err != nil {
+		t.Fatalf("fresh request missing: %v", err)
+	}
+	if len(freshReq.RequestJSON) == 0 {
+		t.Error("fresh session lost its payloads")
 	}
 
-	if _, err := st.GetSession(context.Background(), "sess-old"); err != ErrNotFound {
-		t.Errorf("old session err = %v, want ErrNotFound", err)
-	}
-
-	// Children were removed first (no cascade clause in the schema).
+	// Tool calls of expired sessions are removed.
 	var cnt int
 	if err := st.db.QueryRow(`SELECT COUNT(*) FROM tool_calls`).Scan(&cnt); err != nil {
 		t.Fatal(err)
@@ -1022,11 +1051,18 @@ func TestPurge(t *testing.T) {
 	if cnt != 0 {
 		t.Errorf("tool_calls after purge = %d, want 0", cnt)
 	}
+	// Both requests rows remain for the usage aggregates.
 	if err := st.db.QueryRow(`SELECT COUNT(*) FROM requests`).Scan(&cnt); err != nil {
 		t.Fatal(err)
 	}
-	if cnt != 1 {
-		t.Errorf("requests after purge = %d, want 1", cnt)
+	if cnt != 2 {
+		t.Errorf("requests after purge = %d, want 2", cnt)
+	}
+
+	// A second pass expires nothing new (the expired flag makes it a no-op).
+	n, err = st.Purge(context.Background())
+	if err != nil || n != 0 {
+		t.Errorf("second purge = (%d, %v), want (0, nil)", n, err)
 	}
 
 	// Disabled purge is a no-op.

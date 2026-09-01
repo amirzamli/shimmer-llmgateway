@@ -7,7 +7,7 @@
 <style>
   :root {
     --bg: #0f1115; --panel: #171a21; --border: #2a2f3a;
-    --text: #e6e9ef; --muted: #9aa3b2; --accent: #4f8cff;
+    --text: #e6e9ef; --text2: #c6cdd9; --muted: #a3adbd; --accent: #4f8cff;
     --ok: #2ecc71; --warn: #f1c40f; --err: #e74c3c;
   }
   * { box-sizing: border-box; }
@@ -24,7 +24,7 @@
   label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
   input, select, textarea { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 6px 8px; font-size: 13px; }
   button { background: var(--accent); border: none; color: white; border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
-  button.ghost { background: transparent; border: 1px solid var(--border); color: var(--muted); }
+  button.ghost { background: transparent; border: 1px solid var(--border); color: var(--text2); }
   button.danger { background: var(--err); }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
@@ -105,6 +105,26 @@
   #add-instance-form { border: 1px dashed var(--border); border-radius: 8px; padding: 14px; margin-bottom: 14px; background: rgba(255,255,255,0.015); }
   #add-instance-form .row label { min-width: 150px; }
   #add-instance-form .templates-fold { margin-top: 12px; }
+  /* Combined Settings page (general settings + gateway status + plugins) */
+  .setting { display: flex; gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .setting:last-child { border-bottom: none; }
+  .setting-label { width: 230px; flex-shrink: 0; font-size: 13px; font-weight: 500; padding-top: 6px; }
+  .setting-control { flex: 1; min-width: 240px; }
+  .setting-desc { color: var(--text2); font-size: 12px; margin-top: 4px; line-height: 1.5; }
+  .status-cols { display: flex; gap: 28px; flex-wrap: wrap; }
+  .status-cols > table { flex: 1; min-width: 260px; }
+  .plugin-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; background: rgba(255,255,255,0.015); }
+  .plugin-head { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; }
+  .plugin-head .plugin-info { flex: 1; min-width: 260px; }
+  .plugin-desc { color: var(--text2); font-size: 12px; line-height: 1.55; margin-top: 4px; }
+  .plugin-scope { color: var(--text2); font-size: 11px; margin-top: 4px; }
+  .plugin-card textarea { width: 100%; font-family: ui-monospace, monospace; font-size: 12px; }
+  .plugin-config { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 8px; }
+  .plugin-config summary { user-select: none; color: var(--text2); }
+  .instructions ol { margin: 8px 0; padding-left: 22px; }
+  .instructions li { margin-bottom: 10px; line-height: 1.5; }
+  .instructions p { line-height: 1.5; }
+  .instructions pre { margin: 6px 0; }
 </style>
 </head>
 <body>
@@ -115,7 +135,6 @@
     <button data-action="view" data-view="settings">Settings</button>
     <button data-action="view" data-view="traces">Traces</button>
     <button data-action="view" data-view="usage">Usage</button>
-    <button data-action="view" data-view="status">Status</button>
   </nav>
 </header>
 <main>
@@ -123,7 +142,6 @@
   <section id="view-settings" class="hidden"></section>
   <section id="view-traces" class="hidden"></section>
   <section id="view-usage" class="hidden"></section>
-  <section id="view-status" class="hidden"></section>
 </main>
 
 <script>
@@ -193,8 +211,11 @@ document.addEventListener("click", function (ev) {
     case "aliases-remove": removeAliasRow(el); break;
     case "aliases-save": saveAliases(el.dataset.alias); break;
     case "save-settings": saveSettings(); break;
+    case "plugin-toggle": togglePlugin(el.dataset.name); break;
+    case "plugin-save-config": savePluginConfig(el.dataset.name); break;
     case "search-sessions": loadSessions(); break;
     case "search-usage": searchUsage(); break;
+    case "usage-chart-metric": setChartMetric(el.dataset.metric); break;
     case "open-session": openSession(el.dataset.id); break;
     case "export-session": exportSession(el.dataset.id); break;
     case "back": loadSessions(); break;
@@ -216,7 +237,6 @@ async function loadView(v) {
     else if (v === "settings") { await loadSettings(); }
     else if (v === "traces") { /* filters on demand */ }
     else if (v === "usage") { await loadUsage(); }
-    else if (v === "status") { await loadStatus(); }
   } catch (e) { alert(e.message); }
 }
 
@@ -766,36 +786,276 @@ async function saveAliases(alias) {
   } catch (e) { alert(e.message); }
 }
 
-/* ---------- Settings ---------- */
+/* ---------- Settings (combined: gateway status + settings + plugins) ---------- */
+// pluginsData caches the GET /api/plugins payload for the render helpers
+// (enablement, per-instance effective lists, per-plugin config tables).
+let pluginsData = {};
+
 async function loadSettings() {
-  const s = await api("/api/settings");
+  const [s, p, st] = await Promise.all([api("/api/settings"), api("/api/plugins"), api("/api/status")]);
+  pluginsData = p;
   $("view-settings").innerHTML = `
-    <div class="panel">
-      <h2>Settings</h2>
-      <div class="row">
-        <label>Listen (read-only)<input value="${esc(s.listen)}" disabled></label>
-        <label>Store path (read-only)<input value="${esc(s.store)}" disabled></label>
-      </div>
-      <div class="row" style="margin-top:10px">
-        <label>Retention days<input id="set-retention" type="number" value="${s.retention_days}"></label>
-        <label>Default alias<input id="set-default-alias" value="${esc(s.default_alias)}"></label>
-        <label>Request plugins (comma-separated)<input id="set-req-plugins" value="${esc((s.request_plugins||[]).join(", "))}"></label>
-        <label>Response plugins (comma-separated)<input id="set-resp-plugins" value="${esc((s.response_plugins||[]).join(", "))}"></label>
-        <button data-action="save-settings">Save</button>
-      </div>
-    </div>`;
+    ${renderGatewayStatus(st)}
+    ${renderGeneralSettings(s, st)}
+    ${renderPlugins()}
+    ${renderCustomPluginInstructions()}`;
 }
+
+/* ----- gateway status (formerly its own Status view) ----- */
+function renderGatewayStatus(st) {
+  const uptime = st.uptime_seconds;
+  const d = Math.floor(uptime / 86400), h = Math.floor((uptime % 86400) / 3600), m = Math.floor((uptime % 3600) / 60), sec = uptime % 60;
+  return `<div class="panel">
+    <h2>Gateway status</h2>
+    <div class="status-cols">
+      <table><tbody>
+        <tr><td>Store</td><td><code>${esc(st.store_path)}</code></td></tr>
+        <tr><td>Sessions</td><td>${st.session_count}</td></tr>
+        <tr><td>Requests</td><td>${st.request_count}</td></tr>
+        <tr><td>Tool calls</td><td>${st.tool_call_count}</td></tr>
+        <tr><td>Failures</td><td>${st.failure_count}</td></tr>
+        <tr><td>Disk usage</td><td>${(st.disk_usage_bytes / 1024 / 1024).toFixed(1)} MiB</td></tr>
+        <tr><td>Retention</td><td>${st.retention_days === 0 ? "purging disabled" : st.retention_days + " days"}</td></tr>
+      </tbody></table>
+      <table><tbody>
+        <tr><td>Uptime</td><td>${d}d ${h}h ${m}m ${sec}s</td></tr>
+        <tr><td>Listen</td><td>${esc((st.listen_addrs || []).join(", "))}</td></tr>
+        <tr><td>Aliases</td><td>${esc((st.aliases || []).join(", "))}${st.disabled_instances ? ` <span class="badge disabled">${st.disabled_instances} disabled</span>` : ""}</td></tr>
+      </tbody></table>
+    </div>
+    <div style="margin-top:8px;font-size:12px;color:var(--text2)">Reload the page for fresh numbers. Sessions/requests count everything in the store (retention keeps usage stats even after payloads are purged).</div>
+  </div>`;
+}
+
+/* ----- general settings, each with a plain-language description ----- */
+function renderGeneralSettings(s, st) {
+  const cur = s.default_alias || "";
+  const aliases = st.aliases || [];
+  // Dropdown of existing instances, so a bad value can't be typed. Keep the
+  // current value selectable even when it is not routable (e.g. disabled
+  // instance) so saving never silently changes it.
+  const opts = [`<option value="">(none — bare model names resolve in config order)</option>`]
+    .concat(aliases.map(a => `<option value="${esc(a)}"${a === cur ? " selected" : ""}>${esc(a)}</option>`));
+  if (cur && !aliases.includes(cur)) {
+    opts.push(`<option value="${esc(cur)}" selected>${esc(cur)} (not routable)</option>`);
+  }
+  return `<div class="panel">
+    <h2>Settings</h2>
+    <div class="setting">
+      <div class="setting-label">Listen addresses <span class="muted">(read-only)</span></div>
+      <div class="setting-control">
+        <input value="${esc((s.listen_addrs || []).join(", "))}" disabled style="width:100%">
+        <div class="setting-desc">The host:port addresses the gateway serves on. Set in <code>gateway.toml</code> and restart to change — one listener is opened per address (e.g. loopback plus a Tailscale IP).</div>
+      </div>
+    </div>
+    <div class="setting">
+      <div class="setting-label">Store path <span class="muted">(read-only)</span></div>
+      <div class="setting-control">
+        <input value="${esc(s.store)}" disabled style="width:100%">
+        <div class="setting-desc">The SQLite database where every request/response capture is stored — original payloads, filtered payloads, tool calls, and usage. Keys are never written here.</div>
+      </div>
+    </div>
+    <div class="setting">
+      <div class="setting-label">Retention days</div>
+      <div class="setting-control">
+        <label><input id="set-retention" type="number" min="0" value="${s.retention_days}" style="width:120px"></label>
+        <div class="setting-desc">Conversation payloads older than this many days are purged from the store; only usage statistics remain (sessions show as "payloads expired"). <b>0 disables purging</b> — the database grows until disk runs out.</div>
+      </div>
+    </div>
+    <div class="setting">
+      <div class="setting-label">Default alias</div>
+      <div class="setting-control">
+        <label><select id="set-default-alias" style="width:240px">${opts.join("")}</select></label>
+        <div class="setting-desc">When a client sends a <b>bare</b> model name (no <code>alias/model</code> prefix), this instance's model aliases and models are matched first. Lists enabled instances; "(none)" turns the shortcut off.</div>
+      </div>
+    </div>
+    <div class="setting">
+      <div class="setting-label">Log payloads</div>
+      <div class="setting-control">
+        <label><input id="set-log-payloads" type="checkbox" ${s.log_payloads ? "checked" : ""}> Log redacted payloads to the console</label>
+        <div class="setting-desc">Print a copy of every request/response payload to the gateway log (stderr) for debugging. Sensitive values are masked with the same engine as the redact plugin, so it is safe to leave on. Off by default.</div>
+      </div>
+    </div>
+    <div class="row" style="margin-top:12px"><button data-action="save-settings">Save settings</button></div>
+  </div>`;
+}
+
 async function saveSettings() {
-  const split = (s) => s.split(",").map(x => x.trim()).filter(Boolean);
+  const n = parseInt($("set-retention").value, 10);
   const body = {
-    retention_days: parseInt($("set-retention").value, 10) || 0,
-    default_alias: $("set-default-alias").value,
-    request_plugins: split($("set-req-plugins").value),
-    response_plugins: split($("set-resp-plugins").value),
+    retention_days: Number.isFinite(n) && n >= 0 ? n : 0,
+    default_alias: $("set-default-alias").value.trim(),
+    log_payloads: $("set-log-payloads").checked,
   };
   try {
     await api("/api/settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    alert("Saved");
+    await loadSettings();
+  } catch (e) { alert(e.message); }
+}
+
+/* ----- plugins ----- */
+// pluginEnabled reads a plugin's global-default state from the cached
+// /api/plugins payload (listed on either side of the global chain).
+function pluginEnabled(name) {
+  return (pluginsData.request_plugins || []).includes(name) || (pluginsData.response_plugins || []).includes(name);
+}
+// pluginScope explains where a plugin actually runs: the global default plus
+// any per-instance plugins lists (which replace the global chain entirely).
+function pluginScope(name, enabled) {
+  const insts = pluginsData.instances || [];
+  const fmt = (list) => list.map(x => esc(x.alias) + (x.disabled ? " (disabled)" : "")).join(", ");
+  if (!insts.length) return enabled ? "Global default; no instances configured yet." : "Off everywhere.";
+  const own = insts.filter(i => i.override);
+  const on = insts.filter(i => (i.plugins || []).includes(name));
+  if (!enabled) {
+    return on.length ? `Not a global default — active on: ${fmt(on)}.` : "Off everywhere.";
+  }
+  if (!own.length) return "Active on every instance (global default).";
+  const inherit = on.filter(i => !i.override);
+  const ownOn = on.filter(i => i.override);
+  const ownOff = own.filter(i => !(i.plugins || []).includes(name));
+  const bits = [];
+  if (inherit.length) bits.push(`inherited by ${fmt(inherit)}`);
+  if (ownOn.length) bits.push(`explicitly listed on ${fmt(ownOn)}`);
+  if (ownOff.length) bits.push(`NOT applied to ${fmt(ownOff)} — their own plugins list replaces the global chain`);
+  return "Global default — " + bits.join("; ") + ".";
+}
+// pluginCard renders one plugin: what it does, kind/source badges, the
+// enable/disable toggle, where it is active, and (for configurable plugins)
+// a settings fold backed by [plugins.<name>] in gateway.toml.
+function pluginCard(info) {
+  const enabled = pluginEnabled(info.name);
+  const cfg = (pluginsData.plugin_config || {})[info.name] || null;
+  const kindBadge = info.kind === "control"
+    ? `<span class="badge warn" title="Control plugin — does not transform payloads, it flips gateway behavior">control</span>`
+    : `<span class="badge ok" title="Transform plugin — rewrites request/response payloads">transform</span>`;
+  let cfgLine = "";
+  if (info.configurable) {
+    cfgLine = cfg
+      ? `<div class="plugin-scope">Custom settings active: <code>${esc(JSON.stringify(cfg))}</code></div>`
+      : `<div class="plugin-scope">Using built-in default settings.</div>`;
+  }
+  return `<div class="plugin-card">
+    <div class="plugin-head">
+      <div class="plugin-info">
+        <div><b>${esc(info.name)}</b> ${kindBadge} <span class="badge disabled">${esc(info.source)}</span> ${enabled ? `<span class="badge ok">enabled</span>` : `<span class="badge disabled">off</span>`}</div>
+        <div class="plugin-desc">${esc(info.description)}</div>
+        <div class="plugin-scope">${pluginScope(info.name, enabled)}</div>
+        ${cfgLine}
+      </div>
+      <div style="display:flex;gap:8px;flex-shrink:0;align-items:center">
+        <button class="${enabled ? "ghost" : ""}" data-action="plugin-toggle" data-name="${esc(info.name)}">${enabled ? "Disable" : "Enable"}</button>
+      </div>
+    </div>
+    ${info.configurable ? pluginConfigForm(info, cfg) : ""}
+  </div>`;
+}
+// pluginConfigForm renders one textarea per documented config field of the
+// plugin's [plugins.<name>] table. Empty = fall back to that field's default
+// (or no effect for fields without defaults); saving an entirely empty form
+// clears the table from gateway.toml.
+function pluginConfigForm(info, cfg) {
+  cfg = cfg || {};
+  const fields = (info.config_fields || []).map(f => {
+    const val = Array.isArray(cfg[f.name]) ? cfg[f.name].join("\n") : "";
+    const rows = Math.max(3, Math.min(8, (f.defaults || []).length + 1));
+    const ph = (f.defaults && f.defaults.length)
+      ? "Default (used when empty):\n" + f.defaults.join("\n")
+      : "Empty = no entries";
+    return `<label style="flex:1;min-width:280px"><code>${esc(f.name)}</code>
+      <textarea id="pc-${esc(f.name)}-${esc(info.name)}" rows="${rows}" placeholder="${esc(ph)}">${esc(val)}</textarea>
+    </label>`;
+  }).join("");
+  const fieldDocs = (info.config_fields || []).map(f =>
+    `<div style="margin-bottom:6px"><code>${esc(f.name)}</code> — ${esc(f.description)}${f.defaults && f.defaults.length ? ` Defaults: <code>${esc(f.defaults.join(" · "))}</code>` : ""}</div>`
+  ).join("");
+  return `<details class="plugin-config">
+    <summary class="clickable">Plugin settings — open to edit what this plugin does</summary>
+    <div style="margin:10px 0;line-height:1.55;font-size:12px;color:var(--text2)">${fieldDocs}</div>
+    <div class="row" style="align-items:start">${fields}</div>
+    <div class="row" style="margin-top:10px">
+      <button data-action="plugin-save-config" data-name="${esc(info.name)}">Save settings</button>
+      <span style="font-size:12px;color:var(--text2)">One entry per line · empty a field to fall back to its default · stored in gateway.toml under <code>[plugins.${esc(info.name)}]</code></span>
+    </div>
+  </details>`;
+}
+function renderPlugins() {
+  const infos = pluginsData.plugins || [];
+  return `<div class="panel" id="plugins-panel">
+    <h2>Plugins</h2>
+    <div style="font-size:12px;color:var(--text2);line-height:1.55;margin-bottom:12px">
+      Plugins are small transforms the gateway applies to requests before they reach the provider, and to responses after the provider stream is reassembled.
+      The toggle on each plugin is the <b>global default</b>: every instance without its own plugins list follows it. An instance can override with a
+      <code>plugins = [...]</code> list in gateway.toml, which replaces the global chain for that instance. The store always keeps both the original and the
+      filtered payloads plus which plugins ran (<code>plugins_applied</code>), so every effect is auditable in Traces.
+    </div>
+    ${infos.map(pluginCard).join("")}
+  </div>`;
+}
+
+/* ----- custom plugins: how to write and add your own ----- */
+function renderCustomPluginInstructions() {
+  return `<div class="panel instructions">
+    <h2>Creating custom plugins</h2>
+    <div style="line-height:1.6;font-size:12px;color:var(--text2)">
+      <p>Plugins are compiled into the gateway binary — external loading (WASM / separate binaries) is planned for v2 — so a custom plugin is a small Go file inside this repo:</p>
+      <ol>
+        <li><b>Implement the seam.</b> Create <code>internal/plugins/mine.go</code> in package <code>plugins</code>:
+<pre>type mine struct{}
+
+func (mine) Name() string { return "mine" }
+
+// Runs before the request is forwarded to the provider.
+// Mutate req.Body (json.RawMessage) in place.
+func (mine) FilterRequest(ctx context.Context, req *Request) error {
+    return nil
+}
+
+// Runs on the response after streaming is reassembled.
+func (mine) FilterResponse(ctx context.Context, resp *Response) error {
+    return nil
+}</pre></li>
+        <li><b>Register a factory</b> in an <code>init()</code> in the same file. It receives the plugin's optional <code>[plugins.mine]</code> TOML table as <code>o.Config</code>:
+<pre>func init() {
+    Register("mine", func(o Options) (Plugin, error) {
+        return mine{}, nil
+    })
+}</pre></li>
+        <li><b>Optional: settings + docs.</b> Decode <code>o.Config</code> into your own struct (validate there — invalid values should fail the build, not the request), then call <code>registerInfo(Info{...})</code> with a description and <code>ConfigFields</code> so your plugin shows up in the list above with its own settings form.</li>
+        <li><b>Build &amp; restart.</b> <code>go build ./cmd/gateway</code>. Unknown plugin names in gateway.toml fail config validation at startup, so a typo can never slip through silently.</li>
+        <li><b>Enable it</b> with the toggle above (global default) or per instance with <code>plugins = ["mine"]</code>.</li>
+      </ol>
+      <p>Ordering: request plugins run in config order before forwarding; response plugins run in config order on the fully reassembled response (streaming is buffered while any response plugin is active). Every capture keeps the original payload, the filtered payload, and <code>plugins_applied</code>.</p>
+    </div>
+  </div>`;
+}
+
+// togglePlugin flips a plugin's global-default state: enabled adds it to both
+// the request and response sides of settings, disabled removes it from both
+// (mirroring how a per-instance plugins list applies to both sides).
+async function togglePlugin(name) {
+  try {
+    await api("/api/plugins/" + encodeURIComponent(name), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: !pluginEnabled(name) }) });
+    await loadSettings();
+  } catch (e) { alert(e.message); }
+}
+// savePluginConfig writes the plugin's settings form as its [plugins.<name>]
+// table: one entry per textarea line, empty fields fall back to their defaults
+// (an entirely empty form clears the table). Invalid values (e.g. a broken
+// regex) are rejected server-side before anything is persisted.
+async function savePluginConfig(name) {
+  const info = (pluginsData.plugins || []).find(p => p.name === name);
+  if (!info) return;
+  const cfg = {};
+  (info.config_fields || []).forEach(f => {
+    const el = document.getElementById("pc-" + f.name + "-" + name);
+    if (!el) return;
+    const lines = el.value.split("\n").map(x => x.trim()).filter(Boolean);
+    if (lines.length) cfg[f.name] = lines;
+  });
+  try {
+    await api("/api/plugins/" + encodeURIComponent(name), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ config: cfg }) });
+    await loadSettings();
   } catch (e) { alert(e.message); }
 }
 
@@ -838,7 +1098,7 @@ async function loadSessions() {
       <td class="muted">${esc(s.created_at)}</td>
       <td>${esc(s.first_alias)} / ${esc(s.first_model)}</td>
       <td>${s.request_count}</td><td>${s.tool_call_count}</td>
-      <td>${s.failure_count > 0 ? `<span class="badge err">${s.failure_count} failures</span>` : `<span class="badge ok">ok</span>`}</td>
+      <td>${s.failure_count > 0 ? `<span class="badge err">${s.failure_count} failures</span>` : `<span class="badge ok">ok</span>`}${s.expired ? ` <span class="badge warn">expired</span>` : ""}</td>
     </tr>`).join("")}
   </tbody></table>`;
   $("session-detail").classList.add("hidden");
@@ -881,6 +1141,11 @@ async function openSession(id) {
   (s.tool_calls || []).forEach(c => { (callsByReq[c.request_id] = callsByReq[c.request_id] || []).push(c); });
   const toolCount = (s.tool_calls || []).length;
   let html = `<div class="muted">${esc(s.created_at)} · alias ${esc(s.first_alias)} · model ${esc(s.first_model)} · ${s.request_count} requests · ${toolCount} tool calls</div>`;
+  // Retention keeps only the usage metadata for expired sessions; say so
+  // instead of rendering an apparently empty conversation.
+  if (s.expired) {
+    html += `<div class="badge warn" style="margin:10px 0">payloads expired — conversation content was removed by retention; usage statistics are retained</div>`;
+  }
   // Pre-pass: collect the FULL tool results from every request's history
   // (role:"tool" messages, keyed by tool_call_id). The result for request N's
   // tool call arrives in request N+1's payload, so it must be gathered before
@@ -1094,9 +1359,11 @@ async function exportSession(id) {
 /* ---------- Usage ---------- */
 // The Usage view aggregates estimated cost and token usage over the captured
 // requests (GET /api/usage): daily/weekly/monthly buckets, filterable per
-// provider/alias/model, with the input/output/cache-read cost split. Costs are
-// estimates from the gateway's bundled price table (USD per 1M tokens); models
-// outside the table are unpriced ($0) and flagged.
+// provider/alias/model, with the input/output/cache cost split shown as a
+// donut chart and per-period totals as a stacked column chart (cost/tokens
+// toggle). Costs are estimates from the gateway's generated price table,
+// loaded from disk at startup (USD per 1M tokens); models outside the table
+// are unpriced ($0) and flagged.
 function renderUsageFilters() {
   $("view-usage").innerHTML = `
     <div class="panel">
@@ -1119,7 +1386,7 @@ function renderUsageFilters() {
         </select></label>
         <button data-action="search-usage">Show</button>
       </div>
-      <div class="muted" style="margin-top:8px">Costs are estimates from a bundled price table (USD per 1M tokens). Requests whose model is not in the table count as unpriced ($0) and are flagged. "By model" groups by the resolved upstream model, never the alias.</div>
+      <div class="muted" style="margin-top:8px">Costs are estimates from the gateway's generated price table, loaded at startup (USD per 1M tokens). Requests whose model is not in the table count as unpriced ($0) and are flagged. "By model" groups by the resolved upstream model, never the alias.</div>
     </div>
     <div class="panel"><div id="usage-result" class="muted">Pick a period and click Show.</div></div>`;
   const g = $("u-group");
@@ -1161,22 +1428,18 @@ async function searchUsage() {
   const fmt = (v) => "$" + (v || 0).toFixed(4);
   const unpricedNote = t.unpriced_requests
     ? ` <span class="badge warn" title="Requests whose model is not in the gateway's price table are counted at $0">${t.unpriced_requests} unpriced</span>` : "";
-  // When grouped (group=model|provider), render the per-period token share
-  // chart on top of the table.
-  const grouped = data.group && data.buckets.length && data.buckets[0].group;
-  const chart = grouped ? renderTokenChart(data.buckets, data.group) : "";
+  // Stacked column chart of how the total changes over time, always rendered;
+  // segmented by the selected breakdown (model/provider) when one is set, and
+  // toggled between cost and tokens without refetching.
+  lastUsageData = data;
+  const chart = `<div id="usage-chart" style="margin-top:4px;margin-bottom:16px">${renderUsageChart(data)}</div>`;
   el.innerHTML = `
     <div class="row" style="align-items:center; margin-bottom:12px">
       <strong style="font-size:15px">${fmt(t.cost_total)} total</strong>
       <span class="muted">${t.request_count} requests · ${t.prompt_tokens.toLocaleString()} in / ${t.completion_tokens.toLocaleString()} out / ${t.cached_tokens.toLocaleString()} cached</span>
       ${unpricedNote}
     </div>
-    <div class="usage" style="flex-direction:row; flex-wrap:wrap; gap:4px 18px; margin-bottom:12px">
-      ${usageBit("Input", fmt(t.cost_input))}
-      ${usageBit("Output", fmt(t.cost_output))}
-      ${usageBit("Cache read", fmt(t.cost_cache_read))}
-      ${usageBit("Cache write", fmt(t.cost_cache_write))}
-    </div>
+    ${renderCostDonut(t, fmt)}
     ${chart}
     <table>
       <thead><tr><th>Period</th><th>Requests</th><th>Prompt tok</th><th>Completion tok</th><th>Cached tok</th><th>Input $</th><th>Output $</th><th>Cache $</th><th>Total $</th><th></th></tr></thead>
@@ -1196,87 +1459,158 @@ async function searchUsage() {
       </tbody>
     </table>`;
 }
-// usageBit renders one label/value cell of the cost-split row.
-function usageBit(label, value) {
-  return `<div class="usage-item"><span class="usage-label">${esc(label)}</span><span class="usage-value">${esc(value)}</span></div>`;
+// costSplitPalette maps the four cost components to fixed donut colors.
+const costSplitPalette = { input: "#4f8cff", cacheRead: "#f1c40f", cacheWrite: "#e67e22", output: "#2ecc71" };
+
+// renderCostDonut renders the input/output/cache cost split as a conic-gradient
+// donut (pure CSS, hole carries the total) beside a legend of amounts and
+// percentage shares. Skips the ring when nothing is priced (total <= 0) and
+// keeps zero rows in the legend so all four components stay visible.
+function renderCostDonut(t, fmt) {
+  const parts = [
+    { key: "input", label: "Input", v: t.cost_input || 0 },
+    { key: "cacheRead", label: "Cached input", v: t.cost_cache_read || 0 },
+    { key: "cacheWrite", label: "Cache write", v: t.cost_cache_write || 0 },
+    { key: "output", label: "Output", v: t.cost_output || 0 },
+  ];
+  const total = parts.reduce((s, p) => s + p.v, 0);
+  let acc = 0;
+  const stops = parts.filter(p => p.v > 0).map(p => {
+    const start = acc; acc += 360 * p.v / total;
+    return `${costSplitPalette[p.key]} ${start.toFixed(3)}deg ${acc.toFixed(3)}deg`;
+  });
+  const donut = total > 0 ? `
+      <div style="position:relative;width:128px;height:128px;flex-shrink:0" title="Total ${esc(fmt(total))}">
+        <div style="width:100%;height:100%;border-radius:50%;background:conic-gradient(${stops.join(",")})"></div>
+        <div style="position:absolute;inset:26px;border-radius:50%;background:var(--panel);display:grid;place-items:center">
+          <span style="font-weight:600;font-size:13px">${esc(fmt(total))}</span>
+        </div>
+      </div>` : "";
+  const legend = parts.map(p => {
+    const pct = total > 0 ? (100 * p.v / total).toFixed(1) + "%" : "—";
+    return `<div style="display:flex;align-items:baseline;gap:8px">
+        <span style="width:10px;height:10px;border-radius:2px;background:${costSplitPalette[p.key]};align-self:center;flex-shrink:0"></span>
+        <span class="usage-label">${esc(p.label)}</span>
+        <span class="usage-value" style="margin-left:auto">${esc(fmt(p.v))}</span>
+        <span class="muted" style="width:46px;text-align:right">${pct}</span>
+      </div>`;
+  }).join("");
+  return `<div style="display:flex;gap:22px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
+      ${donut}
+      <div style="display:flex;flex-direction:column;gap:5px;min-width:250px">${legend}</div>
+    </div>`;
 }
 
-// tokenChartPalette is the fixed series palette for the per-period token
-// charts, cycled when there are more series than colors.
+// tokenChartPalette is the fixed series palette for the usage charts, cycled
+// when there are more series than colors.
 const tokenChartPalette = ["#4f8cff", "#2ecc71", "#f1c40f", "#e74c3c", "#9b59b6", "#e67e22", "#1abc9c", "#e84393", "#a29bfe", "#00b894", "#fd79a8", "#6c5ce7"];
 
-// renderTokenChart draws one stacked bar per period, segmented by the bucket's
-// group key (resolved upstream model or provider), with a legend of totals and
-// per-series cost. Pure CSS/DOM — no chart library.
-function renderTokenChart(buckets, dimension) {
-  const periods = [...new Set(buckets.map(b => b.period))];
-  const byGroup = {};   // group -> period -> bucket
-  const series = [];    // sorted group names
-  buckets.forEach(b => {
-    if (!byGroup[b.group]) { byGroup[b.group] = {}; series.push(b.group); }
-    byGroup[b.group][b.period] = b;
-  });
-  series.sort();
-  const colorOf = {};
-  series.forEach((g, i) => colorOf[g] = tokenChartPalette[i % tokenChartPalette.length]);
-  const totTok = (b) => b ? (b.prompt_tokens + b.completion_tokens) : 0;
-  const maxTok = Math.max(1, ...periods.map(p => series.reduce((s, g) => s + totTok(byGroup[g][p]), 0)));
-  const grand = series.reduce((s, g) => s + Object.values(byGroup[g]).reduce((x, b) => x + totTok(b), 0), 0);
-  const legend = series.map(g => {
-    const tot = Object.values(byGroup[g]).reduce((x, b) => x + totTok(b), 0);
-    const cost = Object.values(byGroup[g]).reduce((x, b) => x + (b.cost_total || 0), 0);
-    const pct = grand ? (100 * tot / grand).toFixed(1) : "0";
-    return `<span style="display:inline-flex;align-items:center;gap:6px;margin:0 16px 6px 0">
-      <span style="width:10px;height:10px;border-radius:2px;background:${colorOf[g]}"></span>
-      <span>${esc(g)}</span>
-      <span class="muted">${tot.toLocaleString()} tok (${pct}%) · $${cost.toFixed(4)}</span>
-    </span>`;
-  }).join("");
-  const rows = periods.map(p => {
-    const total = series.reduce((s, g) => s + totTok(byGroup[g][p]), 0);
-    let segs = "";
-    series.forEach(g => {
-      const t = totTok(byGroup[g][p]);
-      if (!t) return;
-      segs += `<div style="width:${(100 * t / maxTok).toFixed(2)}%;background:${colorOf[g]}" title="${esc(g)}: ${t.toLocaleString()} tokens on ${esc(p)}"></div>`;
-    });
-    return `<div style="display:grid;grid-template-columns:96px 1fr 90px;gap:8px;align-items:center;margin-bottom:4px">
-      <span class="muted">${esc(p)}</span>
-      <div style="display:flex;height:16px;border-radius:3px;overflow:hidden;background:var(--bg);border:1px solid var(--border)">${segs || `<div style="width:100%"></div>`}</div>
-      <span class="muted" style="text-align:right">${total.toLocaleString()}</span>
-    </div>`;
-  }).join("");
-  const dim = dimension === "model" ? "resolved model" : "provider";
-  return `<div style="margin-top:4px;margin-bottom:16px">
-    <div class="muted" style="margin-bottom:10px">Tokens over time by ${esc(dim)}</div>
-    <div style="margin-bottom:6px">${legend}</div>
-    ${rows}
-  </div>`;
+// usageChartMetric is the stacked column chart's unit ("cost" or "tokens"),
+// kept across searches; lastUsageData caches the most recent /api/usage
+// response so the Cost/Tokens toggle re-renders the chart without refetching.
+let usageChartMetric = "cost";
+let lastUsageData = null;
+
+// setChartMetric flips the chart unit and re-renders it from cached data.
+function setChartMetric(m) {
+  usageChartMetric = m === "tokens" ? "tokens" : "cost";
+  const wrap = $("usage-chart");
+  if (wrap && lastUsageData) wrap.innerHTML = renderUsageChart(lastUsageData);
 }
 
-/* ---------- Status ---------- */
-async function loadStatus() {
-  const st = await api("/api/status");
-  const uptime = st.uptime_seconds;
-  const d = Math.floor(uptime / 86400), h = Math.floor((uptime % 86400) / 3600), m = Math.floor((uptime % 3600) / 60), s = uptime % 60;
-  $("view-status").innerHTML = `
-    <div class="panel"><h2>Store</h2>
-      <table><tbody>
-        <tr><td>Path</td><td><code>${esc(st.store_path)}</code></td></tr>
-        <tr><td>Sessions</td><td>${st.session_count}</td></tr>
-        <tr><td>Requests</td><td>${st.request_count}</td></tr>
-        <tr><td>Tool calls</td><td>${st.tool_call_count}</td></tr>
-        <tr><td>Failures</td><td>${st.failure_count}</td></tr>
-        <tr><td>Disk usage</td><td>${(st.disk_usage_bytes / 1024 / 1024).toFixed(1)} MiB</td></tr>
-        <tr><td>Retention</td><td>${st.retention_days} days</td></tr>
-      </tbody></table>
+// renderUsageChart draws a vertical stacked column chart: one column per
+// period (oldest to newest), stacked bottom-up per group (resolved model or
+// provider) when a breakdown is selected, in the unit picked by the
+// Cost/Tokens toggle. Pure CSS/DOM — no chart library. Missing days are
+// rendered as empty columns (capped) so the time axis stays honest; x labels
+// thin out on long ranges and the plot scrolls horizontally.
+function renderUsageChart(data) {
+  const buckets = data.buckets || [];
+  const metric = usageChartMetric;
+  const valOf = (b) => metric === "cost" ? (b.cost_total || 0) : ((b.prompt_tokens || 0) + (b.completion_tokens || 0));
+  const grouped = !!(data.group && buckets.length && buckets[0].group);
+  const byGroup = new Map();   // group -> Map(period -> bucket)
+  buckets.forEach(b => {
+    const g = grouped ? (b.group || "(unknown)") : "all";
+    if (!byGroup.has(g)) byGroup.set(g, new Map());
+    byGroup.get(g).set(b.period, b);
+  });
+  const totalOf = (g) => [...byGroup.get(g).values()].reduce((s, b) => s + valOf(b), 0);
+  const series = [...byGroup.keys()].sort((a, b) => totalOf(b) - totalOf(a));
+  const colorOf = {};
+  series.forEach((g, i) => { colorOf[g] = tokenChartPalette[i % tokenChartPalette.length]; });
+  let periods = [...new Set(buckets.map(b => b.period))].sort();
+  if (data.granularity === "day" && periods.length > 1) {
+    const start = new Date(periods[0] + "T00:00:00Z"), end = new Date(periods[periods.length - 1] + "T00:00:00Z");
+    if ((end - start) / 864e5 <= 183) {
+      const filled = [];
+      for (let d = start; d <= end; d.setUTCDate(d.getUTCDate() + 1)) filled.push(d.toISOString().slice(0, 10));
+      periods = filled;
+    }
+  }
+  const grand = series.reduce((s, g) => s + totalOf(g), 0);
+  if (grand <= 0) {
+    return `<div class="muted" style="padding:20px 0">No ${esc(metric)} in range${metric === "cost" ? " — every request is unpriced; try the Tokens view" : ""}.</div>`;
+  }
+  const PLOT_H = 190, TOP_PAD = 16;
+  const maxV = Math.max(1, ...periods.map(p => series.reduce((s, g) => { const b = byGroup.get(g).get(p); return s + (b ? valOf(b) : 0); }, 0)));
+  const compact = (v) => metric === "cost"
+    ? "$" + (v >= 100 ? v.toFixed(0) : v >= 1 ? v.toFixed(2) : v.toFixed(3))
+    : (v >= 1e6 ? (v / 1e6).toFixed(1) + "M" : v >= 1e3 ? (v / 1e3).toFixed(1) + "k" : String(Math.round(v)));
+  const showTotals = periods.length <= 24;
+  const colW = periods.length > 60 ? 8 : 14;
+  const cellW = colW + 2;
+  const labelEvery = Math.max(1, Math.ceil(periods.length / 18));
+  const xLabel = (p) => data.granularity === "month" ? p : p.slice(5);   // "MM-DD" / "W33"
+  const cell = `flex:1 1 0;min-width:${colW}px`;
+  const cols = periods.map((p, i) => {
+    let segs = "", tot = 0;
+    series.forEach(g => {
+      const b = byGroup.get(g).get(p);
+      const v = b ? valOf(b) : 0;
+      if (!v) return;
+      tot += v;
+      const disp = metric === "cost" ? "$" + v.toFixed(4) : v.toLocaleString() + " tok";
+      segs += `<div style="height:${(PLOT_H * v / maxV).toFixed(1)}px;background:${colorOf[g]}" title="${esc(g)} · ${esc(disp)} on ${esc(p)}"></div>`;
+    });
+    const totLabel = showTotals && tot > 0 ? `<span class="muted" style="font-size:10px;line-height:14px;text-align:center">${compact(tot)}</span>` : "";
+    return `<div style="${cell};display:flex;flex-direction:column;justify-content:flex-end;height:${TOP_PAD + PLOT_H}px">${totLabel}${segs}</div>`;
+  }).join("");
+  const xlabels = periods.map((p, i) =>
+    `<div style="${cell};height:18px;line-height:18px;font-size:10px;color:var(--muted);text-align:center">${i % labelEvery === 0 || i === periods.length - 1 ? esc(xLabel(p)) : ""}</div>`).join("");
+  const ylabels = [0.25, 0.5, 0.75, 1].map(f =>
+    `<span class="muted" style="position:absolute;left:0;right:0;bottom:${(PLOT_H * f - 7).toFixed(0)}px;text-align:right;font-size:10px">${compact(maxV * f)}</span>`).join("") +
+    `<span class="muted" style="position:absolute;left:0;right:0;bottom:-3px;text-align:right;font-size:10px">0</span>`;
+  const gridlines = [0.25, 0.5, 0.75, 1].map(f =>
+    `<div style="position:absolute;left:0;right:0;bottom:${(PLOT_H * f).toFixed(0)}px;border-top:1px dashed var(--border)"></div>`).join("");
+  const dim = data.group === "model" ? "resolved model" : "provider";
+  const metricBtn = (m, label) =>
+    `<button class="ghost" data-action="usage-chart-metric" data-metric="${m}" aria-pressed="${metric === m}" style="padding:2px 10px;font-size:12px;${metric === m ? "color:var(--text);border-color:var(--accent)" : ""}">${label}</button>`;
+  const grandTok = series.reduce((s, g) => s + [...byGroup.get(g).values()].reduce((x, b) => x + (b.prompt_tokens || 0) + (b.completion_tokens || 0), 0), 0);
+  const legend = grouped ? `<div style="display:flex;flex-wrap:wrap;gap:2px 16px;margin:6px 0 12px">${series.map(g => {
+    const tok = [...byGroup.get(g).values()].reduce((x, b) => x + (b.prompt_tokens || 0) + (b.completion_tokens || 0), 0);
+    const cost = [...byGroup.get(g).values()].reduce((x, b) => x + (b.cost_total || 0), 0);
+    const pct = grandTok ? (100 * tok / grandTok).toFixed(1) : "0";
+    return `<span style="display:inline-flex;align-items:center;gap:6px">
+      <span style="width:10px;height:10px;border-radius:2px;background:${colorOf[g]};flex-shrink:0"></span>
+      <span>${esc(g)}</span>
+      <span class="muted">${tok.toLocaleString()} tok (${pct}%) · $${cost.toFixed(4)}</span>
+    </span>`;
+  }).join("")}</div>` : "";
+  return `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+      <span class="muted">${esc(metric === "cost" ? "Cost" : "Tokens")} over time${grouped ? " by " + esc(dim) : ""}</span>
+      <span style="display:inline-flex;gap:4px">${metricBtn("cost", "Cost")}${metricBtn("tokens", "Tokens")}</span>
     </div>
-    <div class="panel"><h2>Gateway</h2>
-      <table><tbody>
-        <tr><td>Uptime</td><td>${d}d ${h}h ${m}m ${s}s</td></tr>
-        <tr><td>Plugins</td><td>${esc((st.plugins||[]).join(", "))}</td></tr>
-        <tr><td>Aliases</td><td>${esc((st.aliases||[]).join(", "))}${st.disabled_instances ? ` <span class="badge disabled">${st.disabled_instances} disabled</span>` : ""}</td></tr>
-      </tbody></table>
+    ${legend}
+    <div style="display:flex;gap:8px">
+      <div style="position:relative;width:48px;height:${TOP_PAD + PLOT_H}px;flex-shrink:0">${ylabels}</div>
+      <div style="flex:1;overflow-x:auto">
+        <div style="min-width:${periods.length * cellW}px">
+          <div style="position:relative;display:flex;gap:2px;align-items:flex-end;height:${TOP_PAD + PLOT_H}px;border-bottom:1px solid var(--border)">${gridlines}${cols}</div>
+          <div style="display:flex;gap:2px">${xlabels}</div>
+        </div>
+      </div>
     </div>`;
 }
 

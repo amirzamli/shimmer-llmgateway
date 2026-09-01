@@ -78,18 +78,23 @@ type Server struct {
 	// emitter (reassemble → run response filters → emit one SSE block) when
 	// they are.
 	emitterFactory func(w http.ResponseWriter, source EmitterSource, filter EmitterFilter) Emitter
-	// pricing holds the embedded per-model token rates used to estimate the
-	// cost of captured traffic (nil when the table failed to load, which
-	// disables cost estimation).
+	// pricing holds the per-model token rates loaded from disk at startup
+	// (pricing.DefaultPath) used to estimate the cost of captured traffic
+	// (nil when the table failed to load, which disables cost estimation).
 	pricing *pricing.Table
+	// listenAddrs are the addresses the gateway is being served on; they
+	// seed the admin-surface Host allowlist (see guard).
+	listenAddrs []string
 }
 
 // New builds a gateway server over cfg/st, opening the §8 append log at
 // <store>.jsonl, the §6.2 secrets file at <store>.secrets.json (0600), and
 // the REST API wired to write config mutations back to configPath. masterKey
 // is the decoded AES-256 master key for the secrets file, or nil to have the
-// gateway generate one.
-func New(cfg *config.ConfigManager, st *store.Store, logger *logging.Logger, configPath string, masterKey []byte) (*Server, error) {
+// gateway generate one. listenAddrs are the validated listen addresses the
+// server will be served on (used by the admin-surface host guard; nil falls
+// back to the loopback/CGNAT/ULA address-family policy alone).
+func New(cfg *config.ConfigManager, st *store.Store, logger *logging.Logger, configPath string, masterKey []byte, listenAddrs []string) (*Server, error) {
 	ap, err := openAppendLog(st.Path() + ".jsonl")
 	if err != nil {
 		return nil, fmt.Errorf("gateway: open append log %s.jsonl: %w", st.Path(), err)
@@ -103,7 +108,7 @@ func New(cfg *config.ConfigManager, st *store.Store, logger *logging.Logger, con
 		ap.Close()
 		return nil, fmt.Errorf("gateway: open secrets %s.secrets.json: %w", st.Path(), err)
 	}
-	pt, perr := pricing.Load()
+	pt, perr := pricing.Load(pricing.DefaultPath)
 	if perr != nil {
 		logger.Error("pricing_load_failed", map[string]any{"error": perr.Error()})
 	}
@@ -121,13 +126,25 @@ func New(cfg *config.ConfigManager, st *store.Store, logger *logging.Logger, con
 		api:            api.New(cfg, configPath, st, sec, logger),
 		emitterFactory: newStreamEmitter,
 		pricing:        pt,
+		listenAddrs:    listenAddrs,
 	}, nil
+}
+
+// Close releases the gateway's file handles: the §8 append log (the secrets
+// file and pricing table carry no persistent handles). Called by main on
+// shutdown after the HTTP servers have drained; the store is closed separately
+// so its close-time WAL checkpoint runs last.
+func (s *Server) Close() error {
+	return s.append.Close()
 }
 
 // Handler returns the HTTP router. Any /v1/* path other than the capture
 // surface and /v1/models returns 404; /healthz is the repo-convention health
 // probe; /api/* is the §6.2 REST surface; / serves the embedded HTML UI. The
 // router is wrapped in the access-log middleware, so every request is logged.
+// The browser-facing surfaces (/api/* and the UI) are additionally wrapped in
+// the host/origin guard; the capture surface and /healthz are not — non-browser
+// clients address them with whatever Host their base_url carries.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
@@ -136,8 +153,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/", func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	})
-	mux.Handle("/api/", s.api.Handler())
-	mux.HandleFunc("GET /{$}", s.handleUI)
+	mux.Handle("/api/", s.guard(s.api.Handler()))
+	mux.Handle("GET /{$}", s.guard(http.HandlerFunc(s.handleUI)))
 	return s.accessLog(mux)
 }
 
@@ -615,17 +632,18 @@ func (s *Server) handleNonStream(w http.ResponseWriter, r *http.Request, cfg *co
 	}
 
 	rec := &store.CaptureRecord{
-		ID:             requestID,
-		SessionID:      sessionID,
-		CreatedAt:      start,
-		Alias:          rt.alias,
-		Provider:       rt.provider,
-		Model:          rt.model,
-		Endpoint:       endpoint,
-		DurationMS:     durationMS(start),
-		StatusCode:     resp.StatusCode,
-		RequestJSON:    body,
-		PluginsApplied: chain.Applied(),
+		ID:              requestID,
+		SessionID:       sessionID,
+		CreatedAt:       start,
+		Alias:           rt.alias,
+		Provider:        rt.provider,
+		ProviderBaseURL: rt.template.BaseURL,
+		Model:           rt.model,
+		Endpoint:        endpoint,
+		DurationMS:      durationMS(start),
+		StatusCode:      resp.StatusCode,
+		RequestJSON:     body,
+		PluginsApplied:  chain.Applied(),
 	}
 	rec.RequestFilteredJSON = requestFilteredBody(chain, sentBody)
 
@@ -751,18 +769,19 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *confi
 		}
 		respBody = translateUpstreamBody(rt.template.Style, resp.StatusCode, respBody)
 		rec := &store.CaptureRecord{
-			ID:             requestID,
-			SessionID:      sessionID,
-			CreatedAt:      start,
-			Alias:          rt.alias,
-			Provider:       rt.provider,
-			Model:          rt.model,
-			Endpoint:       endpoint,
-			DurationMS:     durationMS(start),
-			StatusCode:     resp.StatusCode,
-			RequestJSON:    body,
-			PluginsApplied: chain.Applied(),
-			Error:          providerError(resp.StatusCode, respBody),
+			ID:              requestID,
+			SessionID:       sessionID,
+			CreatedAt:       start,
+			Alias:           rt.alias,
+			Provider:        rt.provider,
+			ProviderBaseURL: rt.template.BaseURL,
+			Model:           rt.model,
+			Endpoint:        endpoint,
+			DurationMS:      durationMS(start),
+			StatusCode:      resp.StatusCode,
+			RequestJSON:     body,
+			PluginsApplied:  chain.Applied(),
+			Error:           providerError(resp.StatusCode, respBody),
 		}
 		rec.RequestFilteredJSON = requestFilteredBody(chain, sentBody)
 		s.passthrough(w, resp, respBody)
@@ -803,23 +822,24 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *confi
 	_ = emitter.Done()
 
 	rec := &store.CaptureRecord{
-		ID:             requestID,
-		SessionID:      sessionID,
-		CreatedAt:      start,
-		Alias:          rt.alias,
-		Provider:       rt.provider,
-		Model:          rt.model,
-		Endpoint:       endpoint,
-		DurationMS:     durationMS(start),
-		StatusCode:     resp.StatusCode,
-		FinishReason:   out.finish,
-		Usage:          out.usage,
-		RequestJSON:    body,
-		ResponseJSON:   out.reassembled,
-		Truncated:      out.truncated,
-		PluginsApplied: chain.Applied(),
-		Error:          out.streamErr,
-		ChunkCount:     out.chunks,
+		ID:              requestID,
+		SessionID:       sessionID,
+		CreatedAt:       start,
+		Alias:           rt.alias,
+		Provider:        rt.provider,
+		ProviderBaseURL: rt.template.BaseURL,
+		Model:           rt.model,
+		Endpoint:        endpoint,
+		DurationMS:      durationMS(start),
+		StatusCode:      resp.StatusCode,
+		FinishReason:    out.finish,
+		Usage:           out.usage,
+		RequestJSON:     body,
+		ResponseJSON:    out.reassembled,
+		Truncated:       out.truncated,
+		PluginsApplied:  chain.Applied(),
+		Error:           out.streamErr,
+		ChunkCount:      out.chunks,
 	}
 	rec.RequestFilteredJSON = requestFilteredBody(chain, sentBody)
 	if chain.HasResponse() {
@@ -931,23 +951,24 @@ func (s *Server) handleStreamRetry(w http.ResponseWriter, ctx context.Context, c
 	flusher.Flush()
 
 	rec := &store.CaptureRecord{
-		ID:             requestID,
-		SessionID:      sessionID,
-		CreatedAt:      start,
-		Alias:          rt.alias,
-		Provider:       rt.provider,
-		Model:          rt.model,
-		Endpoint:       endpoint,
-		DurationMS:     durationMS(start),
-		StatusCode:     out.statusCode,
-		FinishReason:   out.finish,
-		Usage:          out.usage,
-		RequestJSON:    body,
-		ResponseJSON:   out.reassembled,
-		Truncated:      out.truncated,
-		PluginsApplied: chain.Applied(),
-		Error:          out.streamErr,
-		ChunkCount:     out.chunks,
+		ID:              requestID,
+		SessionID:       sessionID,
+		CreatedAt:       start,
+		Alias:           rt.alias,
+		Provider:        rt.provider,
+		ProviderBaseURL: rt.template.BaseURL,
+		Model:           rt.model,
+		Endpoint:        endpoint,
+		DurationMS:      durationMS(start),
+		StatusCode:      out.statusCode,
+		FinishReason:    out.finish,
+		Usage:           out.usage,
+		RequestJSON:     body,
+		ResponseJSON:    out.reassembled,
+		Truncated:       out.truncated,
+		PluginsApplied:  chain.Applied(),
+		Error:           out.streamErr,
+		ChunkCount:      out.chunks,
 	}
 	rec.RequestFilteredJSON = requestFilteredBody(chain, sentBody)
 	if chain.HasResponse() {
@@ -988,18 +1009,19 @@ func writeStreamErrorEvent(w io.Writer, flusher http.Flusher, code, message stri
 // captured verbatim.
 func streamErrorRecord(rt *route, body, filteredBody []byte, sessionID, requestID string, start time.Time, rsp *http.Response, errBody []byte, applied []string) *store.CaptureRecord {
 	rec := &store.CaptureRecord{
-		ID:             requestID,
-		SessionID:      sessionID,
-		CreatedAt:      start,
-		Alias:          rt.alias,
-		Provider:       rt.provider,
-		Model:          rt.model,
-		Endpoint:       endpoint,
-		DurationMS:     durationMS(start),
-		StatusCode:     rsp.StatusCode,
-		RequestJSON:    body,
-		PluginsApplied: applied,
-		Error:          providerError(rsp.StatusCode, errBody),
+		ID:              requestID,
+		SessionID:       sessionID,
+		CreatedAt:       start,
+		Alias:           rt.alias,
+		Provider:        rt.provider,
+		ProviderBaseURL: rt.template.BaseURL,
+		Model:           rt.model,
+		Endpoint:        endpoint,
+		DurationMS:      durationMS(start),
+		StatusCode:      rsp.StatusCode,
+		RequestJSON:     body,
+		PluginsApplied:  applied,
+		Error:           providerError(rsp.StatusCode, errBody),
 	}
 	rec.RequestFilteredJSON = filteredBody
 	return rec
@@ -1219,18 +1241,19 @@ func providerError(status int, body []byte) *store.ErrorInfo {
 // is the request's pre-generated id, shared with any retry log lines.
 func upstreamErrorRecord(rt *route, body, filteredBody []byte, sessionID, requestID string, start time.Time, cause error, applied []string) *store.CaptureRecord {
 	rec := &store.CaptureRecord{
-		ID:          requestID,
-		SessionID:   sessionID,
-		CreatedAt:   start,
-		Alias:       rt.alias,
-		Provider:    rt.provider,
-		Model:       rt.model,
-		Endpoint:    endpoint,
-		DurationMS:  durationMS(start),
-		StatusCode:  502,
-		RequestJSON: body,
-		Truncated:   true,
-		Error:       &store.ErrorInfo{Code: "UPSTREAM_ERROR", Message: "upstream error: " + cause.Error()},
+		ID:              requestID,
+		SessionID:       sessionID,
+		CreatedAt:       start,
+		Alias:           rt.alias,
+		Provider:        rt.provider,
+		ProviderBaseURL: rt.template.BaseURL,
+		Model:           rt.model,
+		Endpoint:        endpoint,
+		DurationMS:      durationMS(start),
+		StatusCode:      502,
+		RequestJSON:     body,
+		Truncated:       true,
+		Error:           &store.ErrorInfo{Code: "UPSTREAM_ERROR", Message: "upstream error: " + cause.Error()},
 	}
 	if len(filteredBody) > 0 {
 		rec.RequestFilteredJSON = filteredBody

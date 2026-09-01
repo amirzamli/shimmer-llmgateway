@@ -4,6 +4,9 @@ bin/
 # Runtime data: SQLite store + sidecars (WAL/SHM, capture JSONL, secrets store)
 gateway.db*
 
+# Downloaded model pricing data (not committed)
+internal/pricing/models.json
+
 # Local gateway config (see gateway.toml.example)
 gateway.toml
 

@@ -137,7 +137,7 @@ func newGatewayServer(t *testing.T, provider *fakeProvider, instances string, en
 	}
 	t.Cleanup(func() { st.Close() })
 
-	srv, err := New(mgr, st, logging.New(logw), filepath.Join(dir, "gateway.toml"), nil)
+	srv, err := New(mgr, st, logging.New(logw), filepath.Join(dir, "gateway.toml"), nil, nil)
 	if err != nil {
 		t.Fatalf("gateway.New: %v", err)
 	}

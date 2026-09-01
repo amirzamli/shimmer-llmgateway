@@ -56,7 +56,8 @@ const (
   id TEXT PRIMARY KEY,            -- session_id
   created_at TEXT,                -- ISO-8601 UTC
   first_alias TEXT, first_model TEXT,
-  request_count INTEGER, tool_call_count INTEGER, failure_count INTEGER
+  request_count INTEGER, tool_call_count INTEGER, failure_count INTEGER,
+  expired INTEGER DEFAULT 0       -- 1 once retention removed the payloads
 )`
 
 	schemaRequests = `CREATE TABLE IF NOT EXISTS requests (
@@ -84,7 +85,8 @@ const (
   cost_cache_read REAL DEFAULT 0,
   cost_cache_write REAL DEFAULT 0,
   cost_total REAL DEFAULT 0,
-  cost_priced INTEGER DEFAULT 0        -- 1 when the model was in the pricing table
+  cost_priced INTEGER DEFAULT 0,       -- 1 when the model was in the pricing table
+  cost_schema TEXT DEFAULT ''          -- pricing snapshot id that priced the row
 )`
 
 	// idxRequestsUsage supports the cost/usage aggregation queries over the
@@ -123,7 +125,21 @@ var requestCostColumns = []string{
 	"cost_cache_write REAL DEFAULT 0",
 	"cost_total REAL DEFAULT 0",
 	"cost_priced INTEGER DEFAULT 0",
+	"cost_schema TEXT DEFAULT ''",
 }
+
+// sessionColumns are the columns added after the original §5 sessions schema
+// (see requestCostColumns for the migration convention).
+var sessionColumns = []string{
+	"expired INTEGER DEFAULT 0",
+}
+
+// journalSizeLimit bounds the WAL file: after any checkpoint that runs to the
+// end of the WAL, SQLite truncates the file to this size. Without it the WAL
+// grows unboundedly when long-lived reader connections (the standalone MCP
+// inspectors) prevent checkpointing from keeping up with capture traffic, and
+// every restart then pays a multi-gigabyte WAL recovery.
+const journalSizeLimit = 256 << 20 // 256 MiB
 
 // Store is the SQLite-backed capture store. It is safe for concurrent use.
 type Store struct {
@@ -165,6 +181,7 @@ func Open(path string) (*Store, error) {
 	q.Add("_pragma", "foreign_keys(1)")
 	q.Add("_pragma", "busy_timeout(5000)")
 	q.Add("_pragma", "journal_mode(WAL)")
+	q.Add("_pragma", fmt.Sprintf("journal_size_limit(%d)", journalSizeLimit))
 	u.RawQuery = q.Encode()
 
 	db, err := sql.Open("sqlite", u.String())
@@ -202,14 +219,31 @@ func (s *Store) createSchema(ctx context.Context) error {
 	return s.migrate(ctx)
 }
 
-// migrate brings a pre-existing requests table up to the current column set by
-// adding any missing cost/usage columns. ALTER TABLE ADD COLUMN is a schema-only
-// change in SQLite (no table rewrite), so this is cheap even on a multi-GB
-// store; existing rows keep NULL and the cost columns default to 0 on read.
+// migrate brings pre-existing tables up to the current column set by adding
+// any missing columns. ALTER TABLE ADD COLUMN is a schema-only change in
+// SQLite (no table rewrite), so this is cheap even on a multi-GB store;
+// existing rows keep NULL and the new columns default to 0 on read.
 func (s *Store) migrate(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(requests)`)
+	for _, m := range []struct {
+		table string
+		cols  []string
+	}{
+		{"requests", requestCostColumns},
+		{"sessions", sessionColumns},
+	} {
+		if err := s.ensureColumns(ctx, m.table, m.cols); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ensureColumns adds every def in cols (e.g. "name TYPE [DEFAULT v]") that the
+// table does not already have.
+func (s *Store) ensureColumns(ctx context.Context, table string, cols []string) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
 	if err != nil {
-		return fmt.Errorf("store: migrate: read table_info: %w", err)
+		return fmt.Errorf("store: migrate: read table_info(%s): %w", table, err)
 	}
 	defer rows.Close()
 	have := map[string]bool{}
@@ -219,21 +253,40 @@ func (s *Store) migrate(ctx context.Context) error {
 		var notnull, pk int
 		var dflt sql.NullString
 		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
-			return fmt.Errorf("store: migrate: scan table_info: %w", err)
+			return fmt.Errorf("store: migrate: scan table_info(%s): %w", table, err)
 		}
 		have[name] = true
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	for _, col := range requestCostColumns {
+	for _, col := range cols {
 		name := col[:strings.IndexByte(col, ' ')]
 		if have[name] {
 			continue
 		}
-		if _, err := s.db.ExecContext(ctx, `ALTER TABLE requests ADD COLUMN `+col); err != nil {
-			return fmt.Errorf("store: migrate: add column %s: %w", name, err)
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+col); err != nil {
+			return fmt.Errorf("store: migrate: add %s column %s: %w", table, name, err)
 		}
+	}
+	return nil
+}
+
+// Checkpoint runs a TRUNCATE WAL checkpoint: all committed frames are written
+// back into the database file and the WAL is truncated to zero bytes. main
+// calls it once after the blocking startup work and before serving — the one
+// moment the WAL is quiescent — so an unclean previous shutdown never leaves a
+// multi-gigabyte WAL for the next startup to recover. Long-lived readers (the
+// standalone MCP inspectors) can keep it from finishing; the busy timeout
+// bounds the wait and the failure is logged, not fatal.
+func (s *Store) Checkpoint(ctx context.Context) error {
+	var busy, walPages, checkpointed int64
+	if err := s.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).
+		Scan(&busy, &walPages, &checkpointed); err != nil {
+		return fmt.Errorf("store: wal_checkpoint: %w", err)
+	}
+	if busy != 0 {
+		return fmt.Errorf("store: wal_checkpoint: blocked by another connection")
 	}
 	return nil
 }

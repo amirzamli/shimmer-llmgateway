@@ -23,6 +23,7 @@ type conversationView struct {
 	RequestCount  int               `json:"request_count"`
 	ToolCallCount int               `json:"tool_call_count"`
 	FailureCount  int               `json:"failure_count"`
+	Expired       bool              `json:"expired,omitempty"`
 	Messages      []conversationMsg `json:"messages"`
 	Requests      []requestTurnView `json:"requests"`
 }
@@ -75,6 +76,7 @@ func buildConversation(sess *store.Session, includeFull bool) (*conversationView
 		RequestCount:  sess.RequestCount,
 		ToolCallCount: sess.ToolCallCount,
 		FailureCount:  sess.FailureCount,
+		Expired:       sess.Expired,
 	}
 
 	var prev []openAIMessage

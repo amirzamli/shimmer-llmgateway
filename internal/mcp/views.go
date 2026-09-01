@@ -16,6 +16,9 @@ type sessionSummaryView struct {
 	RequestCount  int    `json:"request_count"`
 	ToolCallCount int    `json:"tool_call_count"`
 	FailureCount  int    `json:"failure_count"`
+	// Expired is true once retention removed the session's payloads; the
+	// usage metadata is retained.
+	Expired bool `json:"expired"`
 }
 
 func sessionSummaryViewOf(s *store.SessionSummary) sessionSummaryView {
@@ -27,23 +30,27 @@ func sessionSummaryViewOf(s *store.SessionSummary) sessionSummaryView {
 		RequestCount:  s.RequestCount,
 		ToolCallCount: s.ToolCallCount,
 		FailureCount:  s.FailureCount,
+		Expired:       s.Expired,
 	}
 }
 
 // requestDetailView is the get_request payload: every stored column plus the
 // original/filtered request and response bodies.
 type requestDetailView struct {
-	ID               string           `json:"id"`
-	SessionID        string           `json:"session_id"`
-	Seq              int              `json:"seq"`
-	CreatedAt        string           `json:"created_at"`
-	Alias            string           `json:"alias"`
-	Provider         string           `json:"provider"`
-	Model            string           `json:"model"`
-	Endpoint         string           `json:"endpoint"`
-	DurationMS       int64            `json:"duration_ms"`
-	StatusCode       int              `json:"status_code"`
-	FinishReason     string           `json:"finish_reason"`
+	ID           string `json:"id"`
+	SessionID    string `json:"session_id"`
+	Seq          int    `json:"seq"`
+	CreatedAt    string `json:"created_at"`
+	Alias        string `json:"alias"`
+	Provider     string `json:"provider"`
+	Model        string `json:"model"`
+	Endpoint     string `json:"endpoint"`
+	DurationMS   int64  `json:"duration_ms"`
+	StatusCode   int    `json:"status_code"`
+	FinishReason string `json:"finish_reason"`
+	// CostSchema identifies the pricing snapshot that priced the row
+	// (requests.cost_schema); empty for legacy/unpriced rows.
+	CostSchema       string           `json:"cost_schema,omitempty"`
 	Usage            json.RawMessage  `json:"usage"`
 	Request          json.RawMessage  `json:"request"`
 	RequestFiltered  json.RawMessage  `json:"request_filtered"`
@@ -67,6 +74,7 @@ func requestDetailViewOf(r *store.Request) requestDetailView {
 		DurationMS:       r.DurationMS,
 		StatusCode:       r.StatusCode,
 		FinishReason:     r.FinishReason,
+		CostSchema:       r.CostSchema,
 		Usage:            embedRaw(r.Usage),
 		Request:          embedRaw(r.RequestJSON),
 		RequestFiltered:  embedRaw(r.RequestFilteredJSON),

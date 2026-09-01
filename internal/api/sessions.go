@@ -19,6 +19,9 @@ type sessionSummaryView struct {
 	RequestCount  int    `json:"request_count"`
 	ToolCallCount int    `json:"tool_call_count"`
 	FailureCount  int    `json:"failure_count"`
+	// Expired is true once retention removed the session's payloads; the
+	// usage metadata (counts, costs) is retained.
+	Expired bool `json:"expired"`
 }
 
 func sessionSummaryViewOf(s *store.SessionSummary) sessionSummaryView {
@@ -30,6 +33,7 @@ func sessionSummaryViewOf(s *store.SessionSummary) sessionSummaryView {
 		RequestCount:  s.RequestCount,
 		ToolCallCount: s.ToolCallCount,
 		FailureCount:  s.FailureCount,
+		Expired:       s.Expired,
 	}
 }
 
@@ -37,17 +41,20 @@ func sessionSummaryViewOf(s *store.SessionSummary) sessionSummaryView {
 // original and (when plugins ran) filtered payloads so the UI can show the
 // raw original-vs-filtered view.
 type requestView struct {
-	ID                   string           `json:"id"`
-	SessionID            string           `json:"session_id"`
-	Seq                  int              `json:"seq"`
-	CreatedAt            string           `json:"created_at"`
-	Alias                string           `json:"alias"`
-	Provider             string           `json:"provider"`
-	Model                string           `json:"model"`
-	Endpoint             string           `json:"endpoint"`
-	DurationMS           int64            `json:"duration_ms"`
-	StatusCode           int              `json:"status_code"`
-	FinishReason         string           `json:"finish_reason"`
+	ID           string `json:"id"`
+	SessionID    string `json:"session_id"`
+	Seq          int    `json:"seq"`
+	CreatedAt    string `json:"created_at"`
+	Alias        string `json:"alias"`
+	Provider     string `json:"provider"`
+	Model        string `json:"model"`
+	Endpoint     string `json:"endpoint"`
+	DurationMS   int64  `json:"duration_ms"`
+	StatusCode   int    `json:"status_code"`
+	FinishReason string `json:"finish_reason"`
+	// CostSchema identifies the pricing snapshot that priced the row
+	// (requests.cost_schema); empty for legacy/unpriced rows.
+	CostSchema           string           `json:"cost_schema,omitempty"`
 	Usage                json.RawMessage  `json:"usage"`
 	RequestJSON          json.RawMessage  `json:"request_json"`
 	RequestFilteredJSON  json.RawMessage  `json:"request_filtered_json"`
@@ -71,6 +78,7 @@ func requestViewOf(r *store.Request) requestView {
 		DurationMS:           r.DurationMS,
 		StatusCode:           r.StatusCode,
 		FinishReason:         r.FinishReason,
+		CostSchema:           r.CostSchema,
 		Usage:                r.Usage,
 		RequestJSON:          r.RequestJSON,
 		RequestFilteredJSON:  r.RequestFilteredJSON,
@@ -166,6 +174,7 @@ func (a *API) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 		"first_model":   sess.FirstModel,
 		"request_count": sess.RequestCount,
 		"failure_count": sess.FailureCount,
+		"expired":       sess.Expired,
 		"requests":      reqs,
 		"tool_calls":    calls,
 	})

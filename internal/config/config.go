@@ -6,7 +6,7 @@
 //
 //	listen = "127.0.0.1:8787"
 //	store  = "gateway.db"
-//	retention_days = 30
+//	retention_days = 7
 //
 //	[settings]
 //	default_alias = "openai"
@@ -47,6 +47,12 @@ import (
 
 // AliasPattern is the §4.2 alias rule: a user alias must match [a-z0-9._-]+.
 const AliasPattern = `[a-z0-9._-]+`
+
+// DefaultRetentionDays is the payload retention window applied when
+// gateway.toml does not set retention_days: after this many days a session's
+// conversation payloads are removed and only the usage statistics remain. An
+// explicit non-positive retention_days still disables purging entirely.
+const DefaultRetentionDays = 7
 
 // genericReasoningLevels is the fallback effort vocabulary for models whose
 // template advertises no ModelReasoningOptions. Sentinels ("", "default",
@@ -463,12 +469,14 @@ func (e *UnknownModelError) Error() string {
 	return fmt.Sprintf("unknown model %q", e.Model)
 }
 
-// rawConfig mirrors gateway.toml for unmarshalling.
+// rawConfig mirrors gateway.toml for unmarshalling. RetentionDays is a
+// pointer so an absent key (nil → DefaultRetentionDays) is distinguishable
+// from an explicit `retention_days = 0` (purging disabled).
 type rawConfig struct {
 	ListenAddrs   []string                  `toml:"listen_addrs"`
 	Listen        string                    `toml:"listen"`
 	Store         string                    `toml:"store"`
-	RetentionDays int                       `toml:"retention_days"`
+	RetentionDays *int                      `toml:"retention_days"`
 	Settings      Settings                  `toml:"settings"`
 	Providers     map[string]Template       `toml:"providers"`
 	Instances     []Instance                `toml:"instances"`
@@ -622,6 +630,19 @@ func builtinTemplates() map[string]Template {
 	}
 }
 
+// BuiltinTemplates returns the built-in provider templates keyed by name, with
+// each template's Name set to its key. Runtime code uses the parsed config
+// instead; this export exists for tooling that mirrors the template set (the
+// pricing generator maps these names to source-catalog providers).
+func BuiltinTemplates() map[string]Template {
+	out := builtinTemplates()
+	for name, t := range out {
+		t.Name = name
+		out[name] = t
+	}
+	return out
+}
+
 // CustomOpenAI and CustomAnthropic are the built-in placeholder templates that
 // the add-instance flow resolves into concrete per-endpoint templates. They
 // are exempt from the base_url requirement at config load (their endpoint is
@@ -652,14 +673,20 @@ func fromRaw(raw *rawConfig) (*Config, error) {
 		tmap[name] = &t
 	}
 	cfg := &Config{
-		ListenAddrs:   append([]string{}, raw.ListenAddrs...),
-		Store:         raw.Store,
-		RetentionDays: raw.RetentionDays,
+		ListenAddrs: append([]string{}, raw.ListenAddrs...),
+		Store:       raw.Store,
+		// Absent retention_days defaults to the 7-day payload window; an
+		// explicit non-positive value disables purging (the store treats
+		// <= 0 as off).
+		RetentionDays: DefaultRetentionDays,
 		Settings:      raw.Settings,
 		Templates:     tmap,
 		Instances:     make([]*Instance, len(raw.Instances)),
 		Plugins:       raw.Plugins,
 		userTemplates: make(map[string]bool, len(raw.Providers)),
+	}
+	if raw.RetentionDays != nil {
+		cfg.RetentionDays = *raw.RetentionDays
 	}
 	// The legacy single listen address keeps working when listen_addrs is
 	// absent; both keys may not be set at once. With neither key, the
@@ -964,10 +991,11 @@ func (m *ConfigManager) Update(path string, c *Config) error {
 // explicitly in the file. An explicitly-set instance plugins list — including
 // an explicit empty `plugins = []` off-switch — is never overwritten.
 func (c *Config) toRaw() *rawConfig {
+	retention := c.RetentionDays
 	raw := &rawConfig{
 		ListenAddrs:   append([]string{}, c.ListenAddrs...),
 		Store:         c.Store,
-		RetentionDays: c.RetentionDays,
+		RetentionDays: &retention,
 		Settings:      c.Settings,
 		Instances:     make([]Instance, len(c.Instances)),
 		Plugins:       c.Plugins,

@@ -27,12 +27,11 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
-	// CORS preflight so browser-based MCP clients can call the endpoint.
+	// Method negotiation for OPTIONS. No CORS headers are sent, by design:
+	// this endpoint exposes captured traffic, so browser pages must never be
+	// able to read it cross-origin. Non-browser MCP clients don't need CORS.
 	if r.Method == http.MethodOptions {
 		w.Header().Set("Allow", "POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, MCP-Protocol-Version, Accept")
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -51,7 +50,6 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("MCP-Protocol-Version", negotiatedVersion(r.Header.Get("MCP-Protocol-Version")))
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	// Cap the body at maxRequestBody, reading one extra byte to detect
 	// truncation before decoding.

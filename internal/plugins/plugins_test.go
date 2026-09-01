@@ -122,6 +122,42 @@ func TestIsControl(t *testing.T) {
 	}
 }
 
+// TestInfosCoversEveryPlugin pins the UI-facing metadata contract: one Info
+// per known plugin, each with a description and a source, and the redact info
+// documenting both config fields with the default patterns attached.
+func TestInfosCoversEveryPlugin(t *testing.T) {
+	infos := Infos()
+	if len(infos) != len(Known()) {
+		t.Fatalf("Infos() len = %d, want %d (one per known plugin)", len(infos), len(Known()))
+	}
+	byName := map[string]Info{}
+	for _, i := range infos {
+		if i.Name == "" || i.Description == "" || i.Source == "" {
+			t.Errorf("incomplete Info: %+v", i)
+		}
+		if i.Kind != "transform" && i.Kind != "control" {
+			t.Errorf("Info %q: kind = %q, want transform or control", i.Name, i.Kind)
+		}
+		byName[i.Name] = i
+	}
+	redact, ok := byName["redact"]
+	if !ok {
+		t.Fatal("Infos() missing redact")
+	}
+	if !redact.Configurable || len(redact.ConfigFields) != 2 {
+		t.Fatalf("redact Info = %+v, want configurable with 2 config fields", redact)
+	}
+	var patterns ConfigField
+	for _, f := range redact.ConfigFields {
+		if f.Name == "patterns" {
+			patterns = f
+		}
+	}
+	if patterns.Name == "" || len(patterns.Defaults) != len(defaultPatterns) {
+		t.Errorf("redact patterns field = %+v, want defaults mirroring defaultPatterns", patterns)
+	}
+}
+
 func TestBuildControlPluginRejected(t *testing.T) {
 	_, err := Build("retry_empty", Options{})
 	if err == nil {

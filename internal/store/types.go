@@ -61,6 +61,14 @@ type CaptureRecord struct {
 	// CostPriced is true when the request's model was in the pricing table and
 	// the cost split is a real estimate (false for unknown or local models).
 	CostPriced bool
+	// CostSchema identifies the pricing snapshot that produced the cost split
+	// (e.g. "models.dev@2026-08-31"), so a re-priced table never silently
+	// reinterprets a stored row. Empty for legacy/unpriced rows.
+	CostSchema string
+	// ProviderBaseURL is the resolved template's upstream base URL, used for
+	// pricing lookup (a user-defined custom endpoint maps to a source-catalog
+	// provider by URL). It is never persisted.
+	ProviderBaseURL string
 
 	// Seq is the per-session request order. Capture sets it; callers may read
 	// it after Capture returns.
@@ -76,6 +84,10 @@ type SessionSummary struct {
 	RequestCount  int
 	ToolCallCount int
 	FailureCount  int
+	// Expired reports whether retention removed this session's payloads:
+	// the requests rows keep only usage metadata and the tool_calls rows
+	// are gone, so conversation views render "payloads expired" instead.
+	Expired bool
 }
 
 // Session is a session with its requests and tool calls loaded (the
@@ -122,6 +134,9 @@ type Request struct {
 	CostCacheWrite   float64
 	CostTotal        float64
 	CostPriced       bool
+	// CostSchema identifies the pricing snapshot that priced the row
+	// (mirrors CaptureRecord.CostSchema); empty for legacy/unpriced rows.
+	CostSchema string
 }
 
 // Request returns the requests-row view of a captured record, used by the §8
@@ -157,6 +172,7 @@ func (r *CaptureRecord) Request() *Request {
 		CostCacheWrite:       r.CostCacheWrite,
 		CostTotal:            r.CostTotal,
 		CostPriced:           r.CostPriced,
+		CostSchema:           r.CostSchema,
 	}
 }
 

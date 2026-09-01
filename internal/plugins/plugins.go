@@ -168,3 +168,64 @@ func Known() []string {
 	sort.Strings(names)
 	return names
 }
+
+// ConfigField documents one key of a plugin's [plugins.<name>] TOML table for
+// the settings UI. Kind mirrors the value shape ("string_list" = list of
+// strings); Defaults lists what applies when the key is unset (nil = the key
+// has no effect when unset, e.g. no field-list masking).
+type ConfigField struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Kind        string   `json:"kind"`
+	Defaults    []string `json:"defaults,omitempty"`
+}
+
+// Info describes a known plugin for the API and the settings UI: what it does,
+// whether it is a payload transform or a control plugin, where it comes from,
+// and (for transforms) which config keys its [plugins.<name>] table accepts.
+type Info struct {
+	Name         string        `json:"name"`
+	Description  string        `json:"description"`
+	Kind         string        `json:"kind"` // "transform" | "control"
+	Source       string        `json:"source"`
+	Configurable bool          `json:"configurable"`
+	ConfigFields []ConfigField `json:"config_fields,omitempty"`
+}
+
+// pluginInfo carries the registered metadata. Entries are added by the same
+// init() functions that register the factories, so a plugin's docs can never
+// drift from its registration.
+var pluginInfo = map[string]Info{}
+
+// registerInfo records one plugin's metadata. It panics on an unregistered
+// name so docs and registry cannot fall out of sync.
+func registerInfo(i Info) {
+	if _, ok := registry[i.Name]; !ok && !controlPlugins[i.Name] {
+		panic(fmt.Sprintf("plugins: registerInfo for unknown plugin %q", i.Name))
+	}
+	pluginInfo[i.Name] = i
+}
+
+// Infos returns metadata for every known plugin (transforms and control
+// plugins), sorted by name. Unregistered names still appear with a generic
+// entry so the list is always complete.
+func Infos() []Info {
+	out := make([]Info, 0, len(registry)+len(controlPlugins))
+	for _, n := range Known() {
+		if i, ok := pluginInfo[n]; ok {
+			out = append(out, i)
+			continue
+		}
+		out = append(out, Info{Name: n, Kind: "transform", Source: "built-in"})
+	}
+	return out
+}
+
+func init() {
+	registerInfo(Info{
+		Name:        "retry_empty",
+		Kind:        "control",
+		Source:      "built-in",
+		Description: "Control plugin — never transforms payloads. When a provider answers 200 with an empty completion (no content and no tool calls), the request is silently re-issued upstream (bounded retries) instead of returning an empty reply to the client. Valid in a plugins list on either side; read directly by the proxy path.",
+	})
+}

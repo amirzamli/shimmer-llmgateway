@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/amirzamli/shimmer-llmgateway/internal/config"
@@ -75,10 +77,14 @@ func main() {
 	defer st.Close()
 	st.SetRetention(cfg.RetentionDays)
 
-	ctx, stop := context.WithCancel(context.Background())
+	// SIGINT/SIGTERM cancel ctx so the shutdown path at the bottom runs:
+	// listeners drain, the append log closes, and the SQLite close checkpoints
+	// and truncates the WAL instead of leaving it for the next startup to
+	// recover.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	srv, err := gateway.New(mgr, st, logger, *configPath, masterKey)
+	srv, err := gateway.New(mgr, st, logger, *configPath, masterKey, addrs)
 	if err != nil {
 		logger.Error("gateway_new_failed", map[string]any{"error": err.Error()})
 		os.Exit(1)
@@ -92,9 +98,17 @@ func main() {
 	} else if n > 0 {
 		logger.Info("retention_purged", map[string]any{"sessions": n})
 	}
-	// One-time cost backfill for requests captured before the cost columns
-	// existed (idempotent; see gateway.BackfillCosts). Runs before serving so
-	// the Usage view never shows a half-backfilled ledger.
+	// TRUNCATE the WAL before serving: the startup purge is the only writer so
+	// far, and no captures are in flight yet — this is the one moment the WAL
+	// is quiescent. The size limit set at store open keeps it bounded after
+	// that; this pass reclaims whatever an unclean kill left behind.
+	if err := st.Checkpoint(context.Background()); err != nil {
+		logger.Warn("startup_checkpoint_failed", map[string]any{"error": err.Error()})
+	}
+	// Price requests captured while their model was unpriced (idempotent; see
+	// gateway.BackfillCosts). Already-priced rows are never touched, so a
+	// table update never rewrites historical costs. Runs before serving so the
+	// Usage view never shows a half-priced ledger.
 	gateway.BackfillCosts(context.Background(), st, logger)
 	st.StartRetentionLoop(ctx, 0)
 
@@ -111,14 +125,10 @@ func main() {
 	// to an interface) is fatal, matching the previous single-listener
 	// behavior.
 	handler := srv.Handler()
+	var servers []*http.Server
 	serving := 0
 	for _, addr := range addrs {
 		httpServer := &http.Server{Addr: addr, Handler: handler}
-		httpServer.RegisterOnShutdown(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = httpServer.Shutdown(ctx)
-		})
 		httpServerCopy := httpServer
 		go func() {
 			logger.Info("serving", map[string]any{"listen": addr})
@@ -127,13 +137,32 @@ func main() {
 				os.Exit(1)
 			}
 		}()
+		servers = append(servers, httpServer)
 		serving++
 	}
 	if serving == 0 {
 		logger.Error("listen_failed", map[string]any{"error": "no listen addresses configured"})
 		os.Exit(1)
 	}
-	select {}
+
+	// Shutdown on SIGINT/SIGTERM: drain in-flight requests (bounded), close
+	// the append log, then close the store. The store close is what
+	// checkpoints and truncates the WAL, so skipping it (os.Exit, a kill
+	// signal without this path) is what made restarts slow.
+	<-ctx.Done()
+	logger.Info("shutdown_started", nil)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for _, httpServer := range servers {
+		_ = httpServer.Shutdown(shutdownCtx)
+	}
+	if err := srv.Close(); err != nil {
+		logger.Warn("append_log_close_failed", map[string]any{"error": err.Error()})
+	}
+	if err := st.Close(); err != nil {
+		logger.Warn("store_close_failed", map[string]any{"error": err.Error()})
+	}
+	logger.Info("shutdown_complete", nil)
 }
 
 // serveListeners runs one http.Server per address over handler, returning the
