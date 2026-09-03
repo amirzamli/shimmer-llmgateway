@@ -23,6 +23,9 @@ default_alias = "openai"        # used when a client sends no alias prefix
 request_plugins = []            # global defaults, overridable per instance
 response_plugins = []
 log_payloads = false            # opt-in: log redacted payloads to the console
+# Dashboard color scheme remembered by the header theme toggle ("dark"/"light");
+# written back when you toggle. Unset = dark.
+# ui_theme = "dark"
 
 [providers.openai]              # TEMPLATE: the dropdown entry
 base_url = "https://api.openai.com/v1"

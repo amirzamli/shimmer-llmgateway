@@ -254,14 +254,27 @@ default_alias = "openai"
 		t.Errorf("instance 2 key_masked = %v, want sk-…7890", inst["key_masked"])
 	}
 
-	// GET /api/instances lists both, the second masked.
+	// Upper case and spaces are legal aliases (exact, case-sensitive match).
+	status, inst = doJSON(t, gs, "POST", "/api/instances", `{"template":"openai","alias":"My Provider 2"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("POST instance 3 status = %d, body %v", status, inst)
+	}
+	if inst["alias"] != "My Provider 2" {
+		t.Errorf("instance 3 alias = %v, want My Provider 2", inst["alias"])
+	}
+	status, _ = doJSON(t, gs, "POST", "/api/instances", `{"template":"openai","alias":"bad alias!"}`)
+	if status != http.StatusBadRequest {
+		t.Errorf("POST with invalid alias status = %d, want 400", status)
+	}
+
+	// GET /api/instances lists all three, the second masked.
 	status, list := doJSON(t, gs, "GET", "/api/instances", "")
 	if status != http.StatusOK {
 		t.Fatalf("GET /api/instances status = %d", status)
 	}
 	items := list["instances"].([]any)
-	if len(items) != 2 {
-		t.Fatalf("instances = %d, want 2", len(items))
+	if len(items) != 3 {
+		t.Fatalf("instances = %d, want 3", len(items))
 	}
 
 	// The stored key lives in <store>.secrets.json with mode 0600, never in
@@ -591,6 +604,37 @@ func TestSettingsLogPayloads(t *testing.T) {
 	}
 	if !reloaded.Settings.LogPayloads {
 		t.Errorf("persisted log_payloads = false, want true")
+	}
+}
+
+// TestSettingsUITheme covers the dashboard theme persisted by the header
+// toggle: PATCH writes it back to gateway.toml ([settings] ui_theme) and an
+// unknown value is rejected before anything is persisted.
+func TestSettingsUITheme(t *testing.T) {
+	gs, mgr, _, cfgPath := newAPITest(t, apiTestTOML, testMasterKey)
+
+	status, out := doJSON(t, gs, "PATCH", "/api/settings", `{"ui_theme":"light"}`)
+	if status != http.StatusOK {
+		t.Fatalf("PATCH /api/settings status = %d", status)
+	}
+	if out["ui_theme"] != "light" || mgr.Get().Settings.UITheme != "light" {
+		t.Errorf("ui_theme = %v / live = %q, want light", out["ui_theme"], mgr.Get().Settings.UITheme)
+	}
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload persisted config: %v", err)
+	}
+	if reloaded.Settings.UITheme != "light" {
+		t.Errorf("persisted ui_theme = %q, want light", reloaded.Settings.UITheme)
+	}
+
+	// The closed vocabulary is enforced server-side (config validation).
+	status, _ = doJSON(t, gs, "PATCH", "/api/settings", `{"ui_theme":"blue"}`)
+	if status != http.StatusBadRequest {
+		t.Errorf("invalid ui_theme status = %d, want 400", status)
+	}
+	if mgr.Get().Settings.UITheme != "light" {
+		t.Errorf("rejected patch changed live ui_theme to %q", mgr.Get().Settings.UITheme)
 	}
 }
 
@@ -1407,8 +1451,11 @@ func TestInstancePatchModelAliasesValidation(t *testing.T) {
 	gs, _, _, _ := newAPITest(t, apiTestTOML, testMasterKey)
 
 	for _, body := range []string{
-		`{"model_aliases":{"UPPER":"gpt-4o"}}`,
-		`{"model_aliases":{"bad key":"gpt-4o"}}`,
+		`{"model_aliases":{"bad!":"gpt-4o"}}`,
+		`{"model_aliases":{"bad/key":"gpt-4o"}}`,
+		`{"model_aliases":{" leading":"gpt-4o"}}`,
+		`{"model_aliases":{"trailing ":"gpt-4o"}}`,
+		`{"model_aliases":{"double  space":"gpt-4o"}}`,
 		`{"model_aliases":{"small":""}}`,
 	} {
 		status, out := doJSON(t, gs, "PATCH", "/api/instances/openai", body)

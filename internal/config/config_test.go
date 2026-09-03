@@ -400,7 +400,7 @@ template = "ollama"
 }
 
 func TestValidationInvalidAlias(t *testing.T) {
-	for _, alias := range []string{"Bad Alias", "OpenAI", "alias!"} {
+	for _, alias := range []string{"openai!", "open/ai", " openai", "openai ", "open  ai", "open\tai"} {
 		t.Run(alias, func(t *testing.T) {
 			_, err := Parse([]byte(`
 [[instances]]
@@ -414,6 +414,56 @@ template = "openai"
 				t.Errorf("error %q does not mention alias pattern", err)
 			}
 		})
+	}
+}
+
+func TestValidationAliasUppercaseAndSpaces(t *testing.T) {
+	// Upper case and interior single spaces are legal (resolved review:
+	// the old lowercase-only rule was a conservatism, not a requirement);
+	// matching itself stays exact and case-sensitive.
+	cfg := mustParse(t, `
+[[instances]]
+alias = "My Provider"
+template = "openai"
+
+[instances.model_aliases]
+"Small Key" = "gpt-4o-mini"
+`)
+	inst, model, err := cfg.Resolve("My Provider/Small Key")
+	if err != nil {
+		t.Fatalf("Resolve prefixed: %v", err)
+	}
+	if inst.Alias != "My Provider" || model != "gpt-4o-mini" {
+		t.Fatalf("Resolve = %q/%q, want My Provider/gpt-4o-mini", inst.Alias, model)
+	}
+	// The alias round-trips through the write-back (quoted TOML key/value).
+	out, err := Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	re, err := Parse(out)
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	if re.Instances[0].Alias != "My Provider" {
+		t.Errorf("round-tripped alias = %q, want My Provider", re.Instances[0].Alias)
+	}
+	// Case-sensitive: a different case is an unknown alias, and two aliases
+	// differing only in case are distinct (no duplicate-alias error).
+	if _, _, err := cfg.Resolve("my provider/small"); err == nil {
+		t.Errorf("Resolve with wrong case succeeded, want unknown alias error")
+	}
+	cfg = mustParse(t, `
+[[instances]]
+alias = "OpenAI"
+template = "openai"
+
+[[instances]]
+alias = "openai"
+template = "ollama"
+`)
+	if cfg.Instances[0].Alias != "OpenAI" || cfg.Instances[1].Alias != "openai" {
+		t.Errorf("case-distinguished aliases collapsed: %q, %q", cfg.Instances[0].Alias, cfg.Instances[1].Alias)
 	}
 }
 
@@ -450,6 +500,54 @@ func TestValidationMalformedTOML(t *testing.T) {
 	_, err := Parse([]byte("listen ="))
 	if err == nil {
 		t.Fatal("malformed TOML returned no error")
+	}
+}
+
+func TestValidationUITheme(t *testing.T) {
+	// Absent and both known values parse; anything else is a config error so
+	// a typo fails at load instead of leaving the UI theme undefined.
+	for _, theme := range []string{"", "dark", "light"} {
+		cfg, err := Parse([]byte("[settings]\nui_theme = \"" + theme + "\"\n"))
+		if err != nil {
+			t.Fatalf("ui_theme %q: err = %v", theme, err)
+		}
+		if cfg.Settings.UITheme != theme {
+			t.Errorf("ui_theme = %q, want %q", cfg.Settings.UITheme, theme)
+		}
+	}
+	_, err := Parse([]byte("[settings]\nui_theme = \"blue\"\n"))
+	if err == nil || !IsValidationError(err) {
+		t.Fatalf("err = %v, want ValidationError", err)
+	}
+	if !strings.Contains(err.Error(), "ui_theme") {
+		t.Errorf("error %q does not mention ui_theme", err)
+	}
+}
+
+func TestUIThemeRoundTrip(t *testing.T) {
+	cfg := mustParse(t, "[settings]\nui_theme = \"light\"\n")
+	out, err := Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(out), `ui_theme = 'light'`) {
+		t.Errorf("write-back %q does not carry ui_theme", out)
+	}
+	re, err := Parse(out)
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	if re.Settings.UITheme != "light" {
+		t.Errorf("round-tripped ui_theme = %q, want light", re.Settings.UITheme)
+	}
+	// An unset theme is omitted from the write-back (dark is the default look).
+	cfg = mustParse(t, "")
+	out, err = Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(out), "ui_theme") {
+		t.Errorf("unset ui_theme leaked into write-back: %q", out)
 	}
 }
 
@@ -858,7 +956,7 @@ template = "openai"
 }
 
 func TestValidationModelAliasBadKeys(t *testing.T) {
-	for _, key := range []string{"UPPER", "with space", "bad!", ""} {
+	for _, key := range []string{"bad!", "bad/key", " leading", "trailing ", "double  space", ""} {
 		t.Run(key, func(t *testing.T) {
 			_, err := Parse([]byte(`
 [[instances]]

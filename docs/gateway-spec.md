@@ -85,7 +85,10 @@ Two-level model — this is what makes multi-account work:
 - First instance of a template defaults to the template name: `openai`.
 - Each further instance auto-defaults to the next free name: `openai-2`,
   `openai-3`, … (skip already-taken aliases).
-- The user may override with any unique alias matching `[a-z0-9._-]+`.
+- The user may override with any unique alias matching `[A-Za-z0-9_.-]+`,
+  optionally with interior single spaces (e.g. `My Provider`); `/` is excluded
+  (it separates `alias/model`) and leading/trailing/double spaces are
+  rejected. Matching is exact and case-sensitive.
 - Aliases are the routing key: model prefix = alias, e.g. `openai-2/gpt-4o`
   → instance `openai-2`, model `gpt-4o`. Unprefixed model names resolve to
   the first instance that lists the model.
@@ -93,7 +96,8 @@ Two-level model — this is what makes multi-account work:
   (a RECOVERABLE error, per the repo's error convention).
 
 **Model aliases** — each instance may map a friendly name to a concrete model
-string (e.g. `small` → `gpt-4o-mini`). Keys must match `[a-z0-9._-]+`; values
+string (e.g. `small` → `gpt-4o-mini`). Keys must match the alias pattern
+(`[A-Za-z0-9_.-]+`, interior single spaces allowed); values
 are non-empty and may contain slashes (e.g.
 `meta-llama/Meta-Llama-3-8B-Instruct`). Expansion is single-level: the mapped
 value is forwarded verbatim, never re-expanded. Precedence for an **unprefixed**
@@ -342,7 +346,7 @@ without the file serve the embedded asset.
 - **Instance PATCH `model_aliases`** — `PATCH /api/instances/{alias}` accepts
   an optional `model_aliases` object that **replaces the whole map** (same
   semantics as the other patch fields; absent or `null` leaves it unchanged,
-  an empty object `{}` clears it). Keys must match `[a-z0-9._-]+` and values
+  an empty object `{}` clears it). Keys must match the alias pattern and values
   must be non-empty — a violation is a 400 `INVALID_ARGUMENT` (the same
   `config.Validate` used for `gateway.toml`).
 

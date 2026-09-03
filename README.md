@@ -54,7 +54,7 @@ Key rules:
 - **Alias routing.** A model named `alias/model` routes to that instance; unprefixed names resolve via `settings.default_alias`, then the first enabled instance listing the model.
 - **API keys never live in `gateway.toml`.** They come from the `api_key_env` environment variable or the UI-managed secrets file (see [Security](#security)); the gateway injects the resolved key, so clients need none.
 - **Hot config write-back.** Config mutations through the UI/REST API are written back to `gateway.toml` and applied atomically to the next request — no restart. The file is rewritten wholesale (comments and formatting are not preserved).
-- **`model_aliases`.** Per-instance map of friendly names to concrete models (`small = 'gpt-4o-mini'`); keys match `[a-z0-9._-]+`, values are non-empty model strings (slashes allowed).
+- **`model_aliases`.** Per-instance map of friendly names to concrete models (`small = 'gpt-4o-mini'`); keys (like instance aliases) match `[A-Za-z0-9_.-]+` with interior single spaces allowed (e.g. `'My Provider'`), values are non-empty model strings (slashes allowed). Matching is case-sensitive.
 - **`listen_addrs`.** Only loopback (`127.0.0.0/8`, `::1`, `localhost`), CGNAT (`100.64.0.0/10`, the Tailscale default range), and ULA (`fc00::/7`) are accepted; wildcard and LAN addresses are refused at startup.
 
 Details — see [docs/gateway-spec.md](docs/gateway-spec.md) for the full protocol spec:

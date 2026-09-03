@@ -144,7 +144,7 @@ func (a *API) handleInstancesCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Alias != "" && !aliasPatternOK(req.Alias) {
-		a.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "alias must match [a-z0-9._-]+")
+		a.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "alias must match [A-Za-z0-9_.-]+ with interior single spaces (e.g. \"My Provider\")")
 		return
 	}
 	if req.BaseURL != "" {
@@ -270,10 +270,10 @@ func (a *API) handleInstancePatch(w http.ResponseWriter, r *http.Request) {
 		if req.Alias != nil && *req.Alias != oldAlias {
 			alias := *req.Alias
 			if alias == "" {
-				return badRequest("alias cannot be empty; provide a name matching [a-z0-9._-]+")
+				return badRequest("alias cannot be empty; provide a name matching [A-Za-z0-9_.-]+ with interior single spaces (e.g. \"My Provider\")")
 			}
 			if !aliasPatternOK(alias) {
-				return badRequest("alias must match [a-z0-9._-]+")
+				return badRequest("alias must match [A-Za-z0-9_.-]+ with interior single spaces (e.g. \"My Provider\")")
 			}
 			for _, other := range c.Instances {
 				if other.Alias == alias {
@@ -382,16 +382,23 @@ func (a *API) handleInstanceDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 // aliasPatternOK is a cheap client-side mirror of the §4.2 alias rule used for
-// early 400s; the authoritative check runs in config.Validate.
+// early 400s; the authoritative check runs in config.Validate. Words of
+// [A-Za-z0-9_.-] separated by single spaces; no leading/trailing space, and
+// "/" stays reserved for the "alias/model" routing prefix.
 func aliasPatternOK(alias string) bool {
 	if alias == "" {
 		return false
 	}
-	for _, c := range alias {
-		switch {
-		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '.', c == '_', c == '-':
-		default:
+	for _, word := range strings.Split(alias, " ") {
+		if word == "" {
 			return false
+		}
+		for _, c := range word {
+			switch {
+			case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '.', c == '_', c == '-':
+			default:
+				return false
+			}
 		}
 	}
 	return true

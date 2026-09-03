@@ -12,6 +12,7 @@
 //	default_alias = "openai"
 //	request_plugins = []
 //	response_plugins = []
+//	ui_theme = "dark"
 //
 //	[providers.openai]
 //	base_url = "https://api.openai.com/v1"
@@ -45,8 +46,13 @@ import (
 	"github.com/amirzamli/shimmer-llmgateway/internal/plugins"
 )
 
-// AliasPattern is the §4.2 alias rule: a user alias must match [a-z0-9._-]+.
-const AliasPattern = `[a-z0-9._-]+`
+// AliasPattern is the §4.2 alias rule: upper/lowercase letters, digits, ".",
+// "_" and "-", plus interior single spaces between words (e.g. "openai",
+// "OpenAI", "My Provider"). "/" is excluded because it separates the
+// "alias/model" routing prefix; leading, trailing and double spaces are
+// rejected. Matching is exact and case-sensitive throughout — "OpenAI" and
+// "openai" are two distinct aliases.
+const AliasPattern = `[A-Za-z0-9_.-]+(?: [A-Za-z0-9_.-]+)*`
 
 // DefaultRetentionDays is the payload retention window applied when
 // gateway.toml does not set retention_days: after this many days a session's
@@ -76,6 +82,9 @@ type Settings struct {
 	// LogPayloads opts into per-request console logging of the redacted
 	// request/response payloads at the capture chokepoint.
 	LogPayloads bool `toml:"log_payloads"`
+	// UITheme is the dashboard color scheme persisted by the header toggle:
+	// "dark" (the default look) or "light". Empty means dark.
+	UITheme string `toml:"ui_theme,omitempty"`
 }
 
 // Template is a provider definition (a [providers.<name>] entry, the §4.2
@@ -756,13 +765,14 @@ func ValidateBaseURL(baseURL string) error {
 }
 
 // Validate enforces the §4.2 alias rules and config invariants:
-//   - template names match [a-z0-9._-]+ (they seed auto-named aliases) and
+//   - template names match AliasPattern (they seed auto-named aliases) and
 //     template base_url values are absolute http(s) URLs;
 //   - every instance references a known template;
-//   - aliases are unique and match [a-z0-9._-]+;
+//   - aliases are unique and match AliasPattern;
 //   - per-instance api_key_env values are valid env var names;
-//   - per-instance model_aliases keys match [a-z0-9._-]+ and values are
+//   - per-instance model_aliases keys match AliasPattern and values are
 //     non-empty;
+//   - settings.ui_theme, when set, is "dark" or "light";
 //   - every plugin name (settings defaults, template defaults, or per-instance
 //     list) is known to the built-in registry or the control-plugin set
 //     (§4.5).
@@ -882,6 +892,15 @@ func Validate(c *Config) error {
 				}
 			}
 		}
+	}
+
+	// The dashboard theme is a closed vocabulary; anything else is a config
+	// error so a typo fails at load (or at PATCH time) instead of leaving the
+	// UI stuck on an unstyled body class.
+	switch c.Settings.UITheme {
+	case "", "dark", "light":
+	default:
+		problems = append(problems, fmt.Sprintf("settings.ui_theme %q must be \"dark\" or \"light\"", c.Settings.UITheme))
 	}
 
 	// Plugins are selected by name from the built-in registry (§4.5); an

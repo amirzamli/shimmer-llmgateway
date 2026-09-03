@@ -62,9 +62,9 @@ type templateCreateReq struct {
 }
 
 // handleTemplatesCreate adds a custom template. The name must match the §4.2
-// pattern ([a-z0-9._-]+) and must not collide with an existing template
-// (built-in or user-defined), so the dropdown never silently shadows a
-// provider.
+// alias pattern (config.AliasPattern) and must not collide with an existing
+// template (built-in or user-defined), so the dropdown never silently shadows
+// a provider.
 func (a *API) handleTemplatesCreate(w http.ResponseWriter, r *http.Request) {
 	var req templateCreateReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

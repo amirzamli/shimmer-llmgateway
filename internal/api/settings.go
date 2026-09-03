@@ -17,6 +17,7 @@ type settingsView struct {
 	RequestPlugins  []string `json:"request_plugins"`
 	ResponsePlugins []string `json:"response_plugins"`
 	LogPayloads     bool     `json:"log_payloads"`
+	UITheme         string   `json:"ui_theme"`
 }
 
 // settingsPatchReq is the PATCH /api/settings body; every field is optional.
@@ -27,6 +28,7 @@ type settingsPatchReq struct {
 	RequestPlugins  *[]string `json:"request_plugins"`
 	ResponsePlugins *[]string `json:"response_plugins"`
 	LogPayloads     *bool     `json:"log_payloads"`
+	UITheme         *string   `json:"ui_theme"`
 }
 
 func (a *API) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
@@ -39,6 +41,7 @@ func (a *API) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 		RequestPlugins:  cfg.Settings.RequestPlugins,
 		ResponsePlugins: cfg.Settings.ResponsePlugins,
 		LogPayloads:     cfg.Settings.LogPayloads,
+		UITheme:         cfg.Settings.UITheme,
 	})
 }
 
@@ -74,6 +77,9 @@ func (a *API) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		if req.LogPayloads != nil {
 			c.Settings.LogPayloads = *req.LogPayloads
 		}
+		if req.UITheme != nil {
+			c.Settings.UITheme = *req.UITheme
+		}
 		retention = req.RetentionDays
 		return nil
 	})
@@ -95,5 +101,6 @@ func (a *API) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		RequestPlugins:  cfg.Settings.RequestPlugins,
 		ResponsePlugins: cfg.Settings.ResponsePlugins,
 		LogPayloads:     cfg.Settings.LogPayloads,
+		UITheme:         cfg.Settings.UITheme,
 	})
 }
