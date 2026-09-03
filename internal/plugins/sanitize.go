@@ -32,7 +32,8 @@ func init() {
 		Kind:         "transform",
 		Source:       "built-in",
 		Configurable: false,
-		Description:  "Rewrites client tool schemas before forward: wherever a tool parameter declares both an enum and a redundant oneOf/anyOf combinator, the combinator is dropped and the enum kept. The enum+oneOf duplication is valid JSON Schema but some OpenAI-compatible providers answer it with a silent empty completion (200, finish_reason \"length\", no usage) instead of an error — observed on commandcode.ai serving gpt-5.6-luna. Requests without tool definitions pass through byte-for-byte.",
+		Description: `Fixes a bug observed with openchamber + serving gpt-5.6-luna. The fix rewrites client tool schemas, wherever a tool parameter declares both an enum and a redundant oneOf/anyOf combinator,
+the combinator is dropped and the enum kept. Otherwise the provider answers with a silent empty completion (200, finish_reason "length", no usage)`,
 	})
 }
 
