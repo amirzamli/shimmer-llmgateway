@@ -48,9 +48,9 @@ func (s *Store) retention() int {
 // everything the usage aggregates sum), but the payload columns are nulled and
 // the tool_calls rows are deleted. The sessions rows remain, flagged
 // expired = 1 so the UI/MCP can show "payloads expired" instead of an empty
-// conversation. It is the startup purge; the daily ticker runs
-// StartRetentionLoop. Returns the number of sessions newly expired. Disabled
-// when retention is <= 0.
+// conversation. StartRetentionLoop invokes it once at loop start and then on
+// its ticker. Returns the number of sessions newly expired. Disabled when
+// retention is <= 0.
 //
 // The cutoff is anchored to the newest session in the store rather than the
 // wall clock: retention counts backward from the most recent recorded
@@ -127,14 +127,27 @@ func (s *Store) Purge(ctx context.Context) (int, error) {
 	return int(n), nil
 }
 
-// StartRetentionLoop runs Purge on a ticker until ctx is done. interval <= 0
-// defaults to daily. The gateway calls Purge once at startup and starts this
-// loop for the recurring purge.
-func (s *Store) StartRetentionLoop(ctx context.Context, interval time.Duration) {
+// StartRetentionLoop purges in the background until ctx is done: one pass
+// immediately when the loop starts (catching up on anything that expired while
+// the gateway was down, without blocking startup or serving), then a pass per
+// tick. interval <= 0 defaults to daily. onPurge, when non-nil, receives every
+// completed pass's result (context-canceled passes are dropped — the gateway
+// is shutting down); the loop owns no logger, so the gateway logs through it.
+func (s *Store) StartRetentionLoop(ctx context.Context, interval time.Duration, onPurge func(n int, err error)) {
 	if interval <= 0 {
 		interval = 24 * time.Hour
 	}
 	go func() {
+		pass := func() {
+			n, err := s.Purge(ctx)
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			if onPurge != nil {
+				onPurge(n, err)
+			}
+		}
+		pass()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -142,11 +155,7 @@ func (s *Store) StartRetentionLoop(ctx context.Context, interval time.Duration) 
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if _, err := s.Purge(ctx); err != nil && !errors.Is(err, context.Canceled) {
-					// No logger lives in the store; the gateway surfaces
-					// startup purge errors and the loop retries next tick.
-					continue
-				}
+				pass()
 			}
 		}
 	}()

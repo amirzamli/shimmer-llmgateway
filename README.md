@@ -64,7 +64,7 @@ Details — see [docs/gateway-spec.md](docs/gateway-spec.md) for the full protoc
 - **Model aliases.** Expansion is single-level (mapped values are never re-expanded), an alias key shadows literal model membership, and a prefixed name expands only when it is a key of that instance's map — spec §4.2.
 - **Usage & costs.** Costs are estimates computed at capture time from the request's real token usage times the generated price table (`internal/pricing/models.json`); unpriced models count $0 and are flagged, and a fresh checkout has no table until you run `just update-prices` (cost estimation stays off until then). Surface: `GET /api/usage` + the Usage tab.
 - **Provider model fetching.** The dashboard's model dropdown fetches `GET <base_url>/models`, cached in-memory for 5 minutes (`?refresh=1` bypasses; a PATCH/DELETE invalidates); on fetch failure the configured models are returned — spec §6.2.
-- **Retention.** Payloads older than `retention_days` are expired at startup and daily; session/request rows stay as metadata (timestamps, model, status, token counts, costs) and expired sessions are flagged `expired`.
+- **Retention.** Payloads older than `retention_days` are expired by a background loop (a catch-up pass right after startup, then daily) — purging never blocks serving or shutdown; session/request rows stay as metadata (timestamps, model, status, token counts, costs) and expired sessions are flagged `expired`.
 
 ## Clients
 
@@ -139,7 +139,7 @@ A **localhost developer tool**, not a hardened multi-user service — not design
 - **Host/Origin validation.** The unauthenticated `/api/*` surface and the embedded UI only serve requests whose `Host` names an address the gateway actually serves, and reject cross-site `Origin` / `Sec-Fetch-Site` requests on state-changing methods (a web page cannot drive the admin API); `/v1/chat/completions` is not subject to these checks.
 - **Secrets at rest.** Per-instance API keys live in `<store>.secrets.json` (mode `0600`), AES-256-GCM-encrypted under `SHIMMER_MASTER_KEY` — set a base64-encoded 32-byte key before first run, or acknowledge the one-time key the dashboard generates. **Losing the master key means the stored API keys cannot be recovered.**
 - **No CORS on the MCP HTTP transport.** The `inspect-mcp` streamable-http endpoint sends no CORS headers, so browser pages cannot read captured traffic.
-- **Retention.** Payloads older than `retention_days` are purged at startup and daily; only request metadata survives.
+- **Retention.** Payloads older than `retention_days` are purged daily (plus a catch-up pass right after startup); only request metadata survives.
 
 Threat model: a non-loopback `listen_addrs` entry makes the unauthenticated `/api/*` surface reachable from that network (on a tailnet, only its devices) while the master-key endpoints stay localhost-only; provider `base_url` is trusted configuration — the gateway validates the http(s) scheme and never follows redirects, but forwards to any configured http(s) host including private ones (ollama, vllm); API keys are encrypted at rest, so keep `SHIMMER_MASTER_KEY` secret and set it explicitly before first run.
 
@@ -148,6 +148,8 @@ Report security-sensitive issues privately via GitHub **private vulnerability re
 ## Development
 
 - Common tasks: `just fmt` / `just vet` / `just test` / `just race` / `just build` / `just update-prices` — or plain `go test ./...`.
+- **Per-worktree test gateway.** `just run-test` starts this checkout's gateway on a random free port (loopback plus the machine's Tailscale IP when available, so the UI is reachable from other tailnet devices) with an isolated state dir (`.run-test/<branch>/`: generated config, its own SQLite store, secrets, capture JSONL) and a mock OpenAI-compatible provider (`scripts/mockprovider`) — it seeds dummy conversations (tool round-trip, streaming, an upstream failure) through the real proxy path on first run, so nothing collides with a main running gateway. UI edits in the worktree are served live; `just run-test-seed` re-seeds, `just run-test-clean` wipes the state.
+- **UI edit-and-refresh.** The UI is a single `web/index.html` with no build step. The gateway serves `web/index.html` from the working directory when it exists, so edits show up on browser refresh — no rebuild, no restart. Without that file (e.g. a bare binary install), the copy embedded at build time is served.
 - The pricing table `internal/pricing/models.json` is generated (`just update-prices`, from the models.dev catalog) and is not tracked in git.
 
 ## License

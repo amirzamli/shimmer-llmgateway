@@ -1137,6 +1137,95 @@ func TestPurgeSkipsJSONLPurgerWhenDisabled(t *testing.T) {
 	}
 }
 
+// TestStartRetentionLoopFirstPassImmediate verifies the loop purges as soon as
+// it starts — without waiting for the first tick — so a backlog that expired
+// while the gateway was down is caught up right after startup, concurrently
+// with serving.
+func TestStartRetentionLoopFirstPassImmediate(t *testing.T) {
+	st := openTestStore(t)
+
+	old := baseRecord()
+	old.ID = "req-loop-old"
+	old.SessionID = "sess-loop-old"
+	mustCapture(t, st, old)
+	oldTS := formatTS(time.Now().UTC().AddDate(0, 0, -10))
+	if _, err := st.db.Exec(`UPDATE sessions SET created_at = ? WHERE id = ?`, oldTS, "sess-loop-old"); err != nil {
+		t.Fatal(err)
+	}
+	// A fresh session anchors the cutoff to now (Purge never expires the
+	// newest session relative to itself).
+	fresh := baseRecord()
+	fresh.ID = "req-loop-new"
+	fresh.SessionID = "sess-loop-new"
+	mustCapture(t, st, fresh)
+	newTS := formatTS(time.Now().UTC())
+	if _, err := st.db.Exec(`UPDATE sessions SET created_at = ? WHERE id = ?`, newTS, "sess-loop-new"); err != nil {
+		t.Fatal(err)
+	}
+	st.SetRetention(1)
+
+	passed := make(chan int, 1)
+	// interval = 1h: without an immediate first pass the callback cannot fire
+	// within the test's lifetime.
+	st.StartRetentionLoop(context.Background(), time.Hour, func(n int, err error) {
+		if err != nil {
+			t.Errorf("loop pass error: %v", err)
+		}
+		passed <- n
+	})
+	select {
+	case n := <-passed:
+		if n != 1 {
+			t.Errorf("first loop pass expired %d sessions, want 1", n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("retention loop did not run its first pass immediately")
+	}
+
+	sess, err := st.GetSession(context.Background(), "sess-loop-old")
+	if err != nil {
+		t.Fatalf("expired session missing: %v", err)
+	}
+	if !sess.Expired {
+		t.Error("session not expired by the loop's first pass")
+	}
+}
+
+// TestStartRetentionLoopDropsCanceledPass verifies a context-canceled pass is
+// not reported (the gateway is shutting down; a cancel during the initial
+// purge is not an operational failure worth a warning).
+func TestStartRetentionLoopDropsCanceledPass(t *testing.T) {
+	st := openTestStore(t)
+
+	old := baseRecord()
+	old.ID = "req-loop-cancel"
+	old.SessionID = "sess-loop-cancel"
+	mustCapture(t, st, old)
+	oldTS := formatTS(time.Now().UTC().AddDate(0, 0, -10))
+	if _, err := st.db.Exec(`UPDATE sessions SET created_at = ? WHERE id = ?`, oldTS, "sess-loop-cancel"); err != nil {
+		t.Fatal(err)
+	}
+	fresh := baseRecord()
+	fresh.ID = "req-loop-cancel-new"
+	fresh.SessionID = "sess-loop-cancel-new"
+	mustCapture(t, st, fresh)
+	newTS := formatTS(time.Now().UTC())
+	if _, err := st.db.Exec(`UPDATE sessions SET created_at = ? WHERE id = ?`, newTS, "sess-loop-cancel-new"); err != nil {
+		t.Fatal(err)
+	}
+	st.SetRetention(1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	reported := make(chan int, 1)
+	st.StartRetentionLoop(ctx, time.Hour, func(n int, err error) { reported <- n })
+	select {
+	case n := <-reported:
+		t.Errorf("canceled first pass reported n=%d, want silence", n)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestForeignKeyEnforcement(t *testing.T) {
 	st := openTestStore(t)
 

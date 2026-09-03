@@ -319,3 +319,82 @@ func TestNonStreamSanitizeToolsUpstreamReceivesCleanSchema(t *testing.T) {
 		t.Error("untouched tool's oneOf was stripped in request_filtered_json")
 	}
 }
+
+func TestStreamSanitizeToolsStaysInLiveDeltaMode(t *testing.T) {
+	// sanitize_tools is request-only, so listing it on an instance must NOT
+	// switch streaming into buffer mode: buffer mode re-emits the completion
+	// as one message-shaped block, which OpenAI-stream clients (that parse
+	// delta.tool_calls) drop on the floor for tool-calling turns. The client
+	// must receive the provider's delta chunks verbatim, live.
+	provider := newFakeProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		fl := w.(http.Flusher)
+		writeEvent := func(j string) {
+			fmt.Fprintf(w, "data: %s\n\n", j)
+			fl.Flush()
+		}
+		writeEvent(`{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1722600000,"model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"t","arguments":""}}]},"finish_reason":null}]}`)
+		writeEvent(`{"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"a\":\"b\"}"}}]},"finish_reason":null}]}`)
+		writeEvent(`{"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`)
+		writeEvent(`[DONE]`)
+	})
+	gs, st := newGatewayTest(t, provider, sanitizeTOML, defaultEnv)
+
+	body := `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"t","parameters":{"type":"object","properties":{"action":{"type":"string","enum":["a","b"],"oneOf":[{"const":"a"},{"const":"b"}]}}}}}]}`
+	resp := postChat(t, gs, body, map[string]string{"X-Session-Id": "sess-sanitize-stream"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	raw := string(drainClose(t, resp))
+
+	var dataLines []string
+	for _, line := range strings.Split(raw, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		dataLines = append(dataLines, line)
+	}
+	// Live mode: every provider event forwarded as its own data line, deltas
+	// intact, then [DONE]. Buffer mode would collapse this into ONE
+	// message-shaped block (choices[].message, no "delta").
+	if len(dataLines) != 4 || dataLines[3] != "data: [DONE]" {
+		t.Fatalf("expected 3 live delta events + [DONE], got %d lines: %q", len(dataLines), raw)
+	}
+	var chunk struct {
+		Object  string `json:"object"`
+		Choices []struct {
+			Delta json.RawMessage `json:"delta"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(dataLines[0], "data: ")), &chunk); err != nil {
+		t.Fatalf("first event is not a chunk: %v (%q)", err, dataLines[0])
+	}
+	if chunk.Object != "chat.completion.chunk" || len(chunk.Choices) != 1 || len(chunk.Choices[0].Delta) == 0 {
+		t.Fatalf("first event shape wrong (want delta chunk): %+v", chunk)
+	}
+	if !strings.Contains(raw, `"finish_reason":"tool_calls"`) {
+		t.Errorf("client stream missing delta finish event: %q", raw)
+	}
+
+	// The request side still ran (that is the point of the plugin).
+	seen := provider.requests()
+	if len(seen) != 1 {
+		t.Fatalf("provider saw %d requests, want 1", len(seen))
+	}
+	assertBodyContains(t, "provider request", string(seen[0].Body), []string{"oneOf"}, true)
+
+	req := waitForRequest(t, st, "sess-sanitize-stream", 5*time.Second)
+	if len(req.PluginsApplied) != 1 || req.PluginsApplied[0] != "sanitize_tools" {
+		t.Errorf("plugins_applied = %v, want [sanitize_tools]", req.PluginsApplied)
+	}
+	if len(req.RequestFilteredJSON) == 0 {
+		t.Error("request_filtered_json empty, want the sanitized body")
+	}
+	// No response plugin ran → response_filtered_json stays NULL and the live
+	// stream was never buffered.
+	if len(req.ResponseFilteredJSON) != 0 {
+		t.Errorf("response_filtered_json = %q, want empty (request-only plugin)", req.ResponseFilteredJSON)
+	}
+	if req.Truncated {
+		t.Error("truncated = true, want false")
+	}
+}

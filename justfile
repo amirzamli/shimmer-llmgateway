@@ -98,7 +98,21 @@ run:
     set -a
     source .env
     set +a
-    go run ./cmd/gateway -config {{config}} 
+    go run ./cmd/gateway -config {{config}}
+
+# per-worktree isolated test gateway: random free 127.0.0.1 port, isolated
+# .run-test/<branch>/ store + generated config, mock provider, seeded dummy
+# conversations on first run. UI at the printed URL; Ctrl-C stops it.
+run-test *args:
+    bash scripts/run-test.sh {{args}}
+
+# re-send the dummy conversations (run-test gateway must be running)
+run-test-seed:
+    bash scripts/run-test.sh seed
+
+# remove this worktree's run-test state dir (.run-test/<branch>)
+run-test-clean:
+    bash scripts/run-test.sh clean 
 
 # run the MCP inspection server over stdio against the store
 mcp db='gateway.db':

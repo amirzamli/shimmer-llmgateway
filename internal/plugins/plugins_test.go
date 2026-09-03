@@ -111,6 +111,28 @@ func TestRegistryKnownIncludesRedact(t *testing.T) {
 	}
 }
 
+func TestIsRequestOnly(t *testing.T) {
+	// sanitize_tools repairs client tool schemas, which only exist on the
+	// request side; redact filters both sides; spanPlugin declares nothing.
+	sanitize, err := Build("sanitize_tools", Options{})
+	if err != nil {
+		t.Fatalf("Build(sanitize_tools): %v", err)
+	}
+	if !IsRequestOnly(sanitize) {
+		t.Error("sanitize_tools should be request-only")
+	}
+	redact, err := Build("redact", Options{})
+	if err != nil {
+		t.Fatalf("Build(redact): %v", err)
+	}
+	if IsRequestOnly(redact) {
+		t.Error("redact should not be request-only (it filters both sides)")
+	}
+	if IsRequestOnly(&spanPlugin{name: "x"}) {
+		t.Error("a plugin without the RequestOnly capability should not be request-only")
+	}
+}
+
 // TestInfosCoversEveryPlugin pins the UI-facing metadata contract: one Info
 // per known plugin, each with a description and a source, and the redact info
 // documenting both config fields with the default patterns attached.

@@ -86,9 +86,15 @@ func (s *sanitizeTools) FilterRequest(ctx context.Context, req *Request) error {
 	return nil
 }
 
+// RequestOnly declares sanitize_tools a request-side plugin (it repairs client
+// tool schemas, which only appear in requests). Listing it in a plugin list
+// therefore never populates the response chain, so it cannot switch streaming
+// into buffer mode — the response side would be a no-op anyway.
+func (s *sanitizeTools) RequestOnly() bool { return true }
+
 // FilterResponse is a no-op: provider responses never carry client tool
-// schemas. The response side exists to satisfy the §4.5 plugin seam (and so
-// the plugin is valid in either side of a plugins list).
+// schemas. The method exists to satisfy the §4.5 plugin seam; chain builders
+// skip this plugin on the response side entirely (see RequestOnly).
 func (s *sanitizeTools) FilterResponse(ctx context.Context, resp *Response) error {
 	return nil
 }

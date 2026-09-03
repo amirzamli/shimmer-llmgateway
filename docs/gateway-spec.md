@@ -284,7 +284,10 @@ model), cached back into `tool_calls.verdict`.
 ## 6. HTML UI (v1, embedded in the gateway)
 
 One static page (`embed.FS`, no JS framework, no build step) driven by a
-small REST API. **Read-only for traces; writes only for config.**
+small REST API. **Read-only for traces; writes only for config.** A
+`web/index.html` in the gateway's working directory shadows the embedded copy
+(served fresh per request, so UI edits need no rebuild or restart); installs
+without the file serve the embedded asset.
 
 ### 6.1 Views
 

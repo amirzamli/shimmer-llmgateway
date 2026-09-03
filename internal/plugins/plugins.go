@@ -23,6 +23,24 @@ type Plugin interface {
 	FilterResponse(ctx context.Context, resp *Response) error // output side, post-reassembly
 }
 
+// RequestOnly is an optional capability a Plugin implements to declare that it
+// transforms the request side only. A request-only plugin named in a plugin
+// list (per-instance or global defaults) must never populate the response
+// chain: any response-side presence switches streaming into buffer mode, which
+// changes the client-visible SSE shape (one message-shaped block instead of
+// live delta chunks) — real latency and a wire-format break for a plugin whose
+// FilterResponse is a no-op. Chain builders consult IsRequestOnly before
+// AddResponse.
+type RequestOnly interface {
+	RequestOnly() bool
+}
+
+// IsRequestOnly reports whether p declares itself request-only.
+func IsRequestOnly(p Plugin) bool {
+	ro, ok := p.(RequestOnly)
+	return ok && ro.RequestOnly()
+}
+
 // Request is the gateway request payload as the plugin chain sees it: the
 // client JSON body. A plugin mutates req.Body to filter the request.
 type Request struct {

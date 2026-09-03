@@ -90,18 +90,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Startup retention purge; the daily loop handles subsequent purges. The
-	// gateway is built first so its §8 append-log trimmer is registered and
-	// the JSONL is purged in lockstep with the SQLite rows.
-	if n, err := st.Purge(context.Background()); err != nil {
-		logger.Warn("retention_purge_failed", map[string]any{"error": err.Error()})
-	} else if n > 0 {
-		logger.Info("retention_purged", map[string]any{"sessions": n})
-	}
-	// TRUNCATE the WAL before serving: the startup purge is the only writer so
-	// far, and no captures are in flight yet — this is the one moment the WAL
-	// is quiescent. The size limit set at store open keeps it bounded after
-	// that; this pass reclaims whatever an unclean kill left behind.
+	// TRUNCATE the WAL before serving: no captures are in flight yet — this is
+	// the one moment the WAL is quiescent. The size limit set at store open
+	// keeps it bounded after that; this pass reclaims whatever an unclean kill
+	// left behind.
 	if err := st.Checkpoint(context.Background()); err != nil {
 		logger.Warn("startup_checkpoint_failed", map[string]any{"error": err.Error()})
 	}
@@ -110,7 +102,18 @@ func main() {
 	// table update never rewrites historical costs. Runs before serving so the
 	// Usage view never shows a half-priced ledger.
 	gateway.BackfillCosts(context.Background(), st, logger)
-	st.StartRetentionLoop(ctx, 0)
+	// Retention runs entirely in the background: an immediate first pass
+	// expires whatever aged out while the gateway was down, then the loop
+	// purges daily. Serving never waits for a purge, and shutdown performs
+	// none — the store close checkpoints the WAL, purge state lives in the
+	// store, and the next start's first pass catches up.
+	st.StartRetentionLoop(ctx, 0, func(n int, err error) {
+		if err != nil {
+			logger.Warn("retention_purge_failed", map[string]any{"error": err.Error()})
+		} else if n > 0 {
+			logger.Info("retention_purged", map[string]any{"sessions": n})
+		}
+	})
 
 	logger.Info("startup", map[string]any{
 		"listen":         addrs,

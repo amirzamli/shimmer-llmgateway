@@ -1079,6 +1079,35 @@ func TestUIAndAPIUnderGateway(t *testing.T) {
 	}
 }
 
+// TestUIServedFromDiskWhenPresent verifies a web/index.html in the working
+// directory shadows the embedded UI: UI edits are visible after a browser
+// refresh with no rebuild and no gateway restart.
+func TestUIServedFromDiskWhenPresent(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "web"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "web", "index.html"), []byte("<html><body>disk UI sentinel</body></html>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	provider := newFakeProvider(t, nil)
+	gs, _ := newGatewayTest(t, provider, twoInstanceTOML, defaultEnv)
+
+	uresp, err := http.Get(gs.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ubody := drainClose(t, uresp)
+	if uresp.StatusCode != http.StatusOK {
+		t.Fatalf("GET / status = %d, want 200", uresp.StatusCode)
+	}
+	if !strings.Contains(string(ubody), "disk UI sentinel") {
+		t.Errorf("GET / served the embedded UI instead of the disk file: %q", snippet(string(ubody), 200))
+	}
+}
+
 func TestSessionIDNormalizationEchoedAndPersisted(t *testing.T) {
 	provider := newFakeProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

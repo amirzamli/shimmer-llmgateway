@@ -16,6 +16,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -231,16 +232,28 @@ func (s *Server) accessLog(next http.Handler) http.Handler {
 	})
 }
 
+// uiDiskPath is checked before the embedded asset: a web/index.html in the
+// working directory shadows the copy embedded at build time, so UI edits show
+// up on browser refresh without rebuilding or restarting the gateway.
+const uiDiskPath = "web/index.html"
+
 // indexHTML caches the embedded single-page UI; it is read from embed.FS once
-// (first request) instead of on every request. indexHTML is nil only when the
-// embedded asset is missing.
+// (first fallback request) instead of on every request. indexHTML is nil only
+// when the embedded asset is missing.
 var (
 	indexHTMLOnce sync.Once
 	indexHTML     []byte
 )
 
-// handleUI serves the embedded single-page HTML UI (§6.1).
+// handleUI serves the single-page HTML UI (§6.1): web/index.html from the
+// working directory when present (re-read per request, so edits are visible
+// after a browser refresh), otherwise the copy embedded at build time.
 func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
+	if data, err := os.ReadFile(uiDiskPath); err == nil {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(data)
+		return
+	}
 	indexHTMLOnce.Do(func() {
 		data, err := web.FS.ReadFile("index.html")
 		if err != nil {
@@ -622,7 +635,9 @@ func (s *Server) buildUpstream(ctx context.Context, cfg *config.Config, rt *rout
 // defaults apply; each name is built from the built-in registry with its
 // [plugins.<name>] config. There is no template-default runtime fallback.
 // Names are validated at config load; Build still defends against an unknown
-// name defensively.
+// name defensively. Request-only plugins are skipped on the response side so
+// they never switch streaming into buffer mode (their FilterResponse is a
+// no-op; see plugins.RequestOnly).
 func (s *Server) buildChain(cfg *config.Config, inst *config.Instance) (*plugins.Chain, error) {
 	reqNames, respNames := inst.EffectivePlugins(cfg)
 	chain := plugins.NewChain()
@@ -637,6 +652,9 @@ func (s *Server) buildChain(cfg *config.Config, inst *config.Instance) (*plugins
 		p, err := plugins.Build(name, plugins.Options{Config: cfg.PluginConfig(name)})
 		if err != nil {
 			return nil, err
+		}
+		if plugins.IsRequestOnly(p) {
+			continue
 		}
 		chain.AddResponse(p)
 	}

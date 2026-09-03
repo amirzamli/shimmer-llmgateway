@@ -4,6 +4,9 @@ bin/
 # Runtime data: SQLite store + sidecars (WAL/SHM, capture JSONL, secrets store)
 gateway.db*
 
+# run-test state (scripts/run-test.sh): ports, generated config, test store
+.run-test/
+
 # Downloaded model pricing data (not committed)
 internal/pricing/models.json
 
