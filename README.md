@@ -4,8 +4,9 @@ A capture-only LLM gateway (Go, single static binary) that sits between any
 agent / MCP client and an LLM provider, plus inspection surfaces for the
 captured traffic:
 
-- **Gateway** — OpenAI-compatible proxy (`/v1/chat/completions`, stream +
-  non-stream) that records every request/response full-fidelity into SQLite
+- **Gateway** — OpenAI-compatible proxy (`/v1/chat/completions`, plus a
+  stateless `/v1/responses` shim for Codex; stream + non-stream) that records
+  every request/response full-fidelity into SQLite
   (original *and* filtered payloads, tool calls, errors, usage).
 - **HTML UI** — embedded in the gateway binary; manage providers/instances,
   browse sessions, export JSONL.
@@ -65,7 +66,9 @@ listener per configured `listen_addrs` entry:
 | `GET /` | embedded HTML UI |
 | `GET/POST/PATCH/DELETE /api/*` | UI REST surface (config mutations hot-reload) |
 | `GET /v1/models` | models across all configured instances |
-| `POST /v1/chat/completions` | the only capture surface (stream + non-stream) |
+| `POST /v1/chat/completions` | capture surface, Chat Completions shape (stream + non-stream) |
+| `POST /v1/responses` | capture surface, OpenAI Responses shape (stream + non-stream; stateless shim over the chat pipeline, see [Codex CLI](#codex-cli-responses-api)) |
+| `GET /v1/responses/{id}` | always 404 (stateless — responses are not stored) |
 
 > **Security & binding.** The gateway refuses to bind anything but loopback
 > (`127.0.0.0/8`, `::1`, `localhost`), CGNAT (`100.64.0.0/10` — the Tailscale
@@ -385,6 +388,47 @@ Add a custom provider and select a model in `opencode.json` (project or
   prefixed one (see [Model aliases](#model-aliases)).
 - opencode loads config at startup — **restart opencode** after editing.
 
+### Codex CLI (Responses API)
+
+Codex CLI speaks the OpenAI Responses API; the gateway serves
+`POST /v1/responses` as a stateless shim over the same chat pipeline (any
+openai- or anthropic-style instance works — requests are translated upstream,
+replies are translated back). Point it at the gateway in `~/.codex/config.toml`:
+
+```toml
+model_provider = "shimmer"
+model = "openai/gpt-4o"
+
+[model_providers.shimmer]
+name = "Shimmer Gateway"
+base_url = "http://127.0.0.1:8787/v1"
+wire_api = "responses"
+```
+
+Streamed turns emit the typed Responses SSE events (`response.created`,
+per-item `response.output_item.*` deltas, `response.completed` with usage);
+upstream reasoning/thinking deltas surface as a `reasoning` output item.
+
+Limitations (stateless by design):
+
+- `previous_response_id` is rejected with a 400; `GET /v1/responses/{id}`
+  always returns 404; `store`, `include`, `metadata`, and `reasoning.summary`
+  are accepted and ignored.
+- Only function tools are forwarded upstream; other tool types (`namespace`,
+  `local_shell`, …) are skipped with a `responses_unsupported_tool_skipped`
+  warn log (Codex CLI sends newer tool groupings alongside function tools).
+- Instances with the `retry_empty` plugin reject this surface with a 400.
+- Input `reasoning` items are dropped (they carry nothing chat upstreams
+  accept); reasoning is surfaced from upstream deltas on output only.
+- Capture stores the as-received Responses request and the chat-normalized
+  response, so tool-result verdict backfilling is inert on this surface.
+  Sessions group by `prompt_cache_key` when the client sends no
+  `X-Session-Id` (Codex's stable per-conversation key); an explicit
+  `X-Session-Id` header always wins.
+- Streaming translates per delta; when response plugins are configured for
+  the instance, the whole event sequence is emitted as one burst after the
+  plugins run.
+
 ### Other OpenAI-compatible clients (LibreChat, custom scripts, …)
 
 Set `base_url` to `http://127.0.0.1:8787/v1` and request any configured
@@ -510,7 +554,9 @@ tools are live (`/mcp` or the tools list) and try `list_sessions`.
 
 ## Notes
 
-- Only `/v1/chat/completions` is proxied; any other `/v1/*` path returns 404.
+- `/v1/chat/completions` and `/v1/responses` are proxied; any other `/v1/*`
+  path returns 404 (including `GET /v1/responses/{id}` — the Responses shim is
+  stateless, see [Codex CLI](#codex-cli-responses-api) for its other limits).
 - Streaming is forwarded line-by-line (never fully buffered) unless a control
   plugin such as `retry_empty` is active, in which case the stream is
   held/buffered until the attempt completes; on client disconnect the captured

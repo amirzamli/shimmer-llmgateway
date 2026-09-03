@@ -150,6 +150,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
+	// Responses API shim (ahead of the /v1/ catch-all): stateless-only,
+	// translated to chat and run through the shared pipeline. Retrieval is
+	// always a 404 — the gateway stores captures, not Responses state.
+	mux.HandleFunc("POST /v1/responses", s.handleResponses)
+	mux.HandleFunc("GET /v1/responses/{id}", s.handleResponsesGet)
 	mux.HandleFunc("/v1/", func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	})
@@ -332,6 +337,30 @@ type route struct {
 	reasoning string
 }
 
+// clientSurface is the per-request seam between the shared completion
+// pipeline and the client-facing API surface a request arrived on. The chat
+// surface uses identity (byte-for-byte unchanged behavior); the Responses
+// surface records its own endpoint and as-received request bytes for capture,
+// and converts 2xx chat bodies to Responses objects for the client only —
+// capture keeps the chat-normalized shapes.
+type clientSurface struct {
+	// endpoint is the capture record's endpoint value.
+	endpoint string
+	// requestJSON is the as-received client body recorded as request_json.
+	requestJSON []byte
+	// shapeClient converts a 2xx chat completion body (post response
+	// plugins, which always see the chat shape) into the body returned to
+	// the client. Error bodies are never shaped.
+	shapeClient func([]byte) []byte
+	// newEmitter builds the SSE emit path for a streaming request. nil on
+	// the chat surface: s.emitterFactory is used unchanged. The Responses
+	// surface binds a typed-event translator to the request's resp_ id.
+	newEmitter func(w http.ResponseWriter, source EmitterSource, filter EmitterFilter) Emitter
+}
+
+// identityBody returns b unchanged — the chat surface's client shaper.
+func identityBody(b []byte) []byte { return b }
+
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	// One atomic config snapshot per request: Resolve, the template lookup,
@@ -385,10 +414,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	streaming := parsed.Stream != nil && *parsed.Stream
 	if streaming {
-		s.handleStream(w, r, cfg, rt, body, sessionID, requestID, start)
+		s.handleStream(w, r, cfg, rt, body, sessionID, requestID, start, clientSurface{
+			endpoint:    endpoint,
+			requestJSON: body,
+		})
 		return
 	}
-	s.handleNonStream(w, r, cfg, rt, body, sessionID, requestID, start)
+	s.handleNonStream(w, r, cfg, rt, body, sessionID, requestID, start, clientSurface{
+		endpoint:    endpoint,
+		requestJSON: body,
+		shapeClient: identityBody,
+	})
 }
 
 // writeResolveError maps routing failures to the §4.2 error convention:
@@ -401,6 +437,126 @@ func (s *Server) writeResolveError(w http.ResponseWriter, err error) {
 		return
 	}
 	s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+}
+
+// handleResponses serves POST /v1/responses: the stateless OpenAI Responses
+// shim over the shared chat pipeline. Guards run before any upstream work
+// (stateless contract, retry_empty); unknown tool types are skipped with a
+// warn log (Codex CLI sends newer tool groupings alongside function tools).
+// The validated request is translated to a Chat Completions body and
+// dispatched into the existing stream/non-stream branches. Capture records
+// endpoint = "/v1/responses" with the as-received Responses bytes and the
+// chat-normalized response; the client receives a Responses object or typed
+// SSE event sequence shaped by the surface seam.
+func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	// One atomic config snapshot per request (see handleChatCompletions).
+	cfg := s.cfg.Get()
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		s.writeResponsesError(w, http.StatusBadRequest, "invalid_request_error", "", "read body: "+err.Error())
+		return
+	}
+	req, err := parseResponsesRequest(body)
+	if err != nil {
+		s.writeResponsesError(w, http.StatusBadRequest, "invalid_request_error", "", "invalid request body: "+err.Error())
+		return
+	}
+	if param, msg := validateResponsesRequest(req); param != "" {
+		s.writeResponsesError(w, http.StatusBadRequest, "invalid_request_error", param, msg)
+		return
+	}
+
+	inst, model, err := cfg.Resolve(req.Model)
+	if err != nil {
+		s.writeResponsesError(w, http.StatusBadRequest, "invalid_request_error", "model", err.Error())
+		return
+	}
+	if retryEmptyActive(cfg, inst) {
+		s.writeResponsesError(w, http.StatusBadRequest, "", "", "the retry_empty plugin is not supported on /v1/responses")
+		return
+	}
+
+	aliasKey := req.Model
+	if i := strings.IndexByte(req.Model, '/'); i >= 0 {
+		aliasKey = req.Model[i+1:]
+	}
+	tmpl := cfg.Templates[inst.Template]
+	rt := &route{
+		inst:      inst,
+		template:  tmpl,
+		model:     model,
+		alias:     inst.Alias,
+		provider:  tmpl.Name,
+		reasoning: inst.EffectiveReasoning(aliasKey),
+	}
+
+	// §4.3 session correlation, identical to the chat surface, with one
+	// Responses-specific extension: Codex CLI sends no X-Session-Id but does
+	// send a stable per-conversation prompt_cache_key in the body, so without
+	// grouping each turn captured as its own 1-request session. Resolution
+	// order: an explicit X-Session-Id header always wins; else the body's
+	// prompt_cache_key derives the session id, prefixed to avoid cross-surface
+	// collisions with chat-surface ids; else a fresh UUID per request (the
+	// unchanged no-header fallback). The derived id passes through the same
+	// normalization as a header id, so an unsafe or over-length key degrades
+	// to the fresh-UUID fallback rather than being persisted.
+	sessionID := r.Header.Get("X-Session-Id")
+	if sessionID == "" && req.PromptCacheKey != "" {
+		sessionID = "responses-" + req.PromptCacheKey
+	}
+	sessionID = store.NormalizeSessionID(sessionID)
+	w.Header().Set("X-Gateway-Session-Id", sessionID)
+
+	// Pre-generate the capture id (shared with the record) and the resp_ id
+	// once per request — both surfaces reuse it, and the stream path's
+	// response.created/response.completed events carry the same resp_ id.
+	requestID := store.NewID()
+	respID := "resp_" + store.NewID()
+
+	// Non-function tool types are skipped, not rejected: Codex CLI 0.153
+	// sends newer tool groupings (e.g. "namespace") alongside function tools,
+	// and a 400 aborted every turn. Log what was dropped once per request,
+	// mirroring the retry_empty warn pattern.
+	var skippedTools []string
+	for _, t := range req.Tools {
+		if t.Type != "" && t.Type != "function" {
+			skippedTools = append(skippedTools, t.Type)
+		}
+	}
+	if len(skippedTools) > 0 {
+		s.logger.Warn("responses_unsupported_tool_skipped", map[string]any{
+			"request_id": requestID,
+			"types":      skippedTools,
+		})
+	}
+
+	chatBody, err := translateResponsesToChat(req)
+	if err != nil {
+		s.writeResponsesError(w, http.StatusBadRequest, "invalid_request_error", "", err.Error())
+		return
+	}
+
+	if req.Stream != nil && *req.Stream {
+		s.handleStream(w, r, cfg, rt, chatBody, sessionID, requestID, start, clientSurface{
+			endpoint:    responsesEndpoint,
+			requestJSON: body,
+			newEmitter:  newResponsesStreamEmitter(respID, model),
+		})
+		return
+	}
+	s.handleNonStream(w, r, cfg, rt, chatBody, sessionID, requestID, start, clientSurface{
+		endpoint:    responsesEndpoint,
+		requestJSON: body,
+		shapeClient: func(b []byte) []byte { return chatCompletionToResponse(respID, b) },
+	})
+}
+
+// handleResponsesGet rejects response retrieval: the shim is stateless-only,
+// so no response id is ever retrievable.
+func (s *Server) handleResponsesGet(w http.ResponseWriter, r *http.Request) {
+	s.writeResponsesError(w, http.StatusNotFound, "invalid_request_error", "", "response retrieval is not supported: this gateway is stateless")
 }
 
 // buildUpstream builds the provider request: Authorization injected from the
@@ -570,13 +726,15 @@ func translateUpstreamBody(style string, status int, body []byte) []byte {
 
 // handleNonStream forwards the request, records the provider response, runs
 // the response plugins on the provider body, and passes the (filtered)
-// provider status/body through — error bodies included. When retry_empty is
-// active for the instance, a 2xx completion that is premature-empty (see
-// isEmptyCompletion) is re-issued upstream up to maxRetryAttempts; the client
-// and the capture observe only the final attempt, sharing requestID. Transport
-// errors and non-2xx responses are passed through exactly as before (never
-// retried).
-func (s *Server) handleNonStream(w http.ResponseWriter, r *http.Request, cfg *config.Config, rt *route, body []byte, sessionID, requestID string, start time.Time) {
+// provider status/body through — error bodies included. sf is the client
+// surface seam: capture records its endpoint and as-received request bytes,
+// and 2xx bodies are shaped for the client after the plugins ran. When
+// retry_empty is active for the instance, a 2xx completion that is
+// premature-empty (see isEmptyCompletion) is re-issued upstream up to
+// maxRetryAttempts; the client and the capture observe only the final
+// attempt, sharing requestID. Transport errors and non-2xx responses are
+// passed through exactly as before (never retried).
+func (s *Server) handleNonStream(w http.ResponseWriter, r *http.Request, cfg *config.Config, rt *route, body []byte, sessionID, requestID string, start time.Time, sf clientSurface) {
 	chain, err := s.buildChain(cfg, rt.inst)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "CONFIG_ERROR", err.Error())
@@ -603,14 +761,14 @@ func (s *Server) handleNonStream(w http.ResponseWriter, r *http.Request, cfg *co
 		sentBody = sb
 		rsp, err := s.client.Do(req)
 		if err != nil {
-			s.capture(upstreamErrorRecord(rt, body, requestFilteredBody(chain, sentBody), sessionID, requestID, start, err, chain.Applied()))
+			s.capture(upstreamErrorRecord(rt, sf.requestJSON, requestFilteredBody(chain, sentBody), sessionID, requestID, start, err, chain.Applied()))
 			s.writeError(w, http.StatusBadGateway, "UPSTREAM_ERROR", "upstream request failed: "+err.Error())
 			return
 		}
 		rb, readErr := io.ReadAll(rsp.Body)
 		rsp.Body.Close()
 		if readErr != nil {
-			s.capture(upstreamErrorRecord(rt, body, requestFilteredBody(chain, sentBody), sessionID, requestID, start, readErr, chain.Applied()))
+			s.capture(upstreamErrorRecord(rt, sf.requestJSON, requestFilteredBody(chain, sentBody), sessionID, requestID, start, readErr, chain.Applied()))
 			s.writeError(w, http.StatusBadGateway, "UPSTREAM_ERROR", "upstream read failed: "+readErr.Error())
 			return
 		}
@@ -639,10 +797,10 @@ func (s *Server) handleNonStream(w http.ResponseWriter, r *http.Request, cfg *co
 		Provider:        rt.provider,
 		ProviderBaseURL: rt.template.BaseURL,
 		Model:           rt.model,
-		Endpoint:        endpoint,
+		Endpoint:        sf.endpoint,
 		DurationMS:      durationMS(start),
 		StatusCode:      resp.StatusCode,
-		RequestJSON:     body,
+		RequestJSON:     sf.requestJSON,
 		PluginsApplied:  chain.Applied(),
 	}
 	rec.RequestFilteredJSON = requestFilteredBody(chain, sentBody)
@@ -664,6 +822,10 @@ func (s *Server) handleNonStream(w http.ResponseWriter, r *http.Request, cfg *co
 				clientBody = respDomain.Body
 			}
 		}
+		// Shape the client body last: the capture fields above keep the chat
+		// bytes, the surface decides what the client sees (identity on the
+		// chat surface).
+		clientBody = sf.shapeClient(clientBody)
 	}
 	s.passthrough(w, resp, clientBody)
 	s.capture(rec)
@@ -683,13 +845,15 @@ func requestFilteredBody(chain *plugins.Chain, sentBody []byte) []byte {
 // completion captured at request end. With response plugins configured the
 // path switches to buffer mode (resolved review decision #1): the stream is
 // reassembled, response plugins run post-reassembly, and the filtered result
-// is emitted as one SSE block. On client disconnect the upstream is canceled
-// and the partially reassembled data is persisted truncated. With retry_empty
-// active the path switches to held mode: each attempt is reassembled without
-// forwarding content, premature-empty attempts are re-issued upstream,
-// reasoning/thinking deltas are forwarded live so the client never waits in
-// silence, and the final attempt is emitted once as one SSE block.
-func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *config.Config, rt *route, body []byte, sessionID, requestID string, start time.Time) {
+// is emitted as one SSE block. sf is the client surface seam (capture endpoint
+// and as-received request bytes; a surface-specific emitter builder). On
+// client disconnect the upstream is canceled and the partially reassembled
+// data is persisted truncated. With retry_empty active the path switches to
+// held mode: each attempt is reassembled without forwarding content,
+// premature-empty attempts are re-issued upstream, reasoning/thinking deltas
+// are forwarded live so the client never waits in silence, and the final
+// attempt is emitted once as one SSE block.
+func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *config.Config, rt *route, body []byte, sessionID, requestID string, start time.Time, sf clientSurface) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
@@ -776,10 +940,10 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *confi
 			Provider:        rt.provider,
 			ProviderBaseURL: rt.template.BaseURL,
 			Model:           rt.model,
-			Endpoint:        endpoint,
+			Endpoint:        sf.endpoint,
 			DurationMS:      durationMS(start),
 			StatusCode:      resp.StatusCode,
-			RequestJSON:     body,
+			RequestJSON:     sf.requestJSON,
 			PluginsApplied:  chain.Applied(),
 			Error:           providerError(resp.StatusCode, respBody),
 		}
@@ -811,7 +975,14 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *confi
 			return resp.Body, nil
 		}
 	}
-	emitter := s.emitterFactory(w, source, filter)
+	// The surface seam swaps the emitter (the Responses surface translates
+	// chat chunks into typed events); the chat surface keeps the factory
+	// output unchanged.
+	newEmitter := s.emitterFactory
+	if sf.newEmitter != nil {
+		newEmitter = sf.newEmitter
+	}
+	emitter := newEmitter(w, source, filter)
 
 	var out streamOutcome
 	if rt.template.Style == config.StyleAnthropic {
@@ -819,7 +990,15 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *confi
 	} else {
 		out = readStream(ctx, resp, asm, emitter.Write)
 	}
-	_ = emitter.Done()
+	// Finalization (item .done + response.completed) runs after readStream
+	// returns, so asm.result() (finish_reason, usage) is complete — exactly
+	// like bufferedEmitter — except on a truncated stream: the disconnect
+	// behavior is inherited unchanged (capture truncated, never a fabricated
+	// completed turn). The chat surface's Done stays unconditional (live
+	// no-op; buffered partial block).
+	if sf.newEmitter == nil || !out.truncated {
+		_ = emitter.Done()
+	}
 
 	rec := &store.CaptureRecord{
 		ID:              requestID,
@@ -829,12 +1008,12 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *confi
 		Provider:        rt.provider,
 		ProviderBaseURL: rt.template.BaseURL,
 		Model:           rt.model,
-		Endpoint:        endpoint,
+		Endpoint:        sf.endpoint,
 		DurationMS:      durationMS(start),
 		StatusCode:      resp.StatusCode,
 		FinishReason:    out.finish,
 		Usage:           out.usage,
-		RequestJSON:     body,
+		RequestJSON:     sf.requestJSON,
 		ResponseJSON:    out.reassembled,
 		Truncated:       out.truncated,
 		PluginsApplied:  chain.Applied(),
@@ -846,6 +1025,10 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *confi
 		if be, ok := emitter.(*bufferedEmitter); ok {
 			// Byte-exact copy of what the client received.
 			rec.ResponseFilteredJSON = be.emittedBody()
+		} else if re, ok := emitter.(*responsesEmitter); ok && len(re.emittedBody()) > 0 {
+			// Byte-exact copy of the filtered CHAT body the Responses burst
+			// was built from (capture keeps chat shapes on this surface too).
+			rec.ResponseFilteredJSON = re.emittedBody()
 		} else {
 			// Custom emitter override: filter now for the record.
 			respDomain := &plugins.Response{Body: out.reassembled}
