@@ -2,12 +2,7 @@
 // exactly per spec, the Request/Response domain types (JSON payloads), a chain
 // runner that applies request plugins in config order before forward and
 // response plugins in config order after reassembly, and the built-in plugin
-// registry (redact in v1; external loading is explicitly out of scope per §2).
-//
-// The package also recognizes a small set of control plugins: names that are
-// valid config values and appear in Known(), but are not transforms. They are
-// never built into the chain; the proxy path reads them directly to flip
-// behavior (currently retry_empty).
+// registry (external loading is explicitly out of scope per §2).
 package plugins
 
 import (
@@ -131,23 +126,8 @@ func Register(name string, f Factory) {
 	registry[name] = f
 }
 
-// controlPlugins are recognized control-flow plugin names: they are valid
-// config values and are listed by Known(), but never build into the transform
-// chain — the proxy path reads them directly (retry_empty flips upstream
-// premature-empty retrying).
-var controlPlugins = map[string]bool{"retry_empty": true}
-
-// IsControl reports whether name is a recognized control plugin (a valid
-// non-transform plugin value).
-func IsControl(name string) bool { return controlPlugins[name] }
-
-// Build constructs a plugin by name, applying the optional config. Control
-// plugin names are rejected here — they are skipped earlier by the proxy's
-// chain builder — as a defensive backstop for any caller that forgets.
+// Build constructs a plugin by name, applying the optional config.
 func Build(name string, opts Options) (Plugin, error) {
-	if IsControl(name) {
-		return nil, fmt.Errorf("plugins: %q is a control plugin, not a transform", name)
-	}
 	f, ok := registry[name]
 	if !ok {
 		return nil, fmt.Errorf("plugins: unknown plugin %q; available plugins: %s", name, strings.Join(Known(), ", "))
@@ -155,14 +135,10 @@ func Build(name string, opts Options) (Plugin, error) {
 	return f(opts)
 }
 
-// Known returns every valid plugin name — registered transforms plus control
-// plugins — sorted.
+// Known returns every valid plugin name — the registered transforms — sorted.
 func Known() []string {
-	names := make([]string, 0, len(registry)+len(controlPlugins))
+	names := make([]string, 0, len(registry))
 	for n := range registry {
-		names = append(names, n)
-	}
-	for n := range controlPlugins {
 		names = append(names, n)
 	}
 	sort.Strings(names)
@@ -181,12 +157,12 @@ type ConfigField struct {
 }
 
 // Info describes a known plugin for the API and the settings UI: what it does,
-// whether it is a payload transform or a control plugin, where it comes from,
-// and (for transforms) which config keys its [plugins.<name>] table accepts.
+// where it comes from, and which config keys its [plugins.<name>] table
+// accepts.
 type Info struct {
 	Name         string        `json:"name"`
 	Description  string        `json:"description"`
-	Kind         string        `json:"kind"` // "transform" | "control"
+	Kind         string        `json:"kind"` // "transform"
 	Source       string        `json:"source"`
 	Configurable bool          `json:"configurable"`
 	ConfigFields []ConfigField `json:"config_fields,omitempty"`
@@ -200,17 +176,16 @@ var pluginInfo = map[string]Info{}
 // registerInfo records one plugin's metadata. It panics on an unregistered
 // name so docs and registry cannot fall out of sync.
 func registerInfo(i Info) {
-	if _, ok := registry[i.Name]; !ok && !controlPlugins[i.Name] {
+	if _, ok := registry[i.Name]; !ok {
 		panic(fmt.Sprintf("plugins: registerInfo for unknown plugin %q", i.Name))
 	}
 	pluginInfo[i.Name] = i
 }
 
-// Infos returns metadata for every known plugin (transforms and control
-// plugins), sorted by name. Unregistered names still appear with a generic
-// entry so the list is always complete.
+// Infos returns metadata for every known plugin, sorted by name. Unregistered
+// names still appear with a generic entry so the list is always complete.
 func Infos() []Info {
-	out := make([]Info, 0, len(registry)+len(controlPlugins))
+	out := make([]Info, 0, len(registry))
 	for _, n := range Known() {
 		if i, ok := pluginInfo[n]; ok {
 			out = append(out, i)
@@ -219,13 +194,4 @@ func Infos() []Info {
 		out = append(out, Info{Name: n, Kind: "transform", Source: "built-in"})
 	}
 	return out
-}
-
-func init() {
-	registerInfo(Info{
-		Name:        "retry_empty",
-		Kind:        "control",
-		Source:      "built-in",
-		Description: "Control plugin — never transforms payloads. When a provider answers 200 with an empty completion (no content and no tool calls), the request is silently re-issued upstream (bounded retries) instead of returning an empty reply to the client. Valid in a plugins list on either side; read directly by the proxy path.",
-	})
 }

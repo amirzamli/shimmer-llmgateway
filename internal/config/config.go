@@ -97,8 +97,7 @@ type Template struct {
 	// list into the instance's plugins line so the config file records the
 	// default explicitly. It is never consulted at runtime — an instance with
 	// an absent plugins list resolves from settings alone (empty by default =
-	// no plugins). The built-in opencode_go template seeds
-	// ["retry_empty"] so that default-on is visible in the file.
+	// no plugins). No built-in template seeds a default; custom templates may.
 	DefaultPlugins []string `toml:"plugins,omitempty"`
 	// ModelReasoningOptions advertises the valid reasoning effort levels per
 	// model of this template (e.g. "deepseek-v4-pro": ["high", "max"]). It is
@@ -581,12 +580,18 @@ func builtinTemplates() map[string]Template {
 		},
 		// zai: the catalog marks OpenAI-compat status "unknown" but documents
 		// /chat/completions + Bearer auth + /models on this base, so it fits
-		// the gateway's OpenAI-compatible forward path.
+		// the gateway's OpenAI-compatible forward path. Official docs
+		// recommend reasoning_effort max for GLM-5.3(-Flash) and state
+		// GLM-5.3-flash text parameters match GLM-5.3.
 		"zai": {
 			BaseURL:   "https://api.z.ai/api/paas/v4",
 			APIKeyEnv: "ZAI_API_KEY",
-			Models:    []string{"glm-4.6", "glm-4.5"},
-			Docs:      "https://docs.z.ai/api-reference/introduction",
+			Models:    []string{"glm-4.6", "glm-4.5", "glm-4.7", "glm-5.3", "glm-5.3-flash"},
+			ModelReasoningOptions: map[string][]string{
+				"glm-5.3":       {"low", "high", "max"},
+				"glm-5.3-flash": {"low", "high", "max"},
+			},
+			Docs: "https://docs.z.ai/api-reference/introduction",
 		},
 		"opencode_zen": {
 			BaseURL:   "https://opencode.ai/zen/v1",
@@ -595,11 +600,10 @@ func builtinTemplates() map[string]Template {
 			Docs:      "https://opencode.ai/docs/zen/",
 		},
 		"opencode_go": {
-			BaseURL:        "https://opencode.ai/zen/go/v1",
-			APIKeyEnv:      "OPENCODE_API_KEY",
-			Models:         []string{"kimi-k2", "deepseek-chat"},
-			DefaultPlugins: []string{"retry_empty"},
-			Docs:           "https://opencode.ai/docs/go/",
+			BaseURL:   "https://opencode.ai/zen/go/v1",
+			APIKeyEnv: "OPENCODE_API_KEY",
+			Models:    []string{"kimi-k2", "deepseek-chat"},
+			Docs:      "https://opencode.ai/docs/go/",
 		},
 		// commandcode: hybrid gateway (OpenAI-compatible /chat/completions and
 		// Anthropic-style /messages on one base); the catalog entry is
@@ -987,9 +991,9 @@ func (m *ConfigManager) Update(path string, c *Config) error {
 // user-defined templates are written back; built-ins are implicit and re-merged
 // on load. An instance whose plugins list is unset (nil) whose template
 // carries DefaultPlugins gets a copy of that seed materialized as its plugins
-// line, so template defaults (e.g. opencode_go's ["retry_empty"]) are recorded
-// explicitly in the file. An explicitly-set instance plugins list — including
-// an explicit empty `plugins = []` off-switch — is never overwritten.
+// line, so template defaults are recorded explicitly in the file. An
+// explicitly-set instance plugins list — including an explicit empty
+// `plugins = []` off-switch — is never overwritten.
 func (c *Config) toRaw() *rawConfig {
 	retention := c.RetentionDays
 	raw := &rawConfig{

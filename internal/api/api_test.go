@@ -554,9 +554,9 @@ func TestPluginsListAndPatch(t *testing.T) {
 	}
 
 	// Control plugins take no settings; unknown names 404.
-	status, _ = doJSON(t, gs, "PATCH", "/api/plugins/retry_empty", `{"config":{"x":1}}`)
-	if status != http.StatusBadRequest {
-		t.Errorf("retry_empty config status = %d, want 400", status)
+	status, _ = doJSON(t, gs, "PATCH", "/api/plugins/nope", `{"config":{"x":1}}`)
+	if status != http.StatusNotFound {
+		t.Errorf("unknown plugin config status = %d, want 404", status)
 	}
 	status, _ = doJSON(t, gs, "PATCH", "/api/plugins/nope", `{"enabled":true}`)
 	if status != http.StatusNotFound {
@@ -1284,6 +1284,122 @@ func TestInstancePatchModelAliasesPersists(t *testing.T) {
 	}
 	if _, ok := inst["model_aliases"]; ok {
 		t.Errorf("model_aliases should be absent after clearing, got %v", inst["model_aliases"])
+	}
+}
+
+func TestInstancePatchPluginsPersists(t *testing.T) {
+	gs, _, _, cfgPath := newAPITest(t, apiTestTOML, testMasterKey)
+
+	// Enable sanitize_tools on the instance: the response reflects it and the
+	// config file records the plugins list.
+	status, inst := doJSON(t, gs, "PATCH", "/api/instances/openai", `{"plugins":["sanitize_tools"]}`)
+	if status != http.StatusOK {
+		t.Fatalf("PATCH plugins status = %d, body %v", status, inst)
+	}
+	plugins, ok := inst["plugins"].([]any)
+	if !ok || len(plugins) != 1 || plugins[0] != "sanitize_tools" {
+		t.Errorf("response plugins = %v, want [sanitize_tools]", inst["plugins"])
+	}
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload persisted config: %v", err)
+	}
+	if reloaded.Instances[0].Plugins == nil || len(*reloaded.Instances[0].Plugins) != 1 || (*reloaded.Instances[0].Plugins)[0] != "sanitize_tools" {
+		t.Errorf("persisted plugins = %v, want [sanitize_tools]", reloaded.Instances[0].Plugins)
+	}
+
+	// Replace with an empty list: the durable off-switch survives reload.
+	status, inst = doJSON(t, gs, "PATCH", "/api/instances/openai", `{"plugins":[]}`)
+	if status != http.StatusOK {
+		t.Fatalf("PATCH empty plugins status = %d, body %v", status, inst)
+	}
+	if got, ok := inst["plugins"].([]any); !ok || len(got) != 0 {
+		t.Errorf("response plugins = %v, want []", inst["plugins"])
+	}
+	reloaded, err = config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload persisted config: %v", err)
+	}
+	if reloaded.Instances[0].Plugins == nil || len(*reloaded.Instances[0].Plugins) != 0 {
+		t.Errorf("persisted plugins = %v, want empty non-nil list", reloaded.Instances[0].Plugins)
+	}
+
+	// Absent plugins in a later PATCH leaves the list untouched.
+	status, _ = doJSON(t, gs, "PATCH", "/api/instances/openai", `{"priority":9}`)
+	if status != http.StatusOK {
+		t.Fatalf("PATCH priority status = %d", status)
+	}
+	reloaded, err = config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload persisted config: %v", err)
+	}
+	if reloaded.Instances[0].Plugins == nil || len(*reloaded.Instances[0].Plugins) != 0 {
+		t.Errorf("plugins changed by an unrelated PATCH: %v", reloaded.Instances[0].Plugins)
+	}
+}
+
+func TestInstancePatchPluginsInherit(t *testing.T) {
+	gs, _, _, cfgPath := newAPITest(t, apiTestTOML, testMasterKey)
+
+	// An explicit per-instance override can be reset back to inheriting the
+	// global settings defaults: plugins_inherit clears the override (nil).
+	status, inst := doJSON(t, gs, "PATCH", "/api/instances/openai", `{"plugins":["sanitize_tools"]}`)
+	if status != http.StatusOK {
+		t.Fatalf("PATCH plugins status = %d, body %v", status, inst)
+	}
+	if _, ok := inst["plugins"].([]any); !ok {
+		t.Errorf("response plugins = %v, want a non-null list", inst["plugins"])
+	}
+	status, inst = doJSON(t, gs, "PATCH", "/api/instances/openai", `{"plugins_inherit":true}`)
+	if status != http.StatusOK {
+		t.Fatalf("PATCH plugins_inherit status = %d, body %v", status, inst)
+	}
+	if got, exists := inst["plugins"]; got != nil || !exists {
+		t.Errorf("response plugins after inherit = %v (exists=%v), want null (inherit)", got, exists)
+	}
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload persisted config: %v", err)
+	}
+	if reloaded.Instances[0].Plugins != nil {
+		t.Errorf("persisted plugins after inherit = %v, want nil (inherit global)", reloaded.Instances[0].Plugins)
+	}
+
+	// plugins and plugins_inherit in one request is rejected.
+	status, _ = doJSON(t, gs, "PATCH", "/api/instances/openai", `{"plugins":["redact"],"plugins_inherit":true}`)
+	if status != http.StatusBadRequest {
+		t.Errorf("PATCH plugins+plugins_inherit status = %d, want 400", status)
+	}
+	// plugins_inherit: false is a no-op (an absent list stays absent).
+	status, _ = doJSON(t, gs, "PATCH", "/api/instances/openai", `{"plugins_inherit":false}`)
+	if status != http.StatusOK {
+		t.Errorf("PATCH plugins_inherit=false status = %d, want 200", status)
+	}
+	reloaded, err = config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload persisted config: %v", err)
+	}
+	if reloaded.Instances[0].Plugins != nil {
+		t.Errorf("plugins_inherit=false changed the list: %v", reloaded.Instances[0].Plugins)
+	}
+}
+
+func TestInstancePatchPluginsValidation(t *testing.T) {
+	gs, _, _, _ := newAPITest(t, apiTestTOML, testMasterKey)
+
+	status, out := doJSON(t, gs, "PATCH", "/api/instances/openai", `{"plugins":["no-such-plugin"]}`)
+	if status != http.StatusBadRequest {
+		t.Errorf("PATCH unknown plugin status = %d, want 400 (body %v)", status, out)
+	}
+	if out["code"] != "INVALID_ARGUMENT" {
+		t.Errorf("code = %v, want INVALID_ARGUMENT", out["code"])
+	}
+
+	// Rejected update left the instance unchanged (plugins absent or null =
+	// inherit, never a list).
+	_, list := doJSON(t, gs, "GET", "/api/instances", "")
+	if got, _ := list["instances"].([]any)[0].(map[string]any)["plugins"].([]any); len(got) != 0 {
+		t.Errorf("instance gained plugins from a rejected PATCH: %v", got)
 	}
 }
 

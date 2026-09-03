@@ -114,6 +114,17 @@
   .status-cols { display: flex; gap: 28px; flex-wrap: wrap; }
   .status-cols > table { flex: 1; min-width: 260px; }
   .plugin-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; background: rgba(255,255,255,0.015); }
+ .inst-plugins { border-top: 1px dashed var(--border); margin-top: 12px; padding-top: 10px; }
+ .inst-plugins-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+ .inst-plugins-list { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+ .plugin-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; white-space: nowrap; border: 1px solid var(--border); border-radius: 999px; padding: 2px 9px; background: rgba(255,255,255,0.03); }
+ .plugin-chip .chip-x { border: none; background: none; color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1; padding: 0; }
+ .plugin-chip .chip-x:hover { color: var(--err); }
+ .plugin-add-wrap { position: relative; display: inline-block; }
+ .plugin-menu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 20; min-width: 260px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 4px; box-shadow: 0 8px 24px rgba(0,0,0,.45); }
+ .plugin-menu button { display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left; background: none; border: none; color: var(--text); padding: 6px 8px; border-radius: 6px; }
+ .plugin-menu button:hover { background: rgba(255,255,255,.06); }
+ .plugin-menu button .muted { font-size: 11px; white-space: normal; }
   .plugin-head { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; }
   .plugin-head .plugin-info { flex: 1; min-width: 260px; }
   .plugin-desc { color: var(--text2); font-size: 12px; line-height: 1.55; margin-top: 4px; }
@@ -209,7 +220,10 @@ document.addEventListener("click", function (ev) {
     case "quota-refresh": refreshQuota(); break;
     case "aliases-add": addAliasRow(el.dataset.alias); break;
     case "aliases-remove": removeAliasRow(el); break;
-    case "aliases-save": saveAliases(el.dataset.alias); break;
+    case "instance-save": saveInstance(el.dataset.alias); break;
+    case "plugins-menu": togglePluginMenu(el); break;
+    case "plugins-pick": pickPlugin(el); break;
+    case "plugins-remove": removePluginChip(el); break;
     case "save-settings": saveSettings(); break;
     case "plugin-toggle": togglePlugin(el.dataset.name); break;
     case "plugin-save-config": savePluginConfig(el.dataset.name); break;
@@ -222,6 +236,14 @@ document.addEventListener("click", function (ev) {
     case "copy-master-key": copyMasterKey(); break;
     case "ack-master-key": ackMasterKey(); break;
   }
+});
+
+// Clicks outside an open "Add plugin" popup close it (the delegation handler
+// above has already handled the click when the target was inside).
+document.addEventListener("click", function (ev) {
+  document.querySelectorAll(".plugin-menu").forEach(m => {
+    if (!m.classList.contains("hidden") && !m.parentElement.contains(ev.target)) m.classList.add("hidden");
+  });
 });
 
 /* ---------- navigation ---------- */
@@ -242,8 +264,9 @@ async function loadView(v) {
 
 /* ---------- Providers ---------- */
 async function loadProviders() {
-  const [t, i, q] = await Promise.all([api("/api/templates"), api("/api/instances"), api("/api/quota")]);
+  const [t, i, q, p] = await Promise.all([api("/api/templates"), api("/api/instances"), api("/api/quota"), api("/api/plugins")]);
   templates = t.templates; instances = i.instances; quota = (q && q.quota) || [];
+  pluginsData = p;
   // Pre-fetch each instance's provider model list (server-cached for 5 min)
   // so the alias editor can offer them; fetchModels never throws.
   await Promise.all(instances.map(x => fetchModels(x.alias)));
@@ -354,12 +377,118 @@ function instanceBlockHtml(x) {
         <thead><tr><th>Alias name</th><th>Model</th><th>Reasoning</th><th></th></tr></thead>
         <tbody id="aliases-body-${esc(x.alias)}">${renderAliasRows(x)}</tbody>
       </table>
+      ${instancePluginsHtml(x)}
       <div class="row" style="margin-top:8px">
         <button class="ghost" data-action="aliases-add" data-alias="${esc(x.alias)}">Add alias</button>
-        <button data-action="aliases-save" data-alias="${esc(x.alias)}">Save</button>
+        <button data-action="instance-save" data-alias="${esc(x.alias)}" title="Saves the model aliases and the plugin list for this provider">Save</button>
       </div>
     </div>
   </details>`;
+}
+
+/* ---------- per-provider plugins (Providers view) ---------- */
+// effectivePluginNames returns the chain an instance actually runs: its own
+// plugins list when set (an instance list replaces the global chain entirely),
+// otherwise the global request/response defaults deduped in order.
+function effectivePluginNames(inst) {
+  if (inst.plugins != null) return inst.plugins || [];
+  const req = pluginsData.request_plugins || [];
+  const resp = pluginsData.response_plugins || [];
+  return req.concat(resp.filter(n => !req.includes(n)));
+}
+// instancePluginsHtml renders the provider's plugin chain as a list of chips
+// staged client-side — the list shows exactly what runs for this provider now,
+// and edits (removing a chip, adding via the "Add plugin" popup) stay
+// unsaved until the provider's Save button is pressed, exactly like the alias
+// rows above. While the provider follows the global defaults the list is that
+// effective set and saving a changed list writes an explicit override; a
+// "custom" list replaces the global chain entirely (empty = plugins off for
+// this provider).
+function instancePluginsHtml(x) {
+  const inherit = x.plugins == null;
+  const names = effectivePluginNames(x);
+  const chips = names.map(n => pluginChipHtml(x.alias, n)).join("")
+    || `<span class="muted none-placeholder" style="font-size:12px">none</span>`;
+  return `<div class="inst-plugins" id="inst-plugins-${esc(x.alias)}" data-alias="${esc(x.alias)}">
+    <div class="inst-plugins-head">
+      <span class="muted" style="font-size:12px">Plugins</span>
+      ${inherit
+        ? `<span class="badge disabled" title="Following the global enable/disable toggles (Settings → Plugins). Saving a changed list here overrides them for this provider only.">global defaults</span>`
+        : `<span class="badge warn" title="Custom list — replaces the global defaults for this provider entirely.">custom</span>`}
+    </div>
+    <div class="inst-plugins-list">${chips}</div>
+    <div class="row" style="margin-top:8px">
+      <div class="plugin-add-wrap">
+        <button data-action="plugins-menu" data-alias="${esc(x.alias)}">Add plugin</button>
+        <div class="plugin-menu hidden"></div>
+      </div>
+    </div>
+  </div>`;
+}
+// pluginChipHtml renders one staged plugin chip; the × only removes the chip
+// client-side (unsaved until Save, like the alias rows).
+function pluginChipHtml(alias, name) {
+  const info = (pluginsData.plugins || []).find(p => p.name === name);
+  return `<span class="plugin-chip" data-name="${esc(name)}" title="${esc((info && info.description) || name)}">${esc(name)}
+    <button class="chip-x" data-action="plugins-remove" title="Remove ${esc(name)} from this provider (applied when you press Save)" aria-label="Remove ${esc(name)}">×</button>
+  </span>`;
+}
+// stagedPluginNames reads the provider's staged plugin list back from the DOM
+// (the chips are the staging area, so no extra state to keep in sync).
+function stagedPluginNames(alias) {
+  const root = document.getElementById("inst-plugins-" + alias);
+  return root ? Array.from(root.querySelectorAll(".plugin-chip")).map(c => c.dataset.name) : [];
+}
+// pluginsPatchValue returns the explicit plugins list to include in a save
+// PATCH, or undefined when the staged list equals what the instance already
+// runs — so plain alias edits never silently convert an inheriting provider
+// into a custom list.
+function pluginsPatchValue(inst, staged) {
+  const current = effectivePluginNames(inst);
+  const same = staged.length === current.length && staged.every((n, i) => n === current[i]);
+  return same ? undefined : staged;
+}
+// pluginMenuItems builds the popup contents: one entry per known plugin not
+// yet staged as a chip (so a just-removed plugin can be re-added without a
+// reload), or a muted note when everything is already staged.
+function pluginMenuItems(alias, staged) {
+  const items = (pluginsData.plugins || []).filter(p => !staged.includes(p.name));
+  return items.length
+    ? items.map(p => `<button data-action="plugins-pick" data-alias="${esc(alias)}" data-name="${esc(p.name)}" title="${esc(p.description || "")}"><span>${esc(p.name)}</span><span class="muted">${esc(p.description || "")}</span></button>`).join("")
+    : `<div class="muted" style="padding:6px 8px">all plugins added</div>`;
+}
+// togglePluginMenu opens the "Add plugin" popup, rebuilding its items from the
+// plugins not currently staged as chips.
+function togglePluginMenu(el) {
+  const wrap = el.closest(".plugin-add-wrap");
+  const menu = wrap && wrap.querySelector(".plugin-menu");
+  if (!menu) return;
+  if (!menu.classList.contains("hidden")) { menu.classList.add("hidden"); return; }
+  menu.innerHTML = pluginMenuItems(el.dataset.alias, stagedPluginNames(el.dataset.alias));
+  menu.classList.remove("hidden");
+}
+// pickPlugin stages the chosen plugin as a chip (deduped) and closes the popup.
+function pickPlugin(el) {
+  const alias = el.dataset.alias;
+  const name = el.dataset.name;
+  const root = document.getElementById("inst-plugins-" + alias);
+  const list = root && root.querySelector(".inst-plugins-list");
+  if (!list || stagedPluginNames(alias).includes(name)) return;
+  const none = list.querySelector(".none-placeholder");
+  if (none) none.remove();
+  list.insertAdjacentHTML("beforeend", pluginChipHtml(alias, name));
+  const menu = el.closest(".plugin-menu");
+  if (menu) menu.classList.add("hidden");
+}
+// removePluginChip unstages a chip; removing the last one restores the "none"
+// placeholder (both unsaved until Save).
+function removePluginChip(el) {
+  const chip = el.closest(".plugin-chip");
+  const list = chip && chip.parentElement;
+  if (chip) chip.remove();
+  if (list && !list.querySelector(".plugin-chip") && !list.querySelector(".none-placeholder")) {
+    list.insertAdjacentHTML("beforeend", `<span class="muted none-placeholder" style="font-size:12px">none</span>`);
+  }
 }
 
 // renderInstances builds the merged Providers list: each instance is a
@@ -756,10 +885,12 @@ async function refreshModels(alias) {
     if (status) status.innerHTML = aliasesStatus(alias);
   } catch (e) { alert(e.message); }
 }
-// saveAliases PATCHes model_aliases and model_reasoning maps (replace semantics); rows
-// with an empty alias name are dropped, invalid names/empty models are
+// saveInstance is the single Save for a provider entry: it PATCHes the staged
+// model_aliases / model_reasoning maps (replace semantics; rows with an empty
+// alias name are dropped) together with the staged plugin list when it
+// differs from what the instance already runs. Invalid names/empty models are
 // rejected server-side and surfaced via the existing alert path.
-async function saveAliases(alias) {
+async function saveInstance(alias) {
   const map = {};
   const reasoningMap = {};
   const tbody = $("aliases-body-" + alias);
@@ -776,11 +907,17 @@ async function saveAliases(alias) {
       }
     }
   });
+  const body = { model_aliases: map, model_reasoning: reasoningMap };
+  const inst = instances.find(x => x.alias === alias);
+  if (inst) {
+    const plugins = pluginsPatchValue(inst, stagedPluginNames(alias));
+    if (plugins !== undefined) body.plugins = plugins;
+  }
   try {
     await api("/api/instances/" + encodeURIComponent(alias), {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model_aliases: map, model_reasoning: reasoningMap })
+      body: JSON.stringify(body)
     });
     await loadProviders();
   } catch (e) { alert(e.message); }
@@ -926,9 +1063,7 @@ function pluginScope(name, enabled) {
 function pluginCard(info) {
   const enabled = pluginEnabled(info.name);
   const cfg = (pluginsData.plugin_config || {})[info.name] || null;
-  const kindBadge = info.kind === "control"
-    ? `<span class="badge warn" title="Control plugin — does not transform payloads, it flips gateway behavior">control</span>`
-    : `<span class="badge ok" title="Transform plugin — rewrites request/response payloads">transform</span>`;
+  const kindBadge = `<span class="badge ok" title="Transform plugin — rewrites request/response payloads">transform</span>`;
   let cfgLine = "";
   if (info.configurable) {
     cfgLine = cfg
@@ -985,8 +1120,9 @@ function renderPlugins() {
     <h2>Plugins</h2>
     <div style="font-size:12px;color:var(--text2);line-height:1.55;margin-bottom:12px">
       Plugins are small transforms the gateway applies to requests before they reach the provider, and to responses after the provider stream is reassembled.
-      The toggle on each plugin is the <b>global default</b>: every instance without its own plugins list follows it. An instance can override with a
-      <code>plugins = [...]</code> list in gateway.toml, which replaces the global chain for that instance. The store always keeps both the original and the
+      The toggle on each plugin is the <b>global default</b>: every instance set to "inherit" follows it. To turn plugins on or off for one provider only,
+      expand that provider in the <b>Providers</b> view and edit its <b>Plugins</b> row — an explicit list there replaces the global chain for that instance.
+      The store always keeps both the original and the
       filtered payloads plus which plugins ran (<code>plugins_applied</code>), so every effect is auditable in Traces.
     </div>
     ${infos.map(pluginCard).join("")}

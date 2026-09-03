@@ -412,7 +412,7 @@ func TestAnthropicStreamTranslation(t *testing.T) {
 
 func TestAnthropicStreamEmptyAndError(t *testing.T) {
 	// A stream with only thinking (no text, no tool_use) reassembles to an
-	// empty completion — what isEmptyCompletion flags for retry_empty.
+	// empty completion: content "" and no tool calls.
 	st := &anthropicStreamState{blockToolIndex: map[int]int{}}
 	asm := newAssembler()
 	for _, e := range []string{
@@ -428,7 +428,19 @@ func TestAnthropicStreamEmptyAndError(t *testing.T) {
 		}
 	}
 	reassembled, finish, _ := asm.result()
-	if !isEmptyCompletion(reassembled) {
+	var comp struct {
+		Choices []struct {
+			Message struct {
+				Content   string            `json:"content"`
+				ToolCalls []json.RawMessage `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(reassembled, &comp); err != nil {
+		t.Fatalf("reassembly is not JSON: %v (%s)", err, reassembled)
+	}
+	empty := len(comp.Choices) == 0 || (comp.Choices[0].Message.Content == "" && len(comp.Choices[0].Message.ToolCalls) == 0)
+	if !empty {
 		t.Errorf("thinking-only reassembly should be empty: %s", reassembled)
 	}
 	if finish != "stop" {

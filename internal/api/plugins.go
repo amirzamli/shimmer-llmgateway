@@ -74,10 +74,6 @@ func (a *API) handlePluginPatch(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "invalid body: "+err.Error())
 		return
 	}
-	if req.Config != nil && plugins.IsControl(name) {
-		a.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "plugin "+name+" is a control plugin and takes no settings")
-		return
-	}
 	if req.Config != nil {
 		// Validate the config by building the plugin before anything is
 		// persisted (e.g. redact compiles its patterns at build time).

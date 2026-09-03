@@ -21,10 +21,12 @@ type instanceView struct {
 	Style string `json:"style"`
 	// BaseURL is the template's endpoint (the resolved custom endpoint for
 	// custom providers), for display.
-	BaseURL        string            `json:"base_url"`
-	APIKeyEnv      string            `json:"api_key_env"`
-	Models         []string          `json:"models,omitempty"`
-	Plugins        *[]string         `json:"plugins,omitempty"`
+	BaseURL   string   `json:"base_url"`
+	APIKeyEnv string   `json:"api_key_env"`
+	Models    []string `json:"models,omitempty"`
+	// Plugins is the per-instance override: nil marshals as explicit null
+	// (inherit the global defaults), non-nil as the explicit list.
+	Plugins        *[]string         `json:"plugins"`
 	ModelAliases   map[string]string `json:"model_aliases,omitempty"`
 	ModelReasoning map[string]string `json:"model_reasoning,omitempty"`
 	Disabled       bool              `json:"disabled"`
@@ -233,6 +235,15 @@ type instancePatchReq struct {
 	// map clears it); absent → unchanged. Validation runs via config.Validate
 	// in ConfigManager.Update (bad key or invalid effort level → 400 INVALID_ARGUMENT).
 	ModelReasoning *map[string]string `json:"model_reasoning"`
+	// Plugins replaces the whole per-instance plugins list when provided
+	// (an empty list is the durable off-switch); absent → unchanged. Names are
+	// validated by config.Validate in ConfigManager.Update (unknown name →
+	// 400 INVALID_ARGUMENT).
+	Plugins *[]string `json:"plugins"`
+	// PluginsInherit resets the instance back to inheriting the global
+	// settings plugin defaults (clears the per-instance override); absent or
+	// false → unchanged. Mutually exclusive with plugins in one request.
+	PluginsInherit *bool `json:"plugins_inherit"`
 	// Key replaces the stored key when non-empty and clears it when present
 	// and empty (the UI sends "" to forget a stored key). Absent → unchanged.
 	Key *string `json:"key"`
@@ -252,6 +263,9 @@ func (a *API) handleInstancePatch(w http.ResponseWriter, r *http.Request) {
 		inst, ok := c.Instance(oldAlias)
 		if !ok {
 			return &apiError{status: http.StatusNotFound, code: "NOT_FOUND", message: fmt.Sprintf("instance %q not found", oldAlias)}
+		}
+		if req.Plugins != nil && req.PluginsInherit != nil && *req.PluginsInherit {
+			return badRequest("plugins and plugins_inherit are mutually exclusive")
 		}
 		if req.Alias != nil && *req.Alias != oldAlias {
 			alias := *req.Alias
@@ -281,6 +295,14 @@ func (a *API) handleInstancePatch(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.ModelReasoning != nil {
 			inst.ModelReasoning = *req.ModelReasoning
+		}
+		if req.Plugins != nil {
+			ps := make([]string, len(*req.Plugins))
+			copy(ps, *req.Plugins)
+			inst.Plugins = &ps
+		}
+		if req.PluginsInherit != nil && *req.PluginsInherit {
+			inst.Plugins = nil
 		}
 		return nil
 	})

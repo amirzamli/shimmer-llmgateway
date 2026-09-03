@@ -137,9 +137,7 @@ type streamOutcome struct {
 // on loop exit, NOT in the disconnect branches, so a client that closes right
 // after receiving [DONE] does not produce a false truncated:true outcome (the
 // request context can be canceled before the loop observes EOF). Context
-// cancellation (client disconnect) aborts the upstream read via the transport;
-// readStream never cancels the shared ctx itself, so a non-EOF upstream drop
-// leaves the ctx live for the retry_empty path to re-issue.
+// cancellation (client disconnect) aborts the upstream read via the transport.
 func readStream(ctx context.Context, resp *http.Response, asm *completionAssembler, forward func([]byte) error) streamOutcome {
 	lines := make(chan []byte, 64)
 	asmDone := make(chan struct{})

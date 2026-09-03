@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,25 @@ import (
 )
 
 // ---- helpers ----
+
+// lockedBuffer is a mutex-guarded strings.Builder for log sinks written from
+// request goroutines while a test reads them.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
 
 // postResponses issues a POST /v1/responses against the gateway test server.
 func postResponses(t *testing.T, gs *httptest.Server, body string, headers map[string]string) *http.Response {
@@ -853,27 +873,6 @@ func TestResponsesUnknownToolsSkippedEndToEnd(t *testing.T) {
 	}
 	if string(req.RequestJSON) != raw {
 		t.Errorf("request_json not the as-received Responses bytes:\n got %q\nwant %q", req.RequestJSON, raw)
-	}
-}
-
-func TestResponsesRetryEmptyInstanceRejected(t *testing.T) {
-	provider := newFakeProvider(t, nil)
-	gs, _ := newGatewayTest(t, provider, retryTOML, defaultEnv)
-
-	resp := postResponses(t, gs, `{"model":"gpt-4o","input":"hi"}`, nil)
-	body := drainClose(t, resp)
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", resp.StatusCode)
-	}
-	var e responsesErrorBody
-	if err := json.Unmarshal(body, &e); err != nil {
-		t.Fatalf("error body: %v (%s)", err, body)
-	}
-	if !strings.Contains(e.Error.Message, "retry_empty") {
-		t.Errorf("message = %q, want it to name retry_empty", e.Error.Message)
-	}
-	if n := len(provider.requests()); n != 0 {
-		t.Errorf("provider saw %d requests, want 0", n)
 	}
 }
 

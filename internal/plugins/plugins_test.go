@@ -105,20 +105,9 @@ func TestChainErrorWrapsPluginName(t *testing.T) {
 
 func TestRegistryKnownIncludesRedact(t *testing.T) {
 	known := Known()
-	want := []string{"redact", "retry_empty"}
+	want := []string{"redact", "sanitize_tools"}
 	if strings.Join(known, ",") != strings.Join(want, ",") {
 		t.Errorf("Known() = %v, want %v", known, want)
-	}
-}
-
-func TestIsControl(t *testing.T) {
-	if !IsControl("retry_empty") {
-		t.Error("IsControl(retry_empty) = false, want true")
-	}
-	for _, name := range []string{"redact", "nope", ""} {
-		if IsControl(name) {
-			t.Errorf("IsControl(%q) = true, want false", name)
-		}
 	}
 }
 
@@ -135,8 +124,8 @@ func TestInfosCoversEveryPlugin(t *testing.T) {
 		if i.Name == "" || i.Description == "" || i.Source == "" {
 			t.Errorf("incomplete Info: %+v", i)
 		}
-		if i.Kind != "transform" && i.Kind != "control" {
-			t.Errorf("Info %q: kind = %q, want transform or control", i.Name, i.Kind)
+		if i.Kind != "transform" {
+			t.Errorf("Info %q: kind = %q, want transform", i.Name, i.Kind)
 		}
 		byName[i.Name] = i
 	}
@@ -155,16 +144,6 @@ func TestInfosCoversEveryPlugin(t *testing.T) {
 	}
 	if patterns.Name == "" || len(patterns.Defaults) != len(defaultPatterns) {
 		t.Errorf("redact patterns field = %+v, want defaults mirroring defaultPatterns", patterns)
-	}
-}
-
-func TestBuildControlPluginRejected(t *testing.T) {
-	_, err := Build("retry_empty", Options{})
-	if err == nil {
-		t.Fatal("Build(retry_empty) returned no error")
-	}
-	if !strings.Contains(err.Error(), "control plugin") {
-		t.Errorf("error %q should identify the name as a control plugin", err)
 	}
 }
 

@@ -204,11 +204,18 @@ type Plugin interface {
 - **Ordering**: `request_plugins` run in config order before forward;
   `response_plugins` run in config order on the reassembled response.
 - **Scope**: per-instance `plugins` list overrides the global defaults
-  (empty list on an instance = no plugins for that account).
+  (empty list on an instance = no plugins for that account; absent = inherit
+  the global settings). The dashboard exposes this per provider: an
+  "inherit global defaults" switch plus a checkbox per plugin, persisted via
+  `PATCH /api/instances/{alias}` (`plugins` / `plugins_inherit`).
 - **Built-in v1**: `redact` — regex/field-list redaction of messages and tool
-  arguments, shipped as the reference implementation. Examples of future
-  plugins (v2): RAG context injection (input side), output truncation /
-  cost reduction (output side), guardrails.
+  arguments, shipped as the reference implementation; `sanitize_tools` —
+  request-side tool-schema repair that drops the redundant `oneOf`/`anyOf`
+  combinator from schema nodes that also declare an `enum` (the duplication is
+  valid JSON Schema but some OpenAI-compatible providers answer it with a
+  silent empty completion). Examples of future plugins (v2): RAG context
+  injection (input side), output truncation / cost reduction (output side),
+  guardrails.
 - **Capture interplay**: plugins never see the stored original payload; the
   store always has both sides so debugging shows exactly what the plugin
   changed.

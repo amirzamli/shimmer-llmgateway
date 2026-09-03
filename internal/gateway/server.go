@@ -408,8 +408,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	sessionID := store.NormalizeSessionID(r.Header.Get("X-Session-Id"))
 	w.Header().Set("X-Gateway-Session-Id", sessionID)
 
-	// Pre-generate the request id so retry_empty retry log lines and the final
-	// capture share one id (Capture falls back to generating one when empty).
+	// Pre-generate the request id so log lines and the final capture share one
+	// id (Capture falls back to generating one when empty).
 	requestID := store.NewID()
 
 	streaming := parsed.Stream != nil && *parsed.Stream
@@ -441,7 +441,7 @@ func (s *Server) writeResolveError(w http.ResponseWriter, err error) {
 
 // handleResponses serves POST /v1/responses: the stateless OpenAI Responses
 // shim over the shared chat pipeline. Guards run before any upstream work
-// (stateless contract, retry_empty); unknown tool types are skipped with a
+// (the stateless contract); unknown tool types are skipped with a
 // warn log (Codex CLI sends newer tool groupings alongside function tools).
 // The validated request is translated to a Chat Completions body and
 // dispatched into the existing stream/non-stream branches. Capture records
@@ -471,10 +471,6 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	inst, model, err := cfg.Resolve(req.Model)
 	if err != nil {
 		s.writeResponsesError(w, http.StatusBadRequest, "invalid_request_error", "model", err.Error())
-		return
-	}
-	if retryEmptyActive(cfg, inst) {
-		s.writeResponsesError(w, http.StatusBadRequest, "", "", "the retry_empty plugin is not supported on /v1/responses")
 		return
 	}
 
@@ -517,8 +513,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	// Non-function tool types are skipped, not rejected: Codex CLI 0.153
 	// sends newer tool groupings (e.g. "namespace") alongside function tools,
-	// and a 400 aborted every turn. Log what was dropped once per request,
-	// mirroring the retry_empty warn pattern.
+	// and a 400 aborted every turn. Log what was dropped once per request.
 	var skippedTools []string
 	for _, t := range req.Tools {
 		if t.Type != "" && t.Type != "function" {
@@ -626,17 +621,12 @@ func (s *Server) buildUpstream(ctx context.Context, cfg *config.Config, rt *rout
 // plugins list wins (empty list = no plugins), otherwise the global settings
 // defaults apply; each name is built from the built-in registry with its
 // [plugins.<name>] config. There is no template-default runtime fallback.
-// Control plugin names (plugins.IsControl) are skipped — they are valid config
-// values read directly by the proxy path, never transforms. Names are
-// validated at config load; Build still defends against an unknown name
-// defensively.
+// Names are validated at config load; Build still defends against an unknown
+// name defensively.
 func (s *Server) buildChain(cfg *config.Config, inst *config.Instance) (*plugins.Chain, error) {
 	reqNames, respNames := inst.EffectivePlugins(cfg)
 	chain := plugins.NewChain()
 	for _, name := range reqNames {
-		if plugins.IsControl(name) {
-			continue
-		}
 		p, err := plugins.Build(name, plugins.Options{Config: cfg.PluginConfig(name)})
 		if err != nil {
 			return nil, err
@@ -644,9 +634,6 @@ func (s *Server) buildChain(cfg *config.Config, inst *config.Instance) (*plugins
 		chain.AddRequest(p)
 	}
 	for _, name := range respNames {
-		if plugins.IsControl(name) {
-			continue
-		}
 		p, err := plugins.Build(name, plugins.Options{Config: cfg.PluginConfig(name)})
 		if err != nil {
 			return nil, err
@@ -654,20 +641,6 @@ func (s *Server) buildChain(cfg *config.Config, inst *config.Instance) (*plugins
 		chain.AddResponse(p)
 	}
 	return chain, nil
-}
-
-// retryEmptyActive reports whether the retry_empty control plugin is active
-// for the instance (listed on either side of the effective plugin chain).
-func retryEmptyActive(cfg *config.Config, inst *config.Instance) bool {
-	req, resp := inst.EffectivePlugins(cfg)
-	for _, side := range [2][]string{req, resp} {
-		for _, name := range side {
-			if name == "retry_empty" {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // filterRequestBody runs the request plugin chain over the client body,
@@ -701,11 +674,6 @@ func (s *Server) resolvedKey(cfg *config.Config, inst *config.Instance) (string,
 	return "", nil
 }
 
-// maxRetryAttempts is the bound on upstream re-issues when retry_empty is
-// active: a premature-empty 2xx result is retried up to this many attempts
-// total (constant, per the plan).
-const maxRetryAttempts = 3
-
 // translateUpstreamBody maps an anthropic-style provider response into the
 // OpenAI shape the gateway and its clients speak: error bodies get the OpenAI
 // error shape, 2xx completions become chat.completion objects. Non-anthropic
@@ -728,12 +696,8 @@ func translateUpstreamBody(style string, status int, body []byte) []byte {
 // the response plugins on the provider body, and passes the (filtered)
 // provider status/body through — error bodies included. sf is the client
 // surface seam: capture records its endpoint and as-received request bytes,
-// and 2xx bodies are shaped for the client after the plugins ran. When
-// retry_empty is active for the instance, a 2xx completion that is
-// premature-empty (see isEmptyCompletion) is re-issued upstream up to
-// maxRetryAttempts; the client and the capture observe only the final
-// attempt, sharing requestID. Transport errors and non-2xx responses are
-// passed through exactly as before (never retried).
+// and 2xx bodies are shaped for the client after the plugins ran. Transport
+// errors and non-2xx responses are passed through exactly as received.
 func (s *Server) handleNonStream(w http.ResponseWriter, r *http.Request, cfg *config.Config, rt *route, body []byte, sessionID, requestID string, start time.Time, sf clientSurface) {
 	chain, err := s.buildChain(cfg, rt.inst)
 	if err != nil {
@@ -746,48 +710,27 @@ func (s *Server) handleNonStream(w http.ResponseWriter, r *http.Request, cfg *co
 		return
 	}
 
-	retryActive := retryEmptyActive(cfg, rt.inst)
-	var (
-		resp     *http.Response
-		respBody []byte
-		sentBody []byte
-	)
-	for attempt := 1; ; attempt++ {
-		req, sb, err := s.buildUpstream(r.Context(), cfg, rt, forwardedBody)
-		if err != nil {
-			s.writeError(w, http.StatusInternalServerError, "CONFIG_ERROR", err.Error())
-			return
-		}
-		sentBody = sb
-		rsp, err := s.client.Do(req)
-		if err != nil {
-			s.capture(upstreamErrorRecord(rt, sf.requestJSON, requestFilteredBody(chain, sentBody), sessionID, requestID, start, err, chain.Applied()))
-			s.writeError(w, http.StatusBadGateway, "UPSTREAM_ERROR", "upstream request failed: "+err.Error())
-			return
-		}
-		rb, readErr := io.ReadAll(rsp.Body)
-		rsp.Body.Close()
-		if readErr != nil {
-			s.capture(upstreamErrorRecord(rt, sf.requestJSON, requestFilteredBody(chain, sentBody), sessionID, requestID, start, readErr, chain.Applied()))
-			s.writeError(w, http.StatusBadGateway, "UPSTREAM_ERROR", "upstream read failed: "+readErr.Error())
-			return
-		}
-		resp, respBody = rsp, rb
-		// Anthropic responses are translated to the OpenAI shape before the
-		// empty-completion check, plugins, and capture, so the whole pipeline
-		// (and the client) sees one schema.
-		respBody = translateUpstreamBody(rt.template.Style, rsp.StatusCode, respBody)
-		if retryActive && attempt < maxRetryAttempts && rsp.StatusCode >= 200 && rsp.StatusCode < 300 && isEmptyCompletion(respBody) {
-			s.logger.Warn("retry_empty", map[string]any{
-				"request_id": requestID,
-				"session_id": sessionID,
-				"alias":      rt.alias,
-				"attempt":    attempt,
-			})
-			continue
-		}
-		break
+	req, sentBody, err := s.buildUpstream(r.Context(), cfg, rt, forwardedBody)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "CONFIG_ERROR", err.Error())
+		return
 	}
+	rsp, err := s.client.Do(req)
+	if err != nil {
+		s.capture(upstreamErrorRecord(rt, sf.requestJSON, requestFilteredBody(chain, sentBody), sessionID, requestID, start, err, chain.Applied()))
+		s.writeError(w, http.StatusBadGateway, "UPSTREAM_ERROR", "upstream request failed: "+err.Error())
+		return
+	}
+	respBody, readErr := io.ReadAll(rsp.Body)
+	rsp.Body.Close()
+	if readErr != nil {
+		s.capture(upstreamErrorRecord(rt, sf.requestJSON, requestFilteredBody(chain, sentBody), sessionID, requestID, start, readErr, chain.Applied()))
+		s.writeError(w, http.StatusBadGateway, "UPSTREAM_ERROR", "upstream read failed: "+readErr.Error())
+		return
+	}
+	// Anthropic responses are translated to the OpenAI shape before plugins
+	// and capture, so the whole pipeline (and the client) sees one schema.
+	respBody = translateUpstreamBody(rt.template.Style, rsp.StatusCode, respBody)
 
 	rec := &store.CaptureRecord{
 		ID:              requestID,
@@ -799,15 +742,15 @@ func (s *Server) handleNonStream(w http.ResponseWriter, r *http.Request, cfg *co
 		Model:           rt.model,
 		Endpoint:        sf.endpoint,
 		DurationMS:      durationMS(start),
-		StatusCode:      resp.StatusCode,
+		StatusCode:      rsp.StatusCode,
 		RequestJSON:     sf.requestJSON,
 		PluginsApplied:  chain.Applied(),
 	}
 	rec.RequestFilteredJSON = requestFilteredBody(chain, sentBody)
 
 	clientBody := respBody
-	if resp.StatusCode >= 400 {
-		rec.Error = providerError(resp.StatusCode, respBody)
+	if rsp.StatusCode >= 400 {
+		rec.Error = providerError(rsp.StatusCode, respBody)
 	} else {
 		rec.FinishReason, rec.Usage = parseCompletionMeta(respBody)
 		rec.ResponseJSON = respBody
@@ -827,7 +770,7 @@ func (s *Server) handleNonStream(w http.ResponseWriter, r *http.Request, cfg *co
 		// chat surface).
 		clientBody = sf.shapeClient(clientBody)
 	}
-	s.passthrough(w, resp, clientBody)
+	s.passthrough(w, rsp, clientBody)
 	s.capture(rec)
 }
 
@@ -848,11 +791,7 @@ func requestFilteredBody(chain *plugins.Chain, sentBody []byte) []byte {
 // is emitted as one SSE block. sf is the client surface seam (capture endpoint
 // and as-received request bytes; a surface-specific emitter builder). On
 // client disconnect the upstream is canceled and the partially reassembled
-// data is persisted truncated. With retry_empty active the path switches to
-// held mode: each attempt is reassembled without forwarding content,
-// premature-empty attempts are re-issued upstream, reasoning/thinking deltas
-// are forwarded live so the client never waits in silence, and the final
-// attempt is emitted once as one SSE block.
+// data is persisted truncated.
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *config.Config, rt *route, body []byte, sessionID, requestID string, start time.Time, sf clientSurface) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -865,51 +804,6 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *confi
 	forwardedBody, err := s.filterRequestBody(ctx, chain, body)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "PLUGIN_ERROR", "request plugin failed: "+err.Error())
-		return
-	}
-
-	// The retry path issues its first upstream attempt before committing the
-	// SSE headers, so transport errors (502) and non-2xx responses (including
-	// 3xx, surfaced by the no-redirect policy) reach the client with their real
-	// status. Only after a 2xx are the held-mode SSE headers written and the
-	// read/retry loop started. The non-retry path issues once up front and
-	// keeps today's ordering (4xx and transport errors before headers).
-	if retryEmptyActive(cfg, rt.inst) {
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			s.writeError(w, http.StatusInternalServerError, "INTERNAL", "streaming not supported")
-			return
-		}
-		req, sentBody, err := s.buildUpstream(ctx, cfg, rt, forwardedBody)
-		if err != nil {
-			s.writeError(w, http.StatusInternalServerError, "CONFIG_ERROR", err.Error())
-			return
-		}
-		resp, err := s.client.Do(req)
-		if err != nil {
-			s.capture(upstreamErrorRecord(rt, body, requestFilteredBody(chain, sentBody), sessionID, requestID, start, err, chain.Applied()))
-			s.writeError(w, http.StatusBadGateway, "UPSTREAM_ERROR", "upstream request failed: "+err.Error())
-			return
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			// The provider's real status (including 3xx) is passed through and
-			// captured; the headers are still uncommitted, so the client sees
-			// it directly.
-			errBody, rerr := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if rerr != nil {
-				errBody = nil
-			}
-			errBody = translateUpstreamBody(rt.template.Style, resp.StatusCode, errBody)
-			s.capture(streamErrorRecord(rt, body, requestFilteredBody(chain, sentBody), sessionID, requestID, start, resp, errBody, chain.Applied()))
-			s.passthrough(w, resp, errBody)
-			return
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.WriteHeader(http.StatusOK)
-		flusher.Flush()
-		s.handleStreamRetry(w, ctx, cfg, chain, rt, forwardedBody, body, sessionID, requestID, start, flusher, resp, sentBody)
 		return
 	}
 
@@ -1040,231 +934,6 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *confi
 	s.capture(rec)
 }
 
-// handleStreamRetry is the retry_empty held-mode streaming path. The first
-// upstream attempt (2xx) was already issued by handleStream before the 200+SSE
-// headers were committed; here each attempt is read to completion without
-// forwarding a byte until an attempt is non-empty (or the attempt budget is
-// exhausted). Subsequent attempts are issued in this loop; on a transport error
-// or non-2xx response (headers already committed) the stream terminates cleanly
-// with an SSE error event plus [DONE] — never a writeError/passthrough over the
-// committed status — and the failure is captured. The final reassembly is
-// emitted as one SSE block plus [DONE] (response plugins applied once,
-// mirroring bufferedEmitter.Done), then captured with the request's
-// pre-generated id. A client disconnect during a held attempt is captured
-// truncated; the capture is never dropped by a failed write.
-func (s *Server) handleStreamRetry(w http.ResponseWriter, ctx context.Context, cfg *config.Config, chain *plugins.Chain, rt *route, forwardedBody, body []byte, sessionID, requestID string, start time.Time, flusher http.Flusher, firstResp *http.Response, firstSentBody []byte) {
-	var (
-		out      streamOutcome
-		sentBody = firstSentBody
-	)
-	attempt := 1
-	rsp := firstResp
-	// readAttempt reads one upstream SSE attempt in held mode, translating
-	// anthropic-style streams to the OpenAI shape.
-	readAttempt := func(r *http.Response) streamOutcome {
-		if rt.template.Style == config.StyleAnthropic {
-			return readAnthropicStream(ctx, r, newAssembler(), s.holdStreamForward(w, flusher))
-		}
-		return readStream(ctx, r, newAssembler(), s.holdStreamForward(w, flusher))
-	}
-	for {
-		attemptOut := readAttempt(rsp)
-		rsp.Body.Close()
-		if !(isEmptyCompletion(attemptOut.reassembled) && attempt < maxRetryAttempts) {
-			out = attemptOut
-			break
-		}
-		if ctx.Err() != nil {
-			// The client is gone: keep what this attempt produced (captured
-			// truncated) instead of re-issuing against a canceled context.
-			out = attemptOut
-			break
-		}
-		s.logger.Warn("retry_empty", map[string]any{
-			"request_id": requestID,
-			"session_id": sessionID,
-			"alias":      rt.alias,
-			"attempt":    attempt,
-		})
-		attempt++
-		req, sb, err := s.buildUpstream(ctx, cfg, rt, forwardedBody)
-		if err != nil {
-			s.retryAttemptError(w, flusher, upstreamErrorRecord(rt, body, requestFilteredBody(chain, sentBody), sessionID, requestID, start, err, chain.Applied()), attempt, "CONFIG_ERROR", err.Error())
-			return
-		}
-		sentBody = sb
-		rsp, err = s.client.Do(req)
-		if err != nil {
-			s.retryAttemptError(w, flusher, upstreamErrorRecord(rt, body, requestFilteredBody(chain, sentBody), sessionID, requestID, start, err, chain.Applied()), attempt, "UPSTREAM_ERROR", "upstream request failed: "+err.Error())
-			return
-		}
-		if rsp.StatusCode < 200 || rsp.StatusCode >= 300 {
-			// Non-2xx (including 3xx) is never retried. The SSE headers are
-			// already committed, so the error is captured and the stream ends
-			// with an SSE error event instead of a status-line swap.
-			errBody, rerr := io.ReadAll(rsp.Body)
-			rsp.Body.Close()
-			if rerr != nil {
-				errBody = nil
-			}
-			errBody = translateUpstreamBody(rt.template.Style, rsp.StatusCode, errBody)
-			s.retryAttemptError(w, flusher, streamErrorRecord(rt, body, requestFilteredBody(chain, sentBody), sessionID, requestID, start, rsp, errBody, chain.Applied()), attempt, "UPSTREAM_ERROR", fmt.Sprintf("upstream returned non-2xx status %d", rsp.StatusCode))
-			return
-		}
-	}
-
-	// Emit the final reassembly as one SSE block plus [DONE], applying the
-	// response plugin chain once (mirroring bufferedEmitter.Done). A write
-	// error here means the client disconnected; the capture below must still
-	// run (mirrors the non-retry path's unconditional capture).
-	clientBody := out.reassembled
-	if chain.HasResponse() {
-		respDomain := &plugins.Response{Body: out.reassembled}
-		if err := chain.FilterResponse(context.Background(), respDomain); err != nil {
-			// The provider's data is never dropped; log and pass through the
-			// unfiltered body.
-			s.logger.Error("response_plugin_failed", map[string]any{"session_id": sessionID, "error": err.Error()})
-		} else {
-			clientBody = respDomain.Body
-		}
-	}
-	_, _ = fmt.Fprintf(w, "data: %s\n\n", clientBody)
-	flusher.Flush()
-	_, _ = io.WriteString(w, "data: [DONE]\n\n")
-	flusher.Flush()
-
-	rec := &store.CaptureRecord{
-		ID:              requestID,
-		SessionID:       sessionID,
-		CreatedAt:       start,
-		Alias:           rt.alias,
-		Provider:        rt.provider,
-		ProviderBaseURL: rt.template.BaseURL,
-		Model:           rt.model,
-		Endpoint:        endpoint,
-		DurationMS:      durationMS(start),
-		StatusCode:      out.statusCode,
-		FinishReason:    out.finish,
-		Usage:           out.usage,
-		RequestJSON:     body,
-		ResponseJSON:    out.reassembled,
-		Truncated:       out.truncated,
-		PluginsApplied:  chain.Applied(),
-		Error:           out.streamErr,
-		ChunkCount:      out.chunks,
-	}
-	rec.RequestFilteredJSON = requestFilteredBody(chain, sentBody)
-	if chain.HasResponse() {
-		rec.ResponseFilteredJSON = clientBody
-	}
-	s.capture(rec)
-}
-
-// retryAttemptError handles a failed subsequent retry attempt once the SSE
-// headers are committed (writeError/passthrough would no-op on the committed
-// 200): it captures the error record, logs via the retry_empty warn channel,
-// and terminates the held stream cleanly with an SSE error event plus [DONE].
-func (s *Server) retryAttemptError(w io.Writer, flusher http.Flusher, rec *store.CaptureRecord, attempt int, code, message string) {
-	s.capture(rec)
-	s.logger.Warn("retry_empty", map[string]any{
-		"request_id": rec.ID,
-		"session_id": rec.SessionID,
-		"alias":      rec.Alias,
-		"attempt":    attempt,
-		"error":      message,
-	})
-	writeStreamErrorEvent(w, flusher, code, message)
-}
-
-// writeStreamErrorEvent terminates a held retry stream after a failed
-// subsequent attempt: an SSE error event followed by [DONE], so the client
-// sees a clean end instead of a dangling 200 stream.
-func writeStreamErrorEvent(w io.Writer, flusher http.Flusher, code, message string) {
-	errJSON, _ := json.Marshal(map[string]any{"code": code, "message": message})
-	fmt.Fprintf(w, "data: {\"error\": %s}\n\n", errJSON)
-	flusher.Flush()
-	io.WriteString(w, "data: [DONE]\n\n")
-	flusher.Flush()
-}
-
-// streamErrorRecord builds the capture record for a non-2xx upstream response
-// on the stream retry path: the provider's real status and error body are
-// captured verbatim.
-func streamErrorRecord(rt *route, body, filteredBody []byte, sessionID, requestID string, start time.Time, rsp *http.Response, errBody []byte, applied []string) *store.CaptureRecord {
-	rec := &store.CaptureRecord{
-		ID:              requestID,
-		SessionID:       sessionID,
-		CreatedAt:       start,
-		Alias:           rt.alias,
-		Provider:        rt.provider,
-		ProviderBaseURL: rt.template.BaseURL,
-		Model:           rt.model,
-		Endpoint:        endpoint,
-		DurationMS:      durationMS(start),
-		StatusCode:      rsp.StatusCode,
-		RequestJSON:     body,
-		PluginsApplied:  applied,
-		Error:           providerError(rsp.StatusCode, errBody),
-	}
-	rec.RequestFilteredJSON = filteredBody
-	return rec
-}
-
-// holdStreamForward is the retry-empty held-mode forward: reasoning/thinking
-// deltas (delta.reasoning / delta.reasoning_content) and keepalive comment
-// lines are written to the client immediately, so the connection stays
-// visibly alive across a held attempt — idle/first-token timeouts never fire
-// and the agent shows thinking progress instead of appearing hung — while
-// content, tool_calls, finish_reason, and [DONE] stay held until the attempt
-// is known non-empty. The reassembly is unaffected: the assembler never folds
-// reasoning into content.
-func (s *Server) holdStreamForward(w io.Writer, flusher http.Flusher) func([]byte) error {
-	forward := func(line []byte) error {
-		if _, err := w.Write(line); err != nil {
-			return err
-		}
-		flusher.Flush()
-		return nil
-	}
-	return func(line []byte) error {
-		payload := ssePayload(string(line))
-		if payload == nil {
-			// Keepalive comments and other non-data lines pass through.
-			return forward(line)
-		}
-		if string(payload) != "[DONE]" && carriesReasoning(payload) {
-			return forward(line)
-		}
-		return nil
-	}
-}
-
-// carriesReasoning reports whether an SSE data payload is a chunk whose delta
-// carries non-empty reasoning/thinking content. Such chunks are forwarded
-// live by the held retry path so the client sees progress during an attempt.
-func carriesReasoning(payload []byte) bool {
-	var ev struct {
-		Choices []struct {
-			Delta struct {
-				Reasoning        *string `json:"reasoning"`
-				ReasoningContent *string `json:"reasoning_content"`
-			} `json:"delta"`
-		} `json:"choices"`
-	}
-	if json.Unmarshal(payload, &ev) != nil {
-		return false
-	}
-	for _, c := range ev.Choices {
-		if c.Delta.Reasoning != nil && strings.TrimSpace(*c.Delta.Reasoning) != "" {
-			return true
-		}
-		if c.Delta.ReasoningContent != nil && strings.TrimSpace(*c.Delta.ReasoningContent) != "" {
-			return true
-		}
-	}
-	return false
-}
-
 // capture persists one request in a single store transaction and appends the
 // §8 log lines. A fresh context (not the canceled client context) is used so
 // a disconnect never drops the record. The estimated cost split is derived
@@ -1344,51 +1013,6 @@ func parseCompletionMeta(body []byte) (string, json.RawMessage) {
 		finish = c.Choices[0].FinishReason
 	}
 	return finish, c.Usage
-}
-
-// isEmptyCompletion reports whether a 2xx chat-completion body is
-// premature-empty: the first choice has no content (absent/nil/whitespace
-// string, or an empty array) and no tool_calls. An empty choices list counts
-// as empty; reasoning volume is never present in reassembled content, so it
-// does not count. The finish_reason is deliberately not consulted: providers
-// that reason and then terminate (e.g. openrouter stealth/ox-alpha) routinely
-// stop with a populated finish_reason ("stop"/"length") and an empty message,
-// and an empty assistant turn is never useful to the client, so it is retried
-// like any other premature-empty result. A body that is not JSON (or
-// unparseable) is conservatively NOT empty — the retry loop only fires on a
-// provable premature-empty result.
-func isEmptyCompletion(body []byte) bool {
-	var c struct {
-		Choices []struct {
-			Message struct {
-				Content   json.RawMessage   `json:"content"`
-				ToolCalls []json.RawMessage `json:"tool_calls"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(body, &c); err != nil {
-		return false
-	}
-	if len(c.Choices) == 0 {
-		return true
-	}
-	ch := c.Choices[0]
-	if len(ch.Message.ToolCalls) > 0 {
-		return false
-	}
-	contentEmpty := true
-	if len(ch.Message.Content) > 0 {
-		var s string
-		if err := json.Unmarshal(ch.Message.Content, &s); err == nil {
-			contentEmpty = strings.TrimSpace(s) == ""
-		} else {
-			// Non-string content (e.g. an array of content parts): empty only
-			// when it is an empty array.
-			var arr []json.RawMessage
-			contentEmpty = json.Unmarshal(ch.Message.Content, &arr) == nil && len(arr) == 0
-		}
-	}
-	return contentEmpty
 }
 
 // providerError extracts {code, message} from an OpenAI-shaped non-2xx body,

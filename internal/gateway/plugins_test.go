@@ -230,3 +230,92 @@ func TestNonStreamNoPluginsAllFieldsNil(t *testing.T) {
 		t.Error("response_json empty")
 	}
 }
+
+// sanitizeTOML enables the sanitize_tools request plugin on the instance.
+const sanitizeTOML = `
+[[instances]]
+alias = "openai"
+template = "openai"
+api_key_env = "TEST_KEY_1"
+plugins = ["sanitize_tools"]
+`
+
+func TestNonStreamSanitizeToolsUpstreamReceivesCleanSchema(t *testing.T) {
+	// The enum+oneOf duplication that some providers answer with a silent
+	// empty completion must be stripped before the body leaves the gateway.
+	provider := newFakeProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"x","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	})
+	gs, st := newGatewayTest(t, provider, sanitizeTOML, defaultEnv)
+
+	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"t","parameters":{"type":"object","properties":{"action":{"type":"string","enum":["a","b"],"oneOf":[{"const":"a"},{"const":"b"}]}}}}},{"type":"function","function":{"name":"plain","parameters":{"type":"object","properties":{"p":{"oneOf":[{"type":"string"}]}}}}}]}`
+	resp := postChat(t, gs, body, map[string]string{"X-Session-Id": "sess-sanitize-ns"})
+	drainClose(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	seen := provider.requests()
+	if len(seen) != 1 {
+		t.Fatalf("provider saw %d requests, want 1", len(seen))
+	}
+	var upstream struct {
+		Tools []struct {
+			Function struct {
+				Name       string `json:"name"`
+				Parameters struct {
+					Properties map[string]map[string]any `json:"properties"`
+				} `json:"parameters"`
+			} `json:"function"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(seen[0].Body, &upstream); err != nil {
+		t.Fatalf("upstream body is not JSON: %v (%s)", err, seen[0].Body)
+	}
+	if len(upstream.Tools) != 2 {
+		t.Fatalf("upstream tools = %d, want 2", len(upstream.Tools))
+	}
+	if _, has := upstream.Tools[0].Function.Parameters.Properties["action"]["oneOf"]; has {
+		t.Error("upstream body still carries oneOf alongside enum")
+	}
+	if enum, ok := upstream.Tools[0].Function.Parameters.Properties["action"]["enum"].([]any); !ok || len(enum) != 2 {
+		t.Errorf("upstream enum = %v, want [a b]", upstream.Tools[0].Function.Parameters.Properties["action"]["enum"])
+	}
+	if _, has := upstream.Tools[1].Function.Parameters.Properties["p"]["oneOf"]; !has {
+		t.Error("untouched tool's oneOf (no enum) was stripped")
+	}
+
+	// The store keeps both sides: original verbatim, filtered sanitized.
+	req := waitForRequest(t, st, "sess-sanitize-ns", 5*time.Second)
+	if len(req.PluginsApplied) != 1 || req.PluginsApplied[0] != "sanitize_tools" {
+		t.Errorf("plugins_applied = %v, want [sanitize_tools]", req.PluginsApplied)
+	}
+	assertBodyContains(t, "request_json", string(req.RequestJSON), []string{"oneOf"}, false)
+
+	var filtered struct {
+		Tools []struct {
+			Function struct {
+				Name       string `json:"name"`
+				Parameters struct {
+					Properties map[string]map[string]any `json:"properties"`
+				} `json:"parameters"`
+			} `json:"function"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(req.RequestFilteredJSON, &filtered); err != nil {
+		t.Fatalf("request_filtered_json is not JSON: %v (%s)", err, req.RequestFilteredJSON)
+	}
+	if len(filtered.Tools) != 2 {
+		t.Fatalf("filtered tools = %d, want 2", len(filtered.Tools))
+	}
+	if _, has := filtered.Tools[0].Function.Parameters.Properties["action"]["oneOf"]; has {
+		t.Error("request_filtered_json still carries oneOf alongside enum")
+	}
+	if enum, ok := filtered.Tools[0].Function.Parameters.Properties["action"]["enum"].([]any); !ok || len(enum) != 2 {
+		t.Errorf("filtered enum = %v, want [a b]", filtered.Tools[0].Function.Parameters.Properties["action"]["enum"])
+	}
+	if _, has := filtered.Tools[1].Function.Parameters.Properties["p"]["oneOf"]; !has {
+		t.Error("untouched tool's oneOf was stripped in request_filtered_json")
+	}
+}
