@@ -25,7 +25,11 @@
   input, select, textarea { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 6px 8px; font-size: 13px; }
   button { background: var(--accent); border: none; color: white; border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
   button.ghost { background: transparent; border: 1px solid var(--border); color: var(--text2); }
-  button.danger { background: var(--err); }
+  button.outline { background: transparent; border: 1px solid var(--accent); color: var(--accent); }
+  button.outline:hover { background: rgba(79,140,255,.12); }
+  button.danger-ghost { background: transparent; border: 1px solid transparent; color: var(--err); }
+  button.danger-ghost:hover { border-color: var(--err); }
+  .btn-sm { padding: 3px 10px; font-size: 12px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
   th { color: var(--muted); font-weight: 500; }
@@ -114,8 +118,6 @@
   .status-cols { display: flex; gap: 28px; flex-wrap: wrap; }
   .status-cols > table { flex: 1; min-width: 260px; }
   .plugin-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; background: rgba(255,255,255,0.015); }
- .inst-plugins { border-top: 1px dashed var(--border); margin-top: 12px; padding-top: 10px; }
- .inst-plugins-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
  .inst-plugins-list { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
  .plugin-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; white-space: nowrap; border: 1px solid var(--border); border-radius: 999px; padding: 2px 9px; background: rgba(255,255,255,0.03); }
  .plugin-chip .chip-x { border: none; background: none; color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1; padding: 0; }
@@ -123,8 +125,36 @@
  .plugin-add-wrap { position: relative; display: inline-block; }
  .plugin-menu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 20; min-width: 260px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 4px; box-shadow: 0 8px 24px rgba(0,0,0,.45); }
  .plugin-menu button { display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left; background: none; border: none; color: var(--text); padding: 6px 8px; border-radius: 6px; }
- .plugin-menu button:hover { background: rgba(255,255,255,.06); }
- .plugin-menu button .muted { font-size: 11px; white-space: normal; }
+  .plugin-menu button:hover { background: rgba(255,255,255,.06); }
+  .plugin-menu button .muted { font-size: 11px; white-space: normal; }
+  /* Expanded provider card: labelled subsections (Aliases / Plugins /
+     Connection) plus a form-level footer, so scope of each action is
+     unambiguous — local triggers live in their section header or chip row,
+     Save/Cancel alone in the card footer. */
+  .instance-section { margin-top: 16px; }
+  .instance-section:first-child { margin-top: 0; }
+  .instance-section-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+  .instance-section-title { font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+  .instance-section-head .spacer { flex: 1; }
+  .instance-footer { display: flex; align-items: center; gap: 8px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); flex-wrap: wrap; }
+  .instance-footer .spacer { flex: 1; }
+  /* instance header actions: subdued group, destructive delete stays ghost */
+  .instance-actions { display: flex; gap: 6px; flex-shrink: 0; }
+  /* alias table: fixed column proportions + full-width editors */
+  .aliases-table th:nth-child(1), .aliases-table td:nth-child(1) { width: 24%; }
+  .aliases-table th:nth-child(2), .aliases-table td:nth-child(2) { width: 40%; }
+  .aliases-table th:nth-child(3), .aliases-table td:nth-child(3) { width: 18%; }
+  .aliases-table th:nth-child(4), .aliases-table td:nth-child(4) { width: 18%; }
+  .aliases-table input, .aliases-table select { width: 100%; }
+  .aliases-empty td { border: 1px dashed var(--border); padding: 16px; text-align: center; color: var(--muted); font-size: 12px; }
+  .aliases-empty button { margin-left: 8px; }
+  /* inline dashed "+ Add plugin" trigger trailing the chip row */
+  .chip-add { background: transparent; border: 1px dashed var(--border); color: var(--muted); border-radius: 999px; padding: 2px 10px; font-size: 12px; }
+  .chip-add:hover { color: var(--accent); border-color: var(--accent); }
+  /* Connection subsection: read-only label/value grid */
+  .connection-grid { display: grid; grid-template-columns: 150px 1fr; gap: 5px 14px; font-size: 12px; margin: 0; }
+  .connection-grid dt { color: var(--muted); }
+  .connection-grid dd { margin: 0; color: var(--text2); word-break: break-all; }
   .plugin-head { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; }
   .plugin-head .plugin-info { flex: 1; min-width: 260px; }
   .plugin-desc { color: var(--text2); font-size: 12px; line-height: 1.55; margin-top: 4px; }
@@ -221,6 +251,7 @@ document.addEventListener("click", function (ev) {
     case "aliases-add": addAliasRow(el.dataset.alias); break;
     case "aliases-remove": removeAliasRow(el); break;
     case "instance-save": saveInstance(el.dataset.alias); break;
+    case "instance-cancel": cancelInstanceEdits(el.dataset.alias); break;
     case "plugins-menu": togglePluginMenu(el); break;
     case "plugins-pick": pickPlugin(el); break;
     case "plugins-remove": removePluginChip(el); break;
@@ -366,24 +397,55 @@ function instanceBlockHtml(x) {
       ${x.disabled ? `<span class="badge disabled">disabled</span>` : `<span class="badge ok">enabled</span>`}
       <span class="instance-quota">${quotaCellFor(x.alias)}</span>
       <span class="spacer"></span>
-      <button class="ghost" data-action="edit-instance" data-alias="${esc(x.alias)}">Edit</button>
-      <button class="ghost" data-action="toggle-instance" data-alias="${esc(x.alias)}">${x.disabled ? "Enable" : "Disable"}</button>
-      <button class="danger" data-action="delete-instance" data-alias="${esc(x.alias)}">Delete</button>
+      <span class="instance-actions">
+        <button class="ghost btn-sm" data-action="edit-instance" data-alias="${esc(x.alias)}">Edit</button>
+        <button class="ghost btn-sm" data-action="toggle-instance" data-alias="${esc(x.alias)}">${x.disabled ? "Enable" : "Disable"}</button>
+        <button class="danger-ghost btn-sm" data-action="delete-instance" data-alias="${esc(x.alias)}">Delete</button>
+      </span>
     </summary>
     <div class="instance-body">
       <datalist id="dl-models-${esc(x.alias)}">${modelOptions(x.alias)}</datalist>
-      <div class="muted" style="margin-bottom:8px"><span id="models-status-${esc(x.alias)}">${aliasesStatus(x.alias)}</span></div>
-      <table>
-        <thead><tr><th>Alias name</th><th>Model</th><th>Reasoning</th><th></th></tr></thead>
-        <tbody id="aliases-body-${esc(x.alias)}">${renderAliasRows(x)}</tbody>
-      </table>
+      <div class="instance-section">
+        <div class="instance-section-head">
+          <span class="instance-section-title">Aliases</span>
+          <span class="muted" id="models-status-${esc(x.alias)}">${aliasesStatus(x.alias)}</span>
+          <span class="spacer"></span>
+          <button class="ghost btn-sm" data-action="models-refresh" data-alias="${esc(x.alias)}" title="Re-fetch the model list from this provider">Refresh models</button>
+          <button class="outline btn-sm" data-action="aliases-add" data-alias="${esc(x.alias)}">+ Add alias</button>
+        </div>
+        <table class="aliases-table">
+          <thead><tr><th>Alias name</th><th>Model</th><th>Reasoning</th><th></th></tr></thead>
+          <tbody id="aliases-body-${esc(x.alias)}">${renderAliasRows(x)}</tbody>
+        </table>
+      </div>
       ${instancePluginsHtml(x)}
-      <div class="row" style="margin-top:8px">
-        <button class="ghost" data-action="aliases-add" data-alias="${esc(x.alias)}">Add alias</button>
+      ${instanceConnectionHtml(x)}
+      <div class="instance-footer">
+        <span class="muted">Alias and plugin changes are staged until you save.</span>
+        <span class="spacer"></span>
+        <button class="ghost" data-action="instance-cancel" data-alias="${esc(x.alias)}">Cancel</button>
         <button data-action="instance-save" data-alias="${esc(x.alias)}" title="Saves the model aliases and the plugin list for this provider">Save</button>
       </div>
     </div>
   </details>`;
+}
+
+// instanceConnectionHtml renders the read-only Connection subsection: how the
+// provider is reached (protocol, endpoint, credential) plus its routing
+// priority. Values come from config/secrets and are esc()'d.
+function instanceConnectionHtml(x) {
+  const key = x.key_masked
+    ? `<code>${esc(x.key_masked)}</code>`
+    : (x.api_key_env ? `<code>env: ${esc(x.api_key_env)}</code>` : `<span class="muted">none</span>`);
+  return `<div class="instance-section">
+    <div class="instance-section-head"><span class="instance-section-title">Connection</span></div>
+    <dl class="connection-grid">
+      <dt>Protocol</dt><dd>${esc(x.style || "openai")}</dd>
+      <dt>Endpoint</dt><dd>${x.base_url ? `<code>${esc(x.base_url)}</code>` : `<span class="muted">—</span>`}</dd>
+      <dt>Credential</dt><dd>${key}</dd>
+      <dt>Routing priority</dt><dd>${x.priority ? esc(String(x.priority)) + " <span class=\"muted\">(1 = highest)</span>" : `<span class="muted">unset — list order</span>`}</dd>
+    </dl>
+  </div>`;
 }
 
 /* ---------- per-provider plugins (Providers view) ---------- */
@@ -398,10 +460,10 @@ function effectivePluginNames(inst) {
 }
 // instancePluginsHtml renders the provider's plugin chain as a list of chips
 // staged client-side — the list shows exactly what runs for this provider now,
-// and edits (removing a chip, adding via the "Add plugin" popup) stay
-// unsaved until the provider's Save button is pressed, exactly like the alias
-// rows above. While the provider follows the global defaults the list is that
-// effective set and saving a changed list writes an explicit override; a
+// and edits (removing a chip, adding via the inline "+ Add plugin" popup)
+// stay unsaved until the provider's Save button is pressed, exactly like the
+// alias rows above. While the provider follows the global defaults the list is
+// that effective set and saving a changed list writes an explicit override; a
 // "custom" list replaces the global chain entirely (empty = plugins off for
 // this provider).
 function instancePluginsHtml(x) {
@@ -409,20 +471,14 @@ function instancePluginsHtml(x) {
   const names = effectivePluginNames(x);
   const chips = names.map(n => pluginChipHtml(x.alias, n)).join("")
     || `<span class="muted none-placeholder" style="font-size:12px">none</span>`;
-  return `<div class="inst-plugins" id="inst-plugins-${esc(x.alias)}" data-alias="${esc(x.alias)}">
-    <div class="inst-plugins-head">
-      <span class="muted" style="font-size:12px">Plugins</span>
+  return `<div class="instance-section" id="inst-plugins-${esc(x.alias)}" data-alias="${esc(x.alias)}">
+    <div class="instance-section-head">
+      <span class="instance-section-title">Plugins</span>
       ${inherit
         ? `<span class="badge disabled" title="Following the global enable/disable toggles (Settings → Plugins). Saving a changed list here overrides them for this provider only.">global defaults</span>`
         : `<span class="badge warn" title="Custom list — replaces the global defaults for this provider entirely.">custom</span>`}
     </div>
-    <div class="inst-plugins-list">${chips}</div>
-    <div class="row" style="margin-top:8px">
-      <div class="plugin-add-wrap">
-        <button data-action="plugins-menu" data-alias="${esc(x.alias)}">Add plugin</button>
-        <div class="plugin-menu hidden"></div>
-      </div>
-    </div>
+    <div class="inst-plugins-list">${chips}<span class="plugin-add-wrap"><button class="chip-add" data-action="plugins-menu" data-alias="${esc(x.alias)}">+ Add plugin</button><div class="plugin-menu hidden"></div></span></div>
   </div>`;
 }
 // pluginChipHtml renders one staged plugin chip; the × only removes the chip
@@ -467,7 +523,8 @@ function togglePluginMenu(el) {
   menu.innerHTML = pluginMenuItems(el.dataset.alias, stagedPluginNames(el.dataset.alias));
   menu.classList.remove("hidden");
 }
-// pickPlugin stages the chosen plugin as a chip (deduped) and closes the popup.
+// pickPlugin stages the chosen plugin as a chip (deduped) ahead of the inline
+// "+ Add plugin" trigger and closes the popup.
 function pickPlugin(el) {
   const alias = el.dataset.alias;
   const name = el.dataset.name;
@@ -476,7 +533,9 @@ function pickPlugin(el) {
   if (!list || stagedPluginNames(alias).includes(name)) return;
   const none = list.querySelector(".none-placeholder");
   if (none) none.remove();
-  list.insertAdjacentHTML("beforeend", pluginChipHtml(alias, name));
+  const wrap = list.querySelector(".plugin-add-wrap");
+  if (wrap) wrap.insertAdjacentHTML("beforebegin", pluginChipHtml(alias, name));
+  else list.insertAdjacentHTML("beforeend", pluginChipHtml(alias, name));
   const menu = el.closest(".plugin-menu");
   if (menu) menu.classList.add("hidden");
 }
@@ -487,7 +546,10 @@ function removePluginChip(el) {
   const list = chip && chip.parentElement;
   if (chip) chip.remove();
   if (list && !list.querySelector(".plugin-chip") && !list.querySelector(".none-placeholder")) {
-    list.insertAdjacentHTML("beforeend", `<span class="muted none-placeholder" style="font-size:12px">none</span>`);
+    const wrap = list.querySelector(".plugin-add-wrap");
+    const html = `<span class="muted none-placeholder" style="font-size:12px">none</span>`;
+    if (wrap) wrap.insertAdjacentHTML("beforebegin", html);
+    else list.insertAdjacentHTML("beforeend", html);
   }
 }
 
@@ -849,14 +911,19 @@ function aliasRowHtml(alias, key, val, reasoning, i, opts) {
       </select>
     </td>
     <td>
-      <button class="ghost" data-action="models-refresh" data-alias="${esc(alias)}">Refresh</button>
-      <button class="ghost" data-action="aliases-remove" data-alias="${esc(alias)}" data-row="${i}">Remove</button>
+      <button class="ghost btn-sm" data-action="aliases-remove" data-alias="${esc(alias)}" data-row="${i}">Remove</button>
     </td>
   </tr>`;
 }
+// emptyAliasesRowHtml is the dashed placeholder row shown while a provider has
+// no alias rows; its embedded button stages a first row in place.
+function emptyAliasesRowHtml(alias) {
+  return `<tr class="no-aliases aliases-empty"><td colspan="4">No aliases configured yet — map a model to a name.
+    <button class="outline btn-sm" data-action="aliases-add" data-alias="${esc(alias)}">+ Add your first alias</button></td></tr>`;
+}
 function renderAliasRows(inst) {
   const rows = Object.entries(inst.model_aliases || {});
-  if (!rows.length) return `<tr class="no-aliases"><td colspan="4" class="muted">No aliases yet — add one below.</td></tr>`;
+  if (!rows.length) return emptyAliasesRowHtml(inst.alias);
   return rows.map(([key, val], i) => {
     const reasoning = (inst.model_reasoning && inst.model_reasoning[key]) || "";
     return aliasRowHtml(inst.alias, key, val, reasoning, i, reasoningOptionsFor(inst, val));
@@ -871,10 +938,15 @@ function addAliasRow(alias) {
 }
 // removeAliasRow drops the row client-side (unsaved until Save). It uses the
 // clicked row's DOM position rather than the data-row index so it stays
-// correct after rows are removed and reordered without a re-render.
+// correct after rows are removed and reordered without a re-render. Removing
+// the last row restores the dashed empty-state placeholder.
 function removeAliasRow(el) {
   const row = el.closest("tr");
   if (row) row.remove();
+  const tbody = $("aliases-body-" + el.dataset.alias);
+  if (tbody && !tbody.querySelector("tr:not(.no-aliases)")) {
+    tbody.innerHTML = emptyAliasesRowHtml(el.dataset.alias);
+  }
 }
 async function refreshModels(alias) {
   try {
@@ -921,6 +993,19 @@ async function saveInstance(alias) {
     });
     await loadProviders();
   } catch (e) { alert(e.message); }
+}
+// cancelInstanceEdits discards staged alias/plugin edits by rebuilding the
+// provider's expanded card from in-memory instance state — nothing was
+// persisted, so no server round-trip is needed. (Replacing the <details>
+// fires a toggle with open=false, which the toggle listener ignores because
+// the old node is detached by then.)
+function cancelInstanceEdits(alias) {
+  const row = document.querySelector(`details.instance-row[data-alias="${CSS.escape(alias)}"]`);
+  const inst = instances.find(x => x.alias === alias);
+  if (!row || !inst) return;
+  const tpl = document.createElement("template");
+  tpl.innerHTML = instanceBlockHtml(inst).trim();
+  row.replaceWith(tpl.content.firstElementChild);
 }
 
 /* ---------- Settings (combined: gateway status + settings + plugins) ---------- */
