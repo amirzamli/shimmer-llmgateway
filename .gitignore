@@ -13,6 +13,9 @@ internal/pricing/models.json
 # Local gateway config (see gateway.toml.example)
 gateway.toml
 
+# pi project-local MCP config (machine-specific paths, not shared)
+.pi/
+
 # Logs and editor junk
 *.log
 .DS_Store
