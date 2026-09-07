@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 
 type providerRequest struct {
 	Authorization string
+	XOpencode     string
 	Body          []byte
 }
 
@@ -55,7 +57,11 @@ func (fp *fakeProvider) handle(w http.ResponseWriter, r *http.Request) {
 		fp.t.Errorf("provider read body: %v", err)
 	}
 	fp.mu.Lock()
-	fp.seen = append(fp.seen, providerRequest{Authorization: r.Header.Get("Authorization"), Body: body})
+	fp.seen = append(fp.seen, providerRequest{
+		Authorization: r.Header.Get("Authorization"),
+		XOpencode:     r.Header.Get("x-opencode-session"),
+		Body:          body,
+	})
 	fp.mu.Unlock()
 	if fp.h != nil {
 		fp.h(w, r)
@@ -973,6 +979,120 @@ func TestMultiAccountKeyIsolation(t *testing.T) {
 		if strings.Contains(string(all), "sk-account") {
 			t.Errorf("session %s stored payload contains an API key", session)
 		}
+	}
+}
+
+// sessionIDFromRequest resolves the session id from client headers: an
+// explicit X-Session-Id always wins, the x-opencode-session header opencode-
+// style clients send natively is honored next, and the x-session-id
+// session-affinity compat spelling is matched by the first branch (header
+// lookup is case-insensitive — setting x-session-id stores it as the
+// canonical X-Session-Id).
+func TestSessionIDFromRequest(t *testing.T) {
+	newReq := func(kvs ...string) *http.Request {
+		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		for i := 0; i+1 < len(kvs); i += 2 {
+			r.Header.Set(kvs[i], kvs[i+1])
+		}
+		return r
+	}
+	cases := []struct {
+		name    string
+		headers []string
+		want    string
+	}{
+		{"no headers", nil, ""},
+		{"explicit X-Session-Id", []string{"X-Session-Id", "sess-a"}, "sess-a"},
+		{"affinity compat spelling x-session-id", []string{"x-session-id", "sess-c"}, "sess-c"},
+		{"opencode native header", []string{"x-opencode-session", "sess-b"}, "sess-b"},
+		{"X-Session-Id wins over x-opencode-session", []string{"X-Session-Id", "sess-a", "x-opencode-session", "sess-b"}, "sess-a"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sessionIDFromRequest(newReq(tc.headers...)); got != tc.want {
+				t.Errorf("sessionIDFromRequest(%v) = %q, want %q", tc.headers, got, tc.want)
+			}
+		})
+	}
+}
+
+// Templates may declare a session_header (opencode_go → x-opencode-session):
+// the gateway synthesises the request's effective session id on every upstream
+// call — the same id echoed as X-Gateway-Session-Id, stable across the turns
+// of one conversation (client X-Session-Id when present, else a fresh UUID).
+// Templates without a session_header never get the header.
+func TestSessionHeaderForwardedToUpstream(t *testing.T) {
+	const tmpl = `
+[providers.opencode_go]
+base_url = "FAKE"
+api_key_env = "TEST_KEY_1"
+models = ["deepseek-v4-flash"]
+session_header = "x-opencode-session"
+
+[[instances]]
+alias = "opencode_go_ali"
+template = "opencode_go"
+
+[[instances]]
+alias = "openai"
+template = "openai"
+api_key_env = "TEST_KEY_1"
+`
+	var streamCount atomic.Int32
+	provider := newFakeProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		// Requests are awaited sequentially, so a count tells the stream call
+		// (request 2) from the rest without re-reading the consumed body.
+		if streamCount.Add(1) == 2 {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n"))
+			w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+			w.Write([]byte("data: [DONE]\n\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	})
+	cfg := strings.ReplaceAll(tmpl, "FAKE", provider.url())
+	gs, st := newGatewayTest(t, provider, cfg, defaultEnv)
+
+	// Non-stream: the client's X-Session-Id rides upstream verbatim.
+	drainClose(t, postChat(t, gs, `{"model":"opencode_go_ali/deepseek-v4-flash","messages":[{"role":"user","content":"a"}]}`, map[string]string{"X-Session-Id": "sess-ocgo"}))
+	// Stream: same header synthesis on the SSE path.
+	drainClose(t, postChat(t, gs, `{"model":"opencode_go_ali/deepseek-v4-flash","stream":true,"messages":[{"role":"user","content":"b"}]}`, map[string]string{"X-Session-Id": "sess-ocgo2"}))
+	// Template without a session_header: header never sent, even with an id.
+	drainClose(t, postChat(t, gs, `{"model":"openai/gpt-4o","messages":[{"role":"user","content":"c"}]}`, map[string]string{"X-Session-Id": "sess-plain"}))
+	// No client id: a UUID is generated and still synthesised upstream.
+	drainClose(t, postChat(t, gs, `{"model":"opencode_go_ali/deepseek-v4-flash","messages":[{"role":"user","content":"d"}]}`, nil))
+
+	seen := provider.requests()
+	if len(seen) != 4 {
+		t.Fatalf("provider saw %d requests, want 4", len(seen))
+	}
+	// Order: opencode non-stream, opencode stream, openai (no session_header),
+	// opencode with no client-supplied id (generated UUID instead).
+	want := []string{"sess-ocgo", "sess-ocgo2", "", ""}
+	for i, pr := range seen {
+		if i == 2 {
+			if pr.XOpencode != "" {
+				t.Errorf("request %d (openai) got x-opencode-session %q, want none", i, pr.XOpencode)
+			}
+			continue
+		}
+		if want[i] != "" && pr.XOpencode != want[i] {
+			t.Errorf("request %d x-opencode-session = %q, want %q", i, pr.XOpencode, want[i])
+		}
+		if want[i] == "" && pr.XOpencode == "" {
+			t.Errorf("request %d x-opencode-session = empty, want synthesized", i)
+		}
+	}
+	// The no-header request's synthesized id (a normalized UUID) is echoed
+	// back upstream and persisted — the client never sent it.
+	lastSess, err := st.GetSession(context.Background(), seen[3].XOpencode)
+	if err != nil {
+		t.Errorf("generated session id was not persisted: %v", err)
+	}
+	if lastSess == nil || len(lastSess.Requests) != 1 {
+		t.Errorf("generated session request count = %v", lastSess)
 	}
 }
 

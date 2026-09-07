@@ -113,7 +113,18 @@ type Template struct {
 	// data only: validation consults it to gate instance model_reasoning
 	// values, and the UI renders the advertised list per model.
 	ModelReasoningOptions map[string][]string `toml:"model_reasoning_options,omitempty"`
-	Docs                  string              `toml:"docs,omitempty"`
+	// SessionHeader names a request header the upstream requires to carry a
+	// stable per-conversation session id on every chat call, or "" when none.
+	// OpenCode Go is the built-in case: it rejects requests without an
+	// x-opencode-session header (HTTP 400 MissingSessionID) so it can route
+	// traffic and cache prompts. When set, the gateway sends the request's
+	// effective session id (the client's X-Session-Id when present, else a
+	// per-request UUID) in this header — the same id it echoes back as
+	// X-Gateway-Session-Id, so turns of one conversation share the upstream
+	// session. The header is synthesised by the forward path only; the
+	// provider model fetch (/models) and quota probes are not affected.
+	SessionHeader string `toml:"session_header,omitempty"`
+	Docs          string `toml:"docs,omitempty"`
 }
 
 // Instance is a concrete account of a template: alias, template, api_key_env,
@@ -609,10 +620,11 @@ func builtinTemplates() map[string]Template {
 			Docs:      "https://opencode.ai/docs/zen/",
 		},
 		"opencode_go": {
-			BaseURL:   "https://opencode.ai/zen/go/v1",
-			APIKeyEnv: "OPENCODE_API_KEY",
-			Models:    []string{"kimi-k2", "deepseek-chat"},
-			Docs:      "https://opencode.ai/docs/go/",
+			BaseURL:       "https://opencode.ai/zen/go/v1",
+			APIKeyEnv:     "OPENCODE_API_KEY",
+			Models:        []string{"deepseek-v4-flash", "deepseek-v4-pro"},
+			SessionHeader: "x-opencode-session",
+			Docs:          "https://opencode.ai/docs/go/",
 		},
 		// commandcode: hybrid gateway (OpenAI-compatible /chat/completions and
 		// Anthropic-style /messages on one base); the catalog entry is

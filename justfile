@@ -64,16 +64,14 @@ base_url = "http://localhost:11434/v1"
 api_key_env = ""
 models = ["llama3.1"]
 
-# The built-in opencode_go template seeds plugins = ["retry_empty"]: the
-# gateway writes it into each opencode_go instance's plugins line on
-# write-back, so the default-on is explicit in the file. Instances with no
-# plugins line have retrying OFF at runtime; explicit `plugins = []` disables
-# it durably.
+# [providers.opencode_go] mirrors the built-in template: Console Go's deepseek
+# thinking models need the x-opencode-session header the gateway synthesises
+# from the request's session id (session_header below); no plugin seed.
 [providers.opencode_go]
 base_url = "https://opencode.ai/zen/go/v1"
 api_key_env = "OPENCODE_API_KEY"
-models = ["kimi-k2", "deepseek-chat"]
-plugins = ["retry_empty"]
+models = ["deepseek-v4-flash", "deepseek-v4-pro"]
+session_header = "x-opencode-session"
 
 [[instances]]
 alias = "openai"

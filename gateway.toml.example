@@ -47,23 +47,28 @@ models = ["llama3.1"]
 # a copy of this list as the instance's `plugins` line, so the file states the
 # default explicitly. It is never consulted at runtime — an instance with no
 # `plugins` line resolves from the global settings (empty by default = OFF).
-# The built-in opencode_go template seeds ["retry_empty"], a control plugin
-# that re-issues an upstream request when the provider returns a premature-
-# empty result (no content, no tool calls — regardless of finish_reason) —
-# up to 3 attempts. Also useful for OpenRouter reasoning models such as
-# stealth/ox-alpha that intermittently reason and then stop empty.
-# Enable it per instance with `plugins = ["retry_empty"]`; disable it durably
-# with an explicit `plugins = []`.
 [providers.openrouter]           # OpenRouter reasoning models (e.g. stealth/ox-alpha)
 base_url = "https://openrouter.ai/api/v1"
 api_key_env = "OPENROUTER_API_KEY"
 models = ["openrouter/auto"]
 
+# [providers.opencode_go] mirrors the built-in template: Console Go's deepseek
+# thinking models, plus the session_header the upstream requires — the gateway
+# synthesises the request's session id into x-opencode-session on every call
+# (without it Console Go answers HTTP 400 MissingSessionID).
 [providers.opencode_go]
 base_url = "https://opencode.ai/zen/go/v1"
 api_key_env = "OPENCODE_API_KEY"
-models = ["kimi-k2", "deepseek-chat"]
-plugins = ["retry_empty"]
+models = ["deepseek-v4-flash", "deepseek-v4-pro"]
+session_header = "x-opencode-session"
+# fill_reasoning_content (request-side) prevents Console Go's thinking-mode
+# 400: "The `reasoning_content` in the thinking mode must be passed back to
+# the API." deepseek thinking models on this endpoint require every assistant
+# message with tool_calls to carry reasoning_content once the conversation has
+# reasoned; agent clients occasionally replay a pure tool-call turn without
+# it, and the upstream rejects the request. The plugin backfills an empty
+# reasoning_content on assistant messages that lack it (empty is accepted).
+plugins = ["fill_reasoning_content"]
 
 [[instances]]                   # INSTANCE 1 of openai — alias defaults to "openai"
 alias = "openai"

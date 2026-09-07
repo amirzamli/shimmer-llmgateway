@@ -232,6 +232,24 @@ func (s *Server) accessLog(next http.Handler) http.Handler {
 	})
 }
 
+// sessionIDFromRequest resolves the §4.3 client-side session id from headers:
+// an explicit X-Session-Id always wins; opencode-style clients that send
+// their native x-opencode-session header are honored next. (Header lookup is
+// case-insensitive, so the x-session-id session-affinity compat spelling is
+// matched by the first branch.) An empty result means the caller falls back
+// to its own (fresh-UUID) default. Values are NOT normalized here —
+// NormalizeSessionID runs at the call site and degrades unsafe or over-length
+// values to a fresh UUID.
+func sessionIDFromRequest(r *http.Request) string {
+	if sid := r.Header.Get("X-Session-Id"); sid != "" {
+		return sid
+	}
+	if sid := r.Header.Get("x-opencode-session"); sid != "" {
+		return sid
+	}
+	return ""
+}
+
 // uiDiskPath is checked before the embedded asset: a web/index.html in the
 // working directory shadows the copy embedded at build time, so UI edits show
 // up on browser refresh without rebuilding or restarting the gateway.
@@ -418,7 +436,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// response, stream and non-stream. The id is normalized against the safe
 	// charset so a malicious X-Session-Id is replaced with a UUID before it is
 	// echoed or persisted (defense in depth against stored XSS via the UI).
-	sessionID := store.NormalizeSessionID(r.Header.Get("X-Session-Id"))
+	sessionID := store.NormalizeSessionID(sessionIDFromRequest(r))
 	w.Header().Set("X-Gateway-Session-Id", sessionID)
 
 	// Pre-generate the request id so log lines and the final capture share one
@@ -505,13 +523,16 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	// Responses-specific extension: Codex CLI sends no X-Session-Id but does
 	// send a stable per-conversation prompt_cache_key in the body, so without
 	// grouping each turn captured as its own 1-request session. Resolution
-	// order: an explicit X-Session-Id header always wins; else the body's
+	// order: an explicit X-Session-Id header always wins (header lookup is
+	// case-insensitive, so the x-session-id session-affinity compat spelling
+	// lands in the same branch); else the x-opencode-session header opencode-
+	// style clients send natively; else the body's
 	// prompt_cache_key derives the session id, prefixed to avoid cross-surface
 	// collisions with chat-surface ids; else a fresh UUID per request (the
 	// unchanged no-header fallback). The derived id passes through the same
 	// normalization as a header id, so an unsafe or over-length key degrades
 	// to the fresh-UUID fallback rather than being persisted.
-	sessionID := r.Header.Get("X-Session-Id")
+	sessionID := sessionIDFromRequest(r)
 	if sessionID == "" && req.PromptCacheKey != "" {
 		sessionID = "responses-" + req.PromptCacheKey
 	}
@@ -594,15 +615,18 @@ func (s *Server) handleResponsesGet(w http.ResponseWriter, r *http.Request) {
 // buildUpstream builds the provider request: Authorization injected from the
 // resolved instance's api_key_env (never from the client — keys are not
 // stored or logged), body forwarded verbatim except the model field rewritten
-// to the resolved model name. cfg is the request's config snapshot. The
-// returned sentBody is the exact bytes forwarded to the provider (post-model
-// rewrite), used as request_filtered_json when request plugins ran.
+// to the resolved model name. Templates that declare a SessionHeader (e.g.
+// opencode_go → x-opencode-session) get it set from the request's effective
+// session id, so the upstream sees one stable session per conversation. cfg
+// is the request's config snapshot. The returned sentBody is the exact bytes
+// forwarded to the provider (post-model rewrite), used as
+// request_filtered_json when request plugins ran.
 //
 // Anthropic-style templates talk the Messages API instead: the OpenAI body is
 // translated (translateOpenAIToAnthropic), the endpoint is <base_url>/messages,
 // the key rides the x-api-key header, and the anthropic-version header is set
 // (plus the extended-thinking beta header when the request enables thinking).
-func (s *Server) buildUpstream(ctx context.Context, cfg *config.Config, rt *route, body []byte) (*http.Request, []byte, error) {
+func (s *Server) buildUpstream(ctx context.Context, cfg *config.Config, rt *route, body []byte, sessionID string) (*http.Request, []byte, error) {
 	upstreamBody := body
 	sent, ok := modelField(body)
 	if !ok || sent != rt.model || rt.reasoning != "" {
@@ -650,6 +674,13 @@ func (s *Server) buildUpstream(ctx context.Context, cfg *config.Config, rt *rout
 		if bodyHasThinking(upstreamBody) {
 			req.Header.Set("anthropic-beta", anthropicThinkingBetaHeader)
 		}
+	}
+	// Providers that require a session-context header (opencode_go's
+	// x-opencode-session) get the request's effective session id — the same
+	// id echoed as X-Gateway-Session-Id — so upstream sees one stable session
+	// per conversation and never rejects with MissingSessionID.
+	if h := rt.template.SessionHeader; h != "" && sessionID != "" {
+		req.Header.Set(h, sessionID)
 	}
 	return req, upstreamBody, nil
 }
@@ -752,7 +783,7 @@ func (s *Server) handleNonStream(w http.ResponseWriter, r *http.Request, cfg *co
 		return
 	}
 
-	req, sentBody, err := s.buildUpstream(r.Context(), cfg, rt, forwardedBody)
+	req, sentBody, err := s.buildUpstream(r.Context(), cfg, rt, forwardedBody, sessionID)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "CONFIG_ERROR", err.Error())
 		return
@@ -849,7 +880,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *confi
 		return
 	}
 
-	req, sentBody, err := s.buildUpstream(ctx, cfg, rt, forwardedBody)
+	req, sentBody, err := s.buildUpstream(ctx, cfg, rt, forwardedBody, sessionID)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "CONFIG_ERROR", err.Error())
 		return

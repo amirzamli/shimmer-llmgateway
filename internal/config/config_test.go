@@ -355,6 +355,11 @@ func TestBuiltinTemplatesPresent(t *testing.T) {
 	if cfg.Templates["deepseek"].BaseURL != "https://api.deepseek.com" {
 		t.Errorf("deepseek base_url = %q", cfg.Templates["deepseek"].BaseURL)
 	}
+	// OpenCode Go enforces a per-conversation session header upstream; the
+	// built-in template declares it so the forward path synthesises one.
+	if got := cfg.Templates["opencode_go"].SessionHeader; got != "x-opencode-session" {
+		t.Errorf("opencode_go session_header = %q, want x-opencode-session", got)
+	}
 	if cfg.Templates["zai"].BaseURL != "https://api.z.ai/api/paas/v4" {
 		t.Errorf("zai base_url = %q", cfg.Templates["zai"].BaseURL)
 	}
