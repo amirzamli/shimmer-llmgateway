@@ -10,7 +10,8 @@ package gateway
 //     (system hoisted to the top-level field, tool definitions/choices mapped,
 //     tool results become user messages with tool_result blocks, consecutive
 //     same-role messages merged, max_tokens defaulted, reasoning_effort mapped
-//     to extended thinking);
+//     to extended thinking, image parts mapped to image blocks with base64 or
+//     URL sources and unsupported ones skipped with a warn log);
 //   - translateAnthropicToOpenAI: non-stream messages response → chat.completion
 //     (thinking → reasoning_content, tool_use blocks → tool_calls);
 //   - translateAnthropicError: Anthropic error bodies → OpenAI error shape;
@@ -28,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/amirzamli/shimmer-llmgateway/internal/logging"
 	"github.com/amirzamli/shimmer-llmgateway/internal/store"
 )
 
@@ -101,10 +103,13 @@ type openAITool struct {
 	} `json:"function"`
 }
 
-// anthropicBlock is one Anthropic content block (text / tool_use / tool_result).
+// anthropicBlock is one Anthropic content block (text / image / tool_use /
+// tool_result). Image blocks carry the source object (base64 or URL
+// reference); tool_result blocks carry the string-or-block-array Content.
 type anthropicBlock struct {
 	Type      string          `json:"type"`
 	Text      string          `json:"text,omitempty"`
+	Source    json.RawMessage `json:"source,omitempty"`
 	ID        string          `json:"id,omitempty"`
 	Name      string          `json:"name,omitempty"`
 	Input     json.RawMessage `json:"input,omitempty"`
@@ -115,8 +120,9 @@ type anthropicBlock struct {
 // translateOpenAIToAnthropic converts an OpenAI chat.completions body into an
 // Anthropic messages body. Anything the Anthropic API does not accept (extra
 // fields like presence_penalty or logprobs) is deliberately dropped — the
-// translated body carries only known Anthropic fields.
-func translateOpenAIToAnthropic(body []byte) ([]byte, error) {
+// translated body carries only known Anthropic fields. The logger (nil in
+// unit tests) receives a warn per dropped image part.
+func translateOpenAIToAnthropic(body []byte, logger *logging.Logger) ([]byte, error) {
 	var req struct {
 		Model               string          `json:"model"`
 		Messages            []openAIMsg     `json:"messages"`
@@ -134,7 +140,7 @@ func translateOpenAIToAnthropic(body []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	system, messages := translateMessages(req.Messages)
+	system, messages := translateMessages(logger, req.Messages)
 
 	out := map[string]any{
 		"model":      req.Model,
@@ -188,7 +194,7 @@ func maxTokensOf(maxTokens, maxCompletionTokens *int) int {
 // blank lines), tool results become user messages carrying tool_result blocks,
 // and consecutive same-role messages are merged (the Anthropic API requires
 // strictly alternating user/assistant roles).
-func translateMessages(messages []openAIMsg) (string, []anthropicMessage) {
+func translateMessages(logger *logging.Logger, messages []openAIMsg) (string, []anthropicMessage) {
 	var systems []string
 	converted := make([]anthropicMessage, 0, len(messages))
 	for _, m := range messages {
@@ -220,10 +226,10 @@ func translateMessages(messages []openAIMsg) (string, []anthropicMessage) {
 			converted = append(converted, anthropicMessage{Role: "user", Content: marshalBlocks([]anthropicBlock{{
 				Type:      "tool_result",
 				ToolUseID: m.ToolCallID,
-				Content:   marshalTextOrBlocks(m.Content),
+				Content:   marshalTextOrBlocks(logger, m.Content),
 			}})})
 		default: // user and anything else
-			converted = append(converted, anthropicMessage{Role: "user", Content: marshalUserContent(m.Content)})
+			converted = append(converted, anthropicMessage{Role: "user", Content: marshalUserContent(logger, m.Content)})
 		}
 	}
 
@@ -272,9 +278,13 @@ func contentText(content json.RawMessage) string {
 }
 
 // marshalUserContent converts an OpenAI user message content (string or part
-// array) into a block array. Text parts are kept; image parts are dropped
-// unless they are base64 data URIs (the only image form Anthropic accepts).
-func marshalUserContent(content json.RawMessage) json.RawMessage {
+// array) into a block array. Text parts are kept; image parts become image
+// blocks when their URL is forwardable — data:image/ URIs inline as base64,
+// https URLs by reference. Anything else (other schemes, malformed data URIs)
+// is skipped with a warn log — never emitted as a source-less image block.
+// When a part array yields no blocks at all, a placeholder text block stands
+// in so the message content is never null.
+func marshalUserContent(logger *logging.Logger, content json.RawMessage) json.RawMessage {
 	var s string
 	if err := json.Unmarshal(content, &s); err == nil {
 		if s == "" {
@@ -300,19 +310,48 @@ func marshalUserContent(content json.RawMessage) json.RawMessage {
 				blocks = append(blocks, anthropicBlock{Type: "text", Text: p.Text})
 			}
 		case "image_url":
-			if p.ImageURL != nil && strings.HasPrefix(p.ImageURL.URL, "data:image/") {
-				blocks = append(blocks, anthropicBlock{Type: "image", Content: marshalImageSource(p.ImageURL.URL)})
+			if p.ImageURL == nil {
+				continue
+			}
+			switch {
+			case strings.HasPrefix(p.ImageURL.URL, "data:image/"):
+				src := marshalImageSource(p.ImageURL.URL)
+				if src == nil {
+					// Malformed data URI (no comma/payload): skip rather
+					// than send a source-less image block upstream.
+					warnImageSkipped(logger, p.ImageURL.URL)
+					continue
+				}
+				blocks = append(blocks, anthropicBlock{Type: "image", Source: src})
+			case strings.HasPrefix(p.ImageURL.URL, "https://"):
+				blocks = append(blocks, anthropicBlock{Type: "image", Source: marshalURLImageSource(p.ImageURL.URL)})
+			default:
+				warnImageSkipped(logger, p.ImageURL.URL)
 			}
 		}
 	}
 	if len(blocks) == 0 {
-		return nil
+		// Every part was skipped or dropped (unsupported image references,
+		// empty text): the placeholder keeps the content a valid block array.
+		return marshalBlocks([]anthropicBlock{{Type: "text", Text: contentOmittedPlaceholder}})
 	}
 	return marshalBlocks(blocks)
 }
 
+// warnImageSkipped logs one dropped image part (unsupported scheme or
+// malformed data URI). The logger is nil in unit tests; URLs are truncated so
+// base64 data payloads never reach the log stream.
+func warnImageSkipped(logger *logging.Logger, url string) {
+	if logger == nil {
+		return
+	}
+	logger.Warn("anthropic_image_part_skipped", map[string]any{"url": snippet(url, 64)})
+}
+
 // marshalImageSource converts a data:image/<type>;base64,<data> URI into an
-// Anthropic image source object.
+// Anthropic base64 image source object. It returns nil for a malformed URI
+// (no comma separating media type and payload); callers skip the part rather
+// than emit a source-less image block.
 func marshalImageSource(dataURI string) json.RawMessage {
 	rest := strings.TrimPrefix(dataURI, "data:")
 	comma := strings.IndexByte(rest, ',')
@@ -328,15 +367,23 @@ func marshalImageSource(dataURI string) json.RawMessage {
 	return b
 }
 
+// marshalURLImageSource builds an Anthropic image source that references a
+// public https URL.
+func marshalURLImageSource(url string) json.RawMessage {
+	b, _ := json.Marshal(map[string]string{"type": "url", "url": url})
+	return b
+}
+
 // marshalTextOrBlocks renders a tool result content field: strings stay
-// strings, part arrays become text blocks.
-func marshalTextOrBlocks(content json.RawMessage) json.RawMessage {
+// strings, part arrays become text/image blocks (unsupported parts skipped
+// with a warn log; an all-skipped array yields the placeholder text block).
+func marshalTextOrBlocks(logger *logging.Logger, content json.RawMessage) json.RawMessage {
 	var s string
 	if err := json.Unmarshal(content, &s); err == nil {
 		b, _ := json.Marshal(s)
 		return b
 	}
-	if b := marshalUserContent(content); b != nil {
+	if b := marshalUserContent(logger, content); b != nil {
 		return b
 	}
 	b, _ := json.Marshal("ok")

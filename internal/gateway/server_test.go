@@ -469,6 +469,65 @@ func TestNonStreamForwardAndCapture(t *testing.T) {
 	}
 }
 
+// Chat image input is verbatim passthrough: the provider sees the image_url
+// content part exactly as received, and capture stores the as-received bytes.
+// Regression guard — the chat request path must never be rewritten.
+func TestChatCompletionsImagePassthrough(t *testing.T) {
+	provider := newFakeProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"chatcmpl-x","object":"chat.completion","created":1722600000,"model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"a cat"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`))
+	})
+	gs, st := newGatewayTest(t, provider, twoInstanceTOML, defaultEnv)
+
+	raw := `{"model":"gpt-4o","messages":[{"role":"user","content":[{"type":"text","text":"what is this?"},{"type":"image_url","image_url":{"url":"https://x/cat.png"}}]}]}`
+	resp := postChat(t, gs, raw, map[string]string{"X-Session-Id": "sess-chatimg"})
+	body := drainClose(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", resp.StatusCode, body)
+	}
+
+	seen := provider.requests()
+	if len(seen) != 1 {
+		t.Fatalf("provider saw %d requests, want 1", len(seen))
+	}
+	var upstream struct {
+		Model    string `json:"model"`
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(seen[0].Body, &upstream); err != nil {
+		t.Fatalf("upstream body not JSON: %v (%s)", err, seen[0].Body)
+	}
+	if upstream.Model != "gpt-4o" || len(upstream.Messages) != 1 || upstream.Messages[0].Role != "user" {
+		t.Errorf("upstream body = %s", seen[0].Body)
+	}
+	var parts []struct {
+		Type     string `json:"type"`
+		Text     string `json:"text"`
+		ImageURL struct {
+			URL string `json:"url"`
+		} `json:"image_url"`
+	}
+	if err := json.Unmarshal(upstream.Messages[0].Content, &parts); err != nil {
+		t.Fatalf("upstream content not a part array: %v (%s)", err, upstream.Messages[0].Content)
+	}
+	if len(parts) != 2 || parts[0].Type != "text" || parts[0].Text != "what is this?" ||
+		parts[1].Type != "image_url" || parts[1].ImageURL.URL != "https://x/cat.png" {
+		t.Errorf("upstream parts = %+v, want the image_url part forwarded verbatim", parts)
+	}
+
+	// Capture: the as-received body, image included.
+	req := waitForRequest(t, st, "sess-chatimg", 5*time.Second)
+	if req.Endpoint != "/v1/chat/completions" {
+		t.Errorf("endpoint = %q, want /v1/chat/completions", req.Endpoint)
+	}
+	if string(req.RequestJSON) != raw {
+		t.Errorf("request_json not the as-received body:\n got %q\nwant %q", req.RequestJSON, raw)
+	}
+}
+
 func TestNonStreamNon2xxRecordedAndPassthrough(t *testing.T) {
 	provider := newFakeProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

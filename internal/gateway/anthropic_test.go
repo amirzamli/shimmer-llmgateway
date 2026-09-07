@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/amirzamli/shimmer-llmgateway/internal/logging"
 )
 
 // ---------- request translation ----------
@@ -27,7 +29,7 @@ func TestTranslateOpenAIToAnthropic(t *testing.T) {
 	    {"role": "user", "content": [{"type": "text", "text": "Thanks"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]}
 	  ]
 	}`
-	out, err := translateOpenAIToAnthropic([]byte(body))
+	out, err := translateOpenAIToAnthropic([]byte(body), nil)
 	if err != nil {
 		t.Fatalf("translate: %v", err)
 	}
@@ -116,9 +118,71 @@ func TestTranslateOpenAIToAnthropic(t *testing.T) {
 	if img["type"] != "image" {
 		t.Errorf("image block = %v", img)
 	}
-	src := img["content"].(map[string]any)
+	src := img["source"].(map[string]any)
 	if src["type"] != "base64" || src["media_type"] != "image/png" || src["data"] != "AAAA" {
-		t.Errorf("image source = %v", img["content"])
+		t.Errorf("image source = %v", img["source"])
+	}
+	if _, hasContent := img["content"]; hasContent {
+		t.Errorf("image block must not carry the tool_result content field: %v", img)
+	}
+}
+
+// Anthropic image sources: data URIs inline as base64, https URLs reference
+// the image by URL, and anything unsupported (other schemes, malformed data
+// URIs) is skipped with a warn log — never emitted as a source-less or
+// nil-source image block. A message whose parts were all dropped contributes
+// a placeholder text block instead of null content.
+func TestTranslateOpenAIToAnthropicImageSources(t *testing.T) {
+	body := `{"model":"m","messages":[
+	  {"role":"user","content":[{"type":"text","text":"a"},{"type":"image_url","image_url":{"url":"https://x/y.png"}},{"type":"image_url","image_url":{"url":"http://z/w.png"}}]},
+	  {"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,BBBB"}}]},
+	  {"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64"}}]}
+	]}`
+	var logBuf lockedBuffer
+	out, err := translateOpenAIToAnthropic([]byte(body), logging.New(&logBuf))
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	var v map[string]any
+	if err := json.Unmarshal(out, &v); err != nil {
+		t.Fatalf("output not JSON: %v", err)
+	}
+	msgs := v["messages"].([]any)
+	// The three user messages merge into one turn carrying: the text, the
+	// https image (url source), the base64 image, and one placeholder for the
+	// all-skipped malformed-data-URI message. The http image and the
+	// malformed data URI are skipped, never sent as source-less blocks.
+	if len(msgs) != 1 {
+		t.Fatalf("messages = %v", msgs)
+	}
+	blocks := msgs[0].(map[string]any)["content"].([]any)
+	if len(blocks) != 4 {
+		t.Fatalf("blocks = %v", blocks)
+	}
+	if b := blocks[0].(map[string]any); b["type"] != "text" || b["text"] != "a" {
+		t.Errorf("block 0 = %v", b)
+	}
+	urlImg := blocks[1].(map[string]any)
+	if urlImg["type"] != "image" {
+		t.Errorf("https image block = %v", urlImg)
+	}
+	if src, ok := urlImg["source"].(map[string]any); !ok || src["type"] != "url" || src["url"] != "https://x/y.png" {
+		t.Errorf("https image source = %v", urlImg["source"])
+	}
+	if _, hasContent := urlImg["content"]; hasContent {
+		t.Errorf("image block must not carry the tool_result content field: %v", urlImg)
+	}
+	b64Img := blocks[2].(map[string]any)
+	if src, ok := b64Img["source"].(map[string]any); !ok || src["type"] != "base64" || src["media_type"] != "image/jpeg" || src["data"] != "BBBB" {
+		t.Errorf("base64 image source = %v", b64Img["source"])
+	}
+	if b := blocks[3].(map[string]any); b["type"] != "text" || b["text"] != contentOmittedPlaceholder {
+		t.Errorf("placeholder block = %v, want a %q text block", b, contentOmittedPlaceholder)
+	}
+	// Both skips are warned once (http scheme + malformed data URI).
+	lines := logBuf.String()
+	if got := strings.Count(lines, `"event":"anthropic_image_part_skipped"`); got != 2 {
+		t.Errorf("anthropic_image_part_skipped warn lines = %d, want 2:\n%s", got, lines)
 	}
 }
 
@@ -132,7 +196,7 @@ func TestTranslateOpenAIToAnthropicDefaultsAndMerge(t *testing.T) {
 	  {"role":"assistant","content":"one"},
 	  {"role":"assistant","content":"two"}
 	]}`
-	out, err := translateOpenAIToAnthropic([]byte(body))
+	out, err := translateOpenAIToAnthropic([]byte(body), nil)
 	if err != nil {
 		t.Fatalf("translate: %v", err)
 	}
@@ -154,7 +218,7 @@ func TestTranslateOpenAIToAnthropicDefaultsAndMerge(t *testing.T) {
 }
 
 func TestTranslateToolChoiceFunctionObject(t *testing.T) {
-	out, err := translateOpenAIToAnthropic([]byte(`{"model":"m","tool_choice":{"type":"function","function":{"name":"f"}},"messages":[{"role":"user","content":"x"}]}`))
+	out, err := translateOpenAIToAnthropic([]byte(`{"model":"m","tool_choice":{"type":"function","function":{"name":"f"}},"messages":[{"role":"user","content":"x"}]}`), nil)
 	if err != nil {
 		t.Fatalf("translate: %v", err)
 	}

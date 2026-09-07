@@ -164,7 +164,7 @@ func translateResponsesToChat(req *responsesRequest) ([]byte, error) {
 						}},
 					})
 				case "function_call_output":
-					output, err := responsesContentText(item.Output)
+					output, err := responsesContentToChat(item.Output)
 					if err != nil {
 						return nil, fmt.Errorf("function_call_output: %v", err)
 					}
@@ -262,18 +262,91 @@ func responsesMessageToChat(item responsesItem) (map[string]any, error) {
 	if role == "developer" {
 		role = "system"
 	}
-	text, err := responsesContentText(item.Content)
+	content, err := responsesContentToChat(item.Content)
 	if err != nil {
 		return nil, fmt.Errorf("message role %q: %v", item.Role, err)
 	}
-	return map[string]any{"role": role, "content": text}, nil
+	return map[string]any{"role": role, "content": content}, nil
 }
 
-// responsesContentText extracts plain text from a Responses content field: a
-// string stays as-is, an array joins the text of input_text/output_text
-// parts, null/absent becomes "". Any other part type is an error — the shim
-// is text-only.
-func responsesContentText(content json.RawMessage) (string, error) {
+// responsesContentPart is one element of a Responses content part array.
+// input_image carries image_url as a plain string (unlike chat's nested
+// {"url": ...} object) plus an optional detail hint; file uploads carry a
+// file_id instead of a URL, which cannot be forwarded to chat upstreams.
+type responsesContentPart struct {
+	Type     string `json:"type"`
+	Text     string `json:"text"`
+	ImageURL string `json:"image_url"`
+	Detail   string `json:"detail"`
+}
+
+// contentOmittedPlaceholder stands in when every content part of a message
+// was skipped (file-referenced images, unknown part types), so a translated
+// message never carries empty or null content.
+const contentOmittedPlaceholder = "[image omitted: unsupported reference]"
+
+// responsesPartUnsupported reports whether a Responses content part cannot be
+// forwarded to chat upstreams ("" when it can): unknown part types and image
+// parts that reference a file instead of carrying a URL are skipped with a
+// warn log, not rejected — the same tolerance as unknown tool types.
+func responsesPartUnsupported(p responsesContentPart) string {
+	switch p.Type {
+	case "input_text", "output_text":
+		return ""
+	case "input_image":
+		if p.ImageURL != "" {
+			return ""
+		}
+		return p.Type
+	default:
+		return p.Type
+	}
+}
+
+// responsesSkippedPartTypes lists the unsupported content part types in a
+// Responses content field (plain strings have none; structurally invalid
+// arrays are translation errors, not skips). handleResponses logs the result;
+// translation applies the same predicate.
+func responsesSkippedPartTypes(content json.RawMessage) []string {
+	if len(content) == 0 || string(content) == "null" {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(content, &s); err == nil {
+		return nil
+	}
+	var parts []responsesContentPart
+	if err := json.Unmarshal(content, &parts); err != nil {
+		return nil
+	}
+	var skipped []string
+	for _, p := range parts {
+		if t := responsesPartUnsupported(p); t != "" {
+			skipped = append(skipped, t)
+		}
+	}
+	return skipped
+}
+
+// responsesImageChatPart maps a Responses input_image part to the chat
+// image_url part shape. The URL string is forwarded verbatim (data:, https:,
+// http: — the chat upstream decides what it accepts); the optional detail
+// hint rides along when present.
+func responsesImageChatPart(p responsesContentPart) map[string]any {
+	img := map[string]any{"url": p.ImageURL}
+	if p.Detail != "" {
+		img["detail"] = p.Detail
+	}
+	return map[string]any{"type": "image_url", "image_url": img}
+}
+
+// responsesContentToChat maps a Responses content field (string or part
+// array) to a chat content value. Strings pass through; a text-only array
+// collapses to the joined string (unchanged); an array containing image parts
+// becomes a chat part array (text parts keep their order). Unsupported parts
+// are skipped; an array whose parts were all skipped yields a single
+// placeholder text part so the chat message content is never empty.
+func responsesContentToChat(content json.RawMessage) (any, error) {
 	if len(content) == 0 || string(content) == "null" {
 		return "", nil
 	}
@@ -281,23 +354,33 @@ func responsesContentText(content json.RawMessage) (string, error) {
 	if err := json.Unmarshal(content, &s); err == nil {
 		return s, nil
 	}
-	var parts []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
+	var parts []responsesContentPart
 	if err := json.Unmarshal(content, &parts); err != nil {
-		return "", fmt.Errorf("invalid content: %s", snippet(string(content), 64))
+		return nil, fmt.Errorf("invalid content: %s", snippet(string(content), 64))
 	}
-	var b strings.Builder
+	var texts []string
+	var chatParts []any
+	hasImage := false
 	for _, p := range parts {
-		switch p.Type {
-		case "input_text", "output_text":
-			b.WriteString(p.Text)
-		default:
-			return "", fmt.Errorf("unsupported content part type %q", p.Type)
+		if responsesPartUnsupported(p) != "" {
+			continue
 		}
+		if p.Type == "input_image" {
+			hasImage = true
+			chatParts = append(chatParts, responsesImageChatPart(p))
+			continue
+		}
+		texts = append(texts, p.Text)
+		chatParts = append(chatParts, map[string]any{"type": "text", "text": p.Text})
 	}
-	return b.String(), nil
+	if !hasImage {
+		if len(chatParts) == 0 && len(parts) > 0 {
+			// Every part was skipped (file references, unknown types).
+			return []any{map[string]any{"type": "text", "text": contentOmittedPlaceholder}}, nil
+		}
+		return strings.Join(texts, ""), nil
+	}
+	return chatParts, nil
 }
 
 // translateResponsesToolChoice maps Responses tool_choice to the chat form:

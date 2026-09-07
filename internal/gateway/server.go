@@ -540,6 +540,30 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// Unsupported content parts (file-referenced images, unknown part types)
+	// are skipped during translation, not rejected — same tolerance as
+	// unknown tool types. Log what was dropped once per request.
+	var skippedParts []string
+	if len(req.Input) > 0 && string(req.Input) != "null" {
+		var items []responsesItem
+		if err := json.Unmarshal(req.Input, &items); err == nil {
+			for _, item := range items {
+				switch item.Type {
+				case "", "message":
+					skippedParts = append(skippedParts, responsesSkippedPartTypes(item.Content)...)
+				case "function_call_output":
+					skippedParts = append(skippedParts, responsesSkippedPartTypes(item.Output)...)
+				}
+			}
+		}
+	}
+	if len(skippedParts) > 0 {
+		s.logger.Warn("responses_unsupported_part_skipped", map[string]any{
+			"request_id": requestID,
+			"types":      skippedParts,
+		})
+	}
+
 	chatBody, err := translateResponsesToChat(req)
 	if err != nil {
 		s.writeResponsesError(w, http.StatusBadRequest, "invalid_request_error", "", err.Error())
@@ -591,7 +615,7 @@ func (s *Server) buildUpstream(ctx context.Context, cfg *config.Config, rt *rout
 
 	anthropic := rt.template.Style == config.StyleAnthropic
 	if anthropic {
-		translated, err := translateOpenAIToAnthropic(upstreamBody)
+		translated, err := translateOpenAIToAnthropic(upstreamBody, s.logger)
 		if err != nil {
 			return nil, nil, err
 		}

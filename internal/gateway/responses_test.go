@@ -348,9 +348,9 @@ func TestTranslateResponsesRejections(t *testing.T) {
 			wantMsg: "unsupported input item type",
 		},
 		{
-			name:    "image content part",
-			body:    `{"model":"gpt-4o","input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"https://x/y.png"}]}]}`,
-			wantMsg: "unsupported content part type",
+			name:    "structurally invalid content",
+			body:    `{"model":"gpt-4o","input":[{"type":"message","role":"user","content":42}]}`,
+			wantMsg: "invalid content",
 		},
 		{
 			name:    "unknown role",
@@ -450,6 +450,199 @@ func TestTranslateResponsesUnknownToolsSkipped(t *testing.T) {
 	}
 	if _, ok := m["tools"]; ok {
 		t.Errorf("tools key should be absent when every tool was skipped: %s", out)
+	}
+}
+
+// input_image parts map to chat image_url parts: the Responses image_url is a
+// plain string forwarded verbatim, the optional detail hint rides along, and
+// text parts keep their order.
+func TestTranslateResponsesImageParts(t *testing.T) {
+	body := `{"model":"gpt-4o","input":[
+	  {"type":"message","role":"user","content":[
+	    {"type":"input_text","text":"what is this?"},
+	    {"type":"input_image","image_url":"data:image/png;base64,AAAA","detail":"high"},
+	    {"type":"input_image","image_url":"https://x/y.png"}]},
+	  {"type":"message","role":"user","content":[
+	    {"type":"input_image","image_url":"https://x/z.png"}]}]}`
+	req, err := parseResponsesRequest([]byte(body))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	out, err := translateResponsesToChat(req)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	var v struct {
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &v); err != nil {
+		t.Fatalf("output not JSON: %v", err)
+	}
+	if len(v.Messages) != 2 {
+		t.Fatalf("messages = %+v", v.Messages)
+	}
+	var parts []struct {
+		Type     string `json:"type"`
+		Text     string `json:"text"`
+		ImageURL struct {
+			URL    string `json:"url"`
+			Detail string `json:"detail"`
+		} `json:"image_url"`
+	}
+	if err := json.Unmarshal(v.Messages[0].Content, &parts); err != nil {
+		t.Fatalf("content not a part array: %v (%s)", err, v.Messages[0].Content)
+	}
+	if len(parts) != 3 {
+		t.Fatalf("parts = %+v", parts)
+	}
+	if parts[0].Type != "text" || parts[0].Text != "what is this?" {
+		t.Errorf("part 0 = %+v", parts[0])
+	}
+	if parts[1].Type != "image_url" || parts[1].ImageURL.URL != "data:image/png;base64,AAAA" || parts[1].ImageURL.Detail != "high" {
+		t.Errorf("part 1 = %+v, want image_url with the data URI and detail high", parts[1])
+	}
+	if parts[2].Type != "image_url" || parts[2].ImageURL.URL != "https://x/y.png" || parts[2].ImageURL.Detail != "" {
+		t.Errorf("part 2 = %+v, want image_url with the https URL and no detail", parts[2])
+	}
+	if err := json.Unmarshal(v.Messages[1].Content, &parts); err != nil {
+		t.Fatalf("second content not a part array: %v (%s)", err, v.Messages[1].Content)
+	}
+	if len(parts) != 1 || parts[0].Type != "image_url" || parts[0].ImageURL.URL != "https://x/z.png" {
+		t.Errorf("image-only message = %+v", parts)
+	}
+}
+
+// Image parts that reference a file (file_id, no URL) are skipped, not
+// rejected: surrounding text is preserved, and a message whose parts are ALL
+// skipped gets a placeholder text part so the chat content is never empty.
+func TestTranslateResponsesFileIDImageSkipped(t *testing.T) {
+	body := `{"model":"gpt-4o","input":[
+	  {"type":"message","role":"user","content":[
+	    {"type":"input_text","text":"describe"},
+	    {"type":"input_image","file_id":"file-1"}]},
+	  {"type":"message","role":"user","content":[
+	    {"type":"input_image","file_id":"file-2"}]}]}`
+	req, err := parseResponsesRequest([]byte(body))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	out, err := translateResponsesToChat(req)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	var v struct {
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &v); err != nil {
+		t.Fatalf("output not JSON: %v", err)
+	}
+	if len(v.Messages) != 2 {
+		t.Fatalf("messages = %+v", v.Messages)
+	}
+	var content string
+	if err := json.Unmarshal(v.Messages[0].Content, &content); err != nil {
+		t.Fatalf("first content should collapse to the remaining text: %v (%s)", err, v.Messages[0].Content)
+	}
+	if content != "describe" {
+		t.Errorf("content = %q, want describe (file_id image skipped)", content)
+	}
+	var parts []map[string]any
+	if err := json.Unmarshal(v.Messages[1].Content, &parts); err != nil {
+		t.Fatalf("all-skipped content should be a placeholder part array: %v (%s)", err, v.Messages[1].Content)
+	}
+	if len(parts) != 1 || parts[0]["type"] != "text" || parts[0]["text"] != contentOmittedPlaceholder {
+		t.Errorf("placeholder content = %v, want one %q text part", parts, contentOmittedPlaceholder)
+	}
+}
+
+// Unknown part types (e.g. input_audio) are skipped, not rejected — the same
+// tolerance as unknown tool types; remaining text is preserved.
+func TestTranslateResponsesUnknownPartSkipped(t *testing.T) {
+	body := `{"model":"gpt-4o","input":[{"type":"message","role":"user","content":[
+	  {"type":"input_audio","input_audio":{"format":"wav","data":"x"}},
+	  {"type":"input_text","text":"hi"}]}]}`
+	req, err := parseResponsesRequest([]byte(body))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	out, err := translateResponsesToChat(req)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	var v struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &v); err != nil {
+		t.Fatalf("output not JSON: %v", err)
+	}
+	if len(v.Messages) != 1 || v.Messages[0].Content != "hi" {
+		t.Errorf("messages = %+v, want one user message with the text preserved", v.Messages)
+	}
+}
+
+// function_call_output accepts array content: text-only arrays still collapse
+// to a string, arrays with image parts become a chat tool content array of
+// text/image_url parts.
+func TestTranslateResponsesFunctionCallOutputArray(t *testing.T) {
+	body := `{"model":"gpt-4o","input":[
+	  {"type":"function_call_output","call_id":"call_1","output":[
+	    {"type":"output_text","text":"chart:"},
+	    {"type":"input_image","image_url":"https://x/c.png"}]},
+	  {"type":"function_call_output","call_id":"call_2","output":[
+	    {"type":"output_text","text":"plain"}]}]}`
+	req, err := parseResponsesRequest([]byte(body))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	out, err := translateResponsesToChat(req)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	var v struct {
+		Messages []struct {
+			Role       string          `json:"role"`
+			Content    json.RawMessage `json:"content"`
+			ToolCallID string          `json:"tool_call_id"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &v); err != nil {
+		t.Fatalf("output not JSON: %v", err)
+	}
+	if len(v.Messages) != 2 {
+		t.Fatalf("messages = %+v", v.Messages)
+	}
+	if v.Messages[0].Role != "tool" || v.Messages[0].ToolCallID != "call_1" {
+		t.Errorf("first tool message = %+v", v.Messages[0])
+	}
+	var parts []struct {
+		Type     string `json:"type"`
+		Text     string `json:"text"`
+		ImageURL struct {
+			URL string `json:"url"`
+		} `json:"image_url"`
+	}
+	if err := json.Unmarshal(v.Messages[0].Content, &parts); err != nil {
+		t.Fatalf("tool content not a part array: %v (%s)", err, v.Messages[0].Content)
+	}
+	if len(parts) != 2 || parts[0].Type != "text" || parts[0].Text != "chart:" ||
+		parts[1].Type != "image_url" || parts[1].ImageURL.URL != "https://x/c.png" {
+		t.Errorf("tool content parts = %+v", parts)
+	}
+	var content string
+	if err := json.Unmarshal(v.Messages[1].Content, &content); err != nil {
+		t.Fatalf("text-only tool content should collapse to a string: %v (%s)", err, v.Messages[1].Content)
+	}
+	if content != "plain" {
+		t.Errorf("tool content = %q, want plain", content)
 	}
 }
 
@@ -871,6 +1064,127 @@ func TestResponsesUnknownToolsSkippedEndToEnd(t *testing.T) {
 	if req.Endpoint != "/v1/responses" {
 		t.Errorf("endpoint = %q, want /v1/responses", req.Endpoint)
 	}
+	if string(req.RequestJSON) != raw {
+		t.Errorf("request_json not the as-received Responses bytes:\n got %q\nwant %q", req.RequestJSON, raw)
+	}
+}
+
+// Image input rides the full pipeline: the provider sees the chat image_url
+// part, the client gets a normal Responses object, and capture keeps the
+// as-received Responses bytes (image included) with a chat-shaped response.
+func TestResponsesImageEndToEnd(t *testing.T) {
+	provider := newFakeProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"chatcmpl-x","object":"chat.completion","created":1722600000,"model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"a cat"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`))
+	})
+	gs, st := newGatewayTest(t, provider, twoInstanceTOML, defaultEnv)
+
+	raw := `{"model":"gpt-4o","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"what is this?"},{"type":"input_image","image_url":"https://x/cat.png"}]}]}`
+	resp := postResponses(t, gs, raw, map[string]string{"X-Session-Id": "sess-img"})
+	body := drainClose(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", resp.StatusCode, body)
+	}
+	var v struct {
+		Object string `json:"object"`
+		Status string `json:"status"`
+		Output []struct {
+			Type    string `json:"type"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(body, &v); err != nil {
+		t.Fatalf("client body not a response object: %v (%s)", err, body)
+	}
+	if v.Object != "response" || v.Status != "completed" {
+		t.Errorf("object/status = %q/%q", v.Object, v.Status)
+	}
+	if len(v.Output) != 1 || v.Output[0].Type != "message" || len(v.Output[0].Content) != 1 || v.Output[0].Content[0].Text != "a cat" {
+		t.Errorf("output = %+v", v.Output)
+	}
+
+	// The upstream chat body carries the image as an image_url part.
+	seen := provider.requests()
+	if len(seen) != 1 {
+		t.Fatalf("provider saw %d requests, want 1", len(seen))
+	}
+	var upstream struct {
+		Model    string `json:"model"`
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(seen[0].Body, &upstream); err != nil {
+		t.Fatalf("upstream body not JSON: %v (%s)", err, seen[0].Body)
+	}
+	if upstream.Model != "gpt-4o" || len(upstream.Messages) != 1 || upstream.Messages[0].Role != "user" {
+		t.Errorf("upstream body = %s", seen[0].Body)
+	}
+	var parts []struct {
+		Type     string `json:"type"`
+		Text     string `json:"text"`
+		ImageURL struct {
+			URL string `json:"url"`
+		} `json:"image_url"`
+	}
+	if err := json.Unmarshal(upstream.Messages[0].Content, &parts); err != nil {
+		t.Fatalf("upstream content not a part array: %v (%s)", err, upstream.Messages[0].Content)
+	}
+	if len(parts) != 2 || parts[0].Type != "text" || parts[0].Text != "what is this?" ||
+		parts[1].Type != "image_url" || parts[1].ImageURL.URL != "https://x/cat.png" {
+		t.Errorf("upstream parts = %+v", parts)
+	}
+
+	// Capture: as-received Responses bytes (image included), chat-shaped
+	// response.
+	req := waitForRequest(t, st, "sess-img", 5*time.Second)
+	if req.Endpoint != "/v1/responses" {
+		t.Errorf("endpoint = %q, want /v1/responses", req.Endpoint)
+	}
+	if string(req.RequestJSON) != raw {
+		t.Errorf("request_json not the as-received Responses bytes:\n got %q\nwant %q", req.RequestJSON, raw)
+	}
+	if !strings.Contains(string(req.ResponseJSON), `"chat.completion"`) {
+		t.Errorf("response_json should stay chat-shaped: %q", req.ResponseJSON)
+	}
+	if req.StatusCode != http.StatusOK || req.FinishReason != "stop" {
+		t.Errorf("status/finish = %d/%q, want 200/stop", req.StatusCode, req.FinishReason)
+	}
+}
+
+// A request whose image parts cannot be forwarded (file references) still
+// succeeds end to end: the skip is warned once with the dropped part type and
+// capture keeps the as-received Responses bytes.
+func TestResponsesUnsupportedPartSkippedEndToEnd(t *testing.T) {
+	provider := newFakeProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"chatcmpl-x","object":"chat.completion","created":1722600000,"model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`))
+	})
+	var logBuf lockedBuffer
+	srv, st := newGatewayServer(t, provider, twoInstanceTOML, defaultEnv, &logBuf)
+	gs := httptest.NewServer(srv.Handler())
+	t.Cleanup(gs.Close)
+
+	raw := `{"model":"gpt-4o","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"describe"},{"type":"input_image","file_id":"file-1"}]}]}`
+	resp := postResponses(t, gs, raw, map[string]string{"X-Session-Id": "sess-partskip"})
+	body := drainClose(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", resp.StatusCode, body)
+	}
+
+	lines := logBuf.String()
+	if !strings.Contains(lines, `"event":"responses_unsupported_part_skipped"`) {
+		t.Errorf("expected a responses_unsupported_part_skipped warn log line:\n%s", lines)
+	}
+	if !strings.Contains(lines, `"types":["input_image"]`) {
+		t.Errorf("skip log should name the dropped part type:\n%s", lines)
+	}
+
+	req := waitForRequest(t, st, "sess-partskip", 5*time.Second)
 	if string(req.RequestJSON) != raw {
 		t.Errorf("request_json not the as-received Responses bytes:\n got %q\nwant %q", req.RequestJSON, raw)
 	}
