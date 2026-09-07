@@ -105,7 +105,7 @@ func TestChainErrorWrapsPluginName(t *testing.T) {
 
 func TestRegistryKnownIncludesRedact(t *testing.T) {
 	known := Known()
-	want := []string{"redact", "sanitize_tools"}
+	want := []string{"fill_reasoning_content", "redact", "sanitize_tools"}
 	if strings.Join(known, ",") != strings.Join(want, ",") {
 		t.Errorf("Known() = %v, want %v", known, want)
 	}
