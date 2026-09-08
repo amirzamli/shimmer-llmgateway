@@ -360,6 +360,24 @@ func TestBuiltinTemplatesPresent(t *testing.T) {
 	if got := cfg.Templates["opencode_go"].SessionHeader; got != "x-opencode-session" {
 		t.Errorf("opencode_go session_header = %q, want x-opencode-session", got)
 	}
+	// OpenCode Go speaks the Responses API upstream; the built-in template
+	// declares the responses style (streaming and non-streaming both translate
+	// to/from the chat.completion shape at the upstream boundary).
+	if got := cfg.Templates["opencode_go"].Style; got != StyleResponses {
+		t.Errorf("opencode_go style = %q, want %q", got, StyleResponses)
+	}
+	// OpenCode Go also expects coding-agent identity headers on every call;
+	// the built-in template declares the same values the real opencode client
+	// sends (client-supplied values win over these defaults).
+	wantIdentity := map[string]string{"X-Opencode-Client": "cli", "X-Opencode-Project": "global"}
+	for k, v := range wantIdentity {
+		if got := cfg.Templates["opencode_go"].IdentityHeaders[k]; got != v {
+			t.Errorf("opencode_go identity header %q = %q, want %q", k, got, v)
+		}
+	}
+	if len(cfg.Templates["opencode_go"].IdentityHeaders) != len(wantIdentity) {
+		t.Errorf("opencode_go identity_headers = %v, want exactly %v", cfg.Templates["opencode_go"].IdentityHeaders, wantIdentity)
+	}
 	if cfg.Templates["zai"].BaseURL != "https://api.z.ai/api/paas/v4" {
 		t.Errorf("zai base_url = %q", cfg.Templates["zai"].BaseURL)
 	}
@@ -505,6 +523,26 @@ func TestValidationMalformedTOML(t *testing.T) {
 	_, err := Parse([]byte("listen ="))
 	if err == nil {
 		t.Fatal("malformed TOML returned no error")
+	}
+}
+
+func TestValidationIdentityHeaders(t *testing.T) {
+	// Identity headers become literal upstream headers, so empty names and
+	// CR/LF in a name or value (header-smuggling vectors) fail at load.
+	bad := []string{
+		"[providers.opencode_go]\nbase_url = \"https://opencode.ai/zen/go/v1\"\nmodels = [\"m\"]\nidentity_headers = { \"\" = \"cli\" }\n",
+		"[providers.opencode_go]\nbase_url = \"https://opencode.ai/zen/go/v1\"\nmodels = [\"m\"]\nidentity_headers = { \"X-Opencode-Client\" = \"cli\\nInjected: 1\" }\n",
+		"[providers.opencode_go]\nbase_url = \"https://opencode.ai/zen/go/v1\"\nmodels = [\"m\"]\nidentity_headers = { \"X-Opencode-Client\\r\\nX-Evil: 1\" = \"cli\" }\n",
+	}
+	for _, raw := range bad {
+		_, err := Parse([]byte(raw))
+		if err == nil || !IsValidationError(err) {
+			t.Errorf("identity_headers %q: err = %v, want ValidationError", raw, err)
+		}
+	}
+	// A clean declaration still parses.
+	if _, err := Parse([]byte("[providers.opencode_go]\nbase_url = \"https://opencode.ai/zen/go/v1\"\nmodels = [\"m\"]\nidentity_headers = { \"X-Opencode-Client\" = \"cli\" }\n")); err != nil {
+		t.Errorf("clean identity_headers rejected: %v", err)
 	}
 }
 
@@ -1914,7 +1952,7 @@ plugins = ["sanitize_tools"]
 }
 
 func TestTemplateStyleValidation(t *testing.T) {
-	// A bad style is rejected; the anthropic style is accepted.
+	// A bad style is rejected; the anthropic and responses styles are accepted.
 	if _, err := Parse([]byte("[providers.x]\nbase_url = \"https://x\"\nstyle = \"grpc\"\n")); err == nil {
 		t.Errorf("Parse accepted style = grpc")
 	}
@@ -1924,6 +1962,13 @@ func TestTemplateStyleValidation(t *testing.T) {
 	}
 	if cfg.Templates["x"].Style != StyleAnthropic {
 		t.Errorf("style = %q, want anthropic", cfg.Templates["x"].Style)
+	}
+	cfg, err = Parse([]byte("[providers.x]\nbase_url = \"https://x\"\nstyle = \"responses\"\n"))
+	if err != nil {
+		t.Fatalf("Parse responses style: %v", err)
+	}
+	if cfg.Templates["x"].Style != StyleResponses {
+		t.Errorf("style = %q, want responses", cfg.Templates["x"].Style)
 	}
 }
 

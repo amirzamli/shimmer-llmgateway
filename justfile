@@ -64,14 +64,18 @@ base_url = "http://localhost:11434/v1"
 api_key_env = ""
 models = ["llama3.1"]
 
-# [providers.opencode_go] mirrors the built-in template: Console Go's deepseek
-# thinking models need the x-opencode-session header the gateway synthesises
-# from the request's session id (session_header below); no plugin seed.
+# [providers.opencode_go] mirrors the built-in template: Console Go speaks the
+# Responses API upstream (style = "responses"), needs the x-opencode-session
+# header the gateway synthesises from the request's session id
+# (session_header below), and expects the coding-agent identity headers
+# (identity_headers); no plugin seed.
 [providers.opencode_go]
 base_url = "https://opencode.ai/zen/go/v1"
 api_key_env = "OPENCODE_API_KEY"
 models = ["deepseek-v4-flash", "deepseek-v4-pro"]
+style = "responses"
 session_header = "x-opencode-session"
+identity_headers = { "X-Opencode-Client" = "cli", "X-Opencode-Project" = "global" }
 
 [[instances]]
 alias = "openai"

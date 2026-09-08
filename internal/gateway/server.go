@@ -617,16 +617,25 @@ func (s *Server) handleResponsesGet(w http.ResponseWriter, r *http.Request) {
 // stored or logged), body forwarded verbatim except the model field rewritten
 // to the resolved model name. Templates that declare a SessionHeader (e.g.
 // opencode_go → x-opencode-session) get it set from the request's effective
-// session id, so the upstream sees one stable session per conversation. cfg
-// is the request's config snapshot. The returned sentBody is the exact bytes
-// forwarded to the provider (post-model rewrite), used as
-// request_filtered_json when request plugins ran.
+// session id, so the upstream sees one stable session per conversation. The
+// outbound request always carries an explicit User-Agent — the inbound
+// client's UA when present, else the shared config.UserAgent constant — and
+// any template-declared IdentityHeaders (e.g. opencode_go's
+// X-Opencode-Client / X-Opencode-Project), with a client-supplied value for
+// the same header name winning over the declared default. inbound is the
+// client request the gateway is serving (its UA and headers are the only
+// client headers ever forwarded). cfg is the request's config snapshot. The
+// returned sentBody is the exact bytes forwarded to the provider (post-model
+// rewrite), used as request_filtered_json when request plugins ran.
 //
 // Anthropic-style templates talk the Messages API instead: the OpenAI body is
 // translated (translateOpenAIToAnthropic), the endpoint is <base_url>/messages,
 // the key rides the x-api-key header, and the anthropic-version header is set
 // (plus the extended-thinking beta header when the request enables thinking).
-func (s *Server) buildUpstream(ctx context.Context, cfg *config.Config, rt *route, body []byte, sessionID string) (*http.Request, []byte, error) {
+// Responses-style templates talk the Responses API instead: the OpenAI body is
+// translated (translateChatToResponses), the endpoint is <base_url>/responses,
+// and the key rides the Authorization header like the openai style.
+func (s *Server) buildUpstream(ctx context.Context, cfg *config.Config, rt *route, body []byte, sessionID string, inbound *http.Request) (*http.Request, []byte, error) {
 	upstreamBody := body
 	sent, ok := modelField(body)
 	if !ok || sent != rt.model || rt.reasoning != "" {
@@ -638,8 +647,15 @@ func (s *Server) buildUpstream(ctx context.Context, cfg *config.Config, rt *rout
 	}
 
 	anthropic := rt.template.Style == config.StyleAnthropic
+	responses := rt.template.Style == config.StyleResponses
 	if anthropic {
 		translated, err := translateOpenAIToAnthropic(upstreamBody, s.logger)
+		if err != nil {
+			return nil, nil, err
+		}
+		upstreamBody = translated
+	} else if responses {
+		translated, err := translateChatToResponses(upstreamBody, sessionID)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -649,6 +665,8 @@ func (s *Server) buildUpstream(ctx context.Context, cfg *config.Config, rt *rout
 	url := strings.TrimRight(rt.template.BaseURL, "/")
 	if anthropic {
 		url += "/messages"
+	} else if responses {
+		url += "/responses"
 	} else {
 		url += "/chat/completions"
 	}
@@ -681,6 +699,28 @@ func (s *Server) buildUpstream(ctx context.Context, cfg *config.Config, rt *rout
 	// per conversation and never rejects with MissingSessionID.
 	if h := rt.template.SessionHeader; h != "" && sessionID != "" {
 		req.Header.Set(h, sessionID)
+	}
+	// The gateway identifies itself on every upstream call: the inbound
+	// client's User-Agent is forwarded faithfully when present (the real
+	// client's UA is what the upstream expects to see), else a constant own
+	// product name replaces Go's "Go-http-client/1.1" default.
+	ua := config.UserAgent
+	if v := inbound.UserAgent(); v != "" {
+		ua = v
+	}
+	req.Header.Set("User-Agent", ua)
+	// Template-declared identity headers (opencode_go's X-Opencode-Client /
+	// X-Opencode-Project) ride upstream on every request so the account is
+	// not fingerprinted as non-agent traffic. A client-supplied value for the
+	// same header name (lookup is case-insensitive) wins — the client's own
+	// identity is forwarded faithfully; otherwise the declared default is sent.
+	names := sortedMapKeys(rt.template.IdentityHeaders)
+	for _, h := range names {
+		v := rt.template.IdentityHeaders[h]
+		if cv := inbound.Header.Get(h); cv != "" {
+			v = cv
+		}
+		req.Header.Set(h, v)
 	}
 	return req, upstreamBody, nil
 }
@@ -747,22 +787,32 @@ func (s *Server) resolvedKey(cfg *config.Config, inst *config.Instance) (string,
 	return "", nil
 }
 
-// translateUpstreamBody maps an anthropic-style provider response into the
-// OpenAI shape the gateway and its clients speak: error bodies get the OpenAI
-// error shape, 2xx completions become chat.completion objects. Non-anthropic
-// styles and unparseable bodies pass through unchanged.
+// translateUpstreamBody maps a non-openai-style provider response into the
+// OpenAI shape the gateway and its clients speak: anthropic error bodies get
+// the OpenAI error shape and 2xx completions become chat.completion objects;
+// responses 2xx completions become chat.completion objects (responses error
+// bodies already carry the OpenAI error envelope, so they and any unparseable
+// body pass through unchanged). Non-anthropic/non-responses styles and
+// unparseable bodies pass through unchanged.
 func translateUpstreamBody(style string, status int, body []byte) []byte {
-	if style != config.StyleAnthropic {
+	switch style {
+	case config.StyleAnthropic:
+		if status >= 400 {
+			return translateAnthropicError(body)
+		}
+		translated, err := translateAnthropicToOpenAI(body)
+		if err != nil {
+			return body
+		}
+		return translated
+	case config.StyleResponses:
+		if status >= 400 {
+			return body
+		}
+		return translateResponsesToChatCompletion(body)
+	default:
 		return body
 	}
-	if status >= 400 {
-		return translateAnthropicError(body)
-	}
-	translated, err := translateAnthropicToOpenAI(body)
-	if err != nil {
-		return body
-	}
-	return translated
 }
 
 // handleNonStream forwards the request, records the provider response, runs
@@ -783,7 +833,7 @@ func (s *Server) handleNonStream(w http.ResponseWriter, r *http.Request, cfg *co
 		return
 	}
 
-	req, sentBody, err := s.buildUpstream(r.Context(), cfg, rt, forwardedBody, sessionID)
+	req, sentBody, err := s.buildUpstream(r.Context(), cfg, rt, forwardedBody, sessionID, r)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "CONFIG_ERROR", err.Error())
 		return
@@ -880,7 +930,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *confi
 		return
 	}
 
-	req, sentBody, err := s.buildUpstream(ctx, cfg, rt, forwardedBody, sessionID)
+	req, sentBody, err := s.buildUpstream(ctx, cfg, rt, forwardedBody, sessionID, r)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "CONFIG_ERROR", err.Error())
 		return
@@ -954,6 +1004,8 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *confi
 	var out streamOutcome
 	if rt.template.Style == config.StyleAnthropic {
 		out = readAnthropicStream(ctx, resp, asm, emitter.Write)
+	} else if rt.template.Style == config.StyleResponses {
+		out = readResponsesStream(ctx, resp, asm, emitter.Write)
 	} else {
 		out = readStream(ctx, resp, asm, emitter.Write)
 	}

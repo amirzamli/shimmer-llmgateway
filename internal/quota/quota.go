@@ -241,6 +241,9 @@ func (f *Fetcher) fetchWindows(ctx context.Context, cfg *config.Config, inst *co
 		return nil, quotaErrRequestFailed
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
+	// No inbound client exists on this path, so the probe always identifies
+	// itself with the gateway's constant UA instead of Go's "Go-http-client/1.1".
+	req.Header.Set("User-Agent", config.UserAgent)
 
 	resp, err := f.client.Do(req)
 	if err != nil {

@@ -259,9 +259,11 @@ func TestListClassification(t *testing.T) {
 	// per request (List fetches serially, so order is stable).
 	var authMu sync.Mutex
 	var auths []string
+	var uas []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authMu.Lock()
 		auths = append(auths, r.Header.Get("Authorization"))
+		uas = append(uas, r.Header.Get("User-Agent"))
 		authMu.Unlock()
 		if r.URL.Path != "/user/balance" {
 			t.Errorf("path = %q, want /user/balance", r.URL.Path)
@@ -351,6 +353,16 @@ func TestListClassification(t *testing.T) {
 	wantAuths := "Bearer sk-env-key,Bearer sk-secret-key"
 	if strings.Join(gotAuths, ",") != wantAuths {
 		t.Errorf("authorizations = %v, want %s", gotAuths, wantAuths)
+	}
+	// The quota probe identifies itself with the gateway's constant UA (there
+	// is no inbound client on this path), never Go's generic default.
+	authMu.Lock()
+	gotUAs := append([]string(nil), uas...)
+	authMu.Unlock()
+	for i, ua := range gotUAs {
+		if ua != config.UserAgent {
+			t.Errorf("quota request %d User-Agent = %q, want %q", i, ua, config.UserAgent)
+		}
 	}
 
 	// Unsupported template with usage URL:

@@ -175,6 +175,9 @@ func (a *API) fetchProviderModels(cfg *config.Config, inst *config.Instance) ([]
 	if key := a.fetchKey(cfg, inst); key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
+	// No inbound client exists on this path, so the probe always identifies
+	// itself with the gateway's constant UA instead of Go's "Go-http-client/1.1".
+	req.Header.Set("User-Agent", config.UserAgent)
 
 	resp, err := modelsClient.Do(req)
 	if err != nil {

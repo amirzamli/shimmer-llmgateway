@@ -12,7 +12,8 @@ import (
 type templateView struct {
 	Name    string `json:"name"`
 	BaseURL string `json:"base_url"`
-	// Style is the upstream protocol: "openai" (default) or "anthropic".
+	// Style is the upstream protocol: "openai" (default), "anthropic", or
+	// "responses".
 	Style     string   `json:"style"`
 	APIKeyEnv string   `json:"api_key_env"`
 	Models    []string `json:"models"`
@@ -79,8 +80,8 @@ func (a *API) handleTemplatesCreate(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 		return
 	}
-	if req.Style != "" && req.Style != config.StyleOpenAI && req.Style != config.StyleAnthropic {
-		a.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "style must be \"openai\", \"anthropic\", or empty")
+	if req.Style != "" && req.Style != config.StyleOpenAI && req.Style != config.StyleAnthropic && req.Style != config.StyleResponses {
+		a.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "style must be \"openai\", \"anthropic\", \"responses\", or empty")
 		return
 	}
 	err := a.update(func(c *config.Config) error {

@@ -103,11 +103,27 @@ Two-level model — this is what makes multi-account work:
   `MissingSessionID`). When
   set, the gateway synthesises the request's effective session id (see
   §4.3) in that header on every upstream call; the model fetch and quota
-  probes are unaffected. These are the entries in the
+  probes are unaffected. A template may also declare an
+  `identity_headers` map — request headers the upstream expects every call to
+  carry so it can identify the calling client (the built-in `opencode_go`
+  declares `X-Opencode-Client: cli` and `X-Opencode-Project: global`,
+  mirroring the real opencode client). For each declared header the gateway
+  sends the declared value upstream on every request to that template; when
+  the inbound client request carries the same header name (case-insensitive),
+  the client's value wins. These are the entries in the
   dropdown. A set ships built-in (openai, anthropic, ollama, groq, vllm,
   lite_llm, openrouter, deepseek, gemini, mistral, kimi, zai, opencode_zen,
   opencode_go, commandcode, and more); users can add
   custom ones via the UI.
+
+  **Outbound identification.** Every outbound provider request — chat, stream,
+  Responses, the `/models` model fetch, and the quota probes — carries an
+  explicit `User-Agent` header. On the forward path the inbound client's
+  `User-Agent` is forwarded verbatim when present; otherwise the request uses
+  the gateway's constant `shimmer-gateway/1.0`. The model fetch and quota
+  probes have no inbound client and always use the constant. The gateway never
+  leaves with Go's generic `Go-http-client/1.1` default, so upstream accounts
+  are identified as coding-agent traffic, not an HTTP library.
 
   `style` selects the upstream protocol: `""`/`"openai"` (default) forwards
   OpenAI-shaped bodies to `<base_url>/chat/completions`; `"anthropic"`
@@ -115,9 +131,16 @@ Two-level model — this is what makes multi-account work:
   chat ↔ Anthropic Messages in both directions and for both streaming and
   non-streaming (system hoisted to the top-level field, tool definitions /
   `tool_use`/`tool_result` mapping, `reasoning_effort` → extended thinking,
-  image parts → image blocks, `max_tokens` defaulted). Anthropic SSE events
-  are translated into `chat.completion.chunk` lines **before** reassembly,
-  so the assembler, plugins, and capture only ever see OpenAI-shaped data.
+  image parts → image blocks, `max_tokens` defaulted); `"responses"` forwards
+  to `<base_url>/responses` (Bearer auth like the default style) and
+  translates OpenAI chat ↔ Responses in both directions and for both
+  streaming and non-streaming (the first system message hoisted to
+  `instructions`, tool calls become `function_call` / `function_call_output`
+  input items, reasoning surfaces as `reasoning_content`, `max_tokens` /
+  `max_completion_tokens` → `max_output_tokens`, and the effective session id
+  is forwarded as `prompt_cache_key`). Anthropic and Responses SSE events are
+  translated into `chat.completion.chunk` lines **before** reassembly, so the
+  assembler, plugins, and capture only ever see OpenAI-shaped data.
 
   `model_reasoning_options` advertises the valid reasoning-effort levels per
   model (data only: it gates instance `model_reasoning` values and drives
@@ -200,11 +223,13 @@ base_url = "http://localhost:11434/v1"
 api_key_env = ""
 models = ["llama3.1"]
 
-[providers.opencode_go]          # anthropic/openai hybrid upstreams can add
-base_url = "https://opencode.ai/zen/go/v1"   # session_header / style lines
+[providers.opencode_go]          # speaks the Responses API upstream: style =
+base_url = "https://opencode.ai/zen/go/v1"   # "responses" + session_header / identity
 api_key_env = "OPENCODE_API_KEY"
 models = ["deepseek-v4-flash", "deepseek-v4-pro"]
+style = "responses"
 session_header = "x-opencode-session"
+identity_headers = { "X-Opencode-Client" = "cli", "X-Opencode-Project" = "global" }
 # plugins = ["redact"]          # template-level materialization seed only
 
 [[instances]]                    # INSTANCE 1 of openai — alias defaults to "openai"

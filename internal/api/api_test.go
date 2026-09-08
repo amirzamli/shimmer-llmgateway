@@ -1044,9 +1044,10 @@ api_key_env = %q
 }
 
 func TestInstanceModelsFetchSuccess(t *testing.T) {
-	var gotAuth string
+	var gotAuth, gotUA string
 	srv, _ := newModelsServer(t, func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
+		gotUA = r.Header.Get("User-Agent")
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"data":[{"id":"gpt-4o"},{"id":"gpt-4o-mini"},{"id":"  spaced-id  "}]}`)
 	})
@@ -1059,6 +1060,9 @@ func TestInstanceModelsFetchSuccess(t *testing.T) {
 	}
 	if gotAuth != "Bearer sk-test-key" {
 		t.Errorf("Authorization = %q, want Bearer sk-test-key", gotAuth)
+	}
+	if gotUA != config.UserAgent {
+		t.Errorf("User-Agent = %q, want gateway constant %q", gotUA, config.UserAgent)
 	}
 	if out["alias"] != "openai" {
 		t.Errorf("alias = %v, want openai", out["alias"])
@@ -1714,5 +1718,9 @@ func TestTemplateCreateStyleValidation(t *testing.T) {
 	status, out = doJSON(t, gs, "POST", "/api/templates", `{"name":"anth","base_url":"https://x","style":"anthropic"}`)
 	if status != http.StatusCreated {
 		t.Errorf("anthropic style template status = %d, want 201 (%v)", status, out)
+	}
+	status, out = doJSON(t, gs, "POST", "/api/templates", `{"name":"resp","base_url":"https://x","style":"responses"}`)
+	if status != http.StatusCreated {
+		t.Errorf("responses style template status = %d, want 201 (%v)", status, out)
 	}
 }

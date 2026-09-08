@@ -24,9 +24,12 @@ import (
 // ---- fake OpenAI-compatible provider ----
 
 type providerRequest struct {
-	Authorization string
-	XOpencode     string
-	Body          []byte
+	Authorization    string
+	XOpencode        string
+	UserAgent        string
+	XOpencodeClient  string
+	XOpencodeProject string
+	Body             []byte
 }
 
 // fakeProvider records what the gateway sends it and runs a per-test handler.
@@ -58,9 +61,12 @@ func (fp *fakeProvider) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	fp.mu.Lock()
 	fp.seen = append(fp.seen, providerRequest{
-		Authorization: r.Header.Get("Authorization"),
-		XOpencode:     r.Header.Get("x-opencode-session"),
-		Body:          body,
+		Authorization:    r.Header.Get("Authorization"),
+		XOpencode:        r.Header.Get("x-opencode-session"),
+		UserAgent:        r.Header.Get("User-Agent"),
+		XOpencodeClient:  r.Header.Get("X-Opencode-Client"),
+		XOpencodeProject: r.Header.Get("X-Opencode-Project"),
+		Body:             body,
 	})
 	fp.mu.Unlock()
 	if fp.h != nil {
@@ -152,6 +158,20 @@ func newGatewayServer(t *testing.T, provider *fakeProvider, instances string, en
 
 func postChat(t *testing.T, gs *httptest.Server, body string, headers map[string]string) *http.Response {
 	t.Helper()
+	return postChatWithUA(t, gs, body, headers, true)
+}
+
+// postChatNoUA is postChat with the User-Agent header explicitly suppressed:
+// Go's http client would otherwise inject "Go-http-client/1.1", which the
+// gateway would faithfully forward. Suppressing it lets the test observe the
+// no-client-UA fallback path (the gateway's own constant UA upstream).
+func postChatNoUA(t *testing.T, gs *httptest.Server, body string, headers map[string]string) *http.Response {
+	t.Helper()
+	return postChatWithUA(t, gs, body, headers, false)
+}
+
+func postChatWithUA(t *testing.T, gs *httptest.Server, body string, headers map[string]string, sendUA bool) *http.Response {
+	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, gs.URL+"/v1/chat/completions", strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
@@ -159,6 +179,11 @@ func postChat(t *testing.T, gs *httptest.Server, body string, headers map[string
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range headers {
 		req.Header.Set(k, v)
+	}
+	if !sendUA {
+		// Explicit empty UA suppresses the transport's auto-injected
+		// Go-http-client/1.1 while still satisfying the http.Client.
+		req.Header["User-Agent"] = nil
 	}
 	client := &http.Client{Transport: &http.Transport{DisableCompression: true}}
 	resp, err := client.Do(req)
@@ -1093,6 +1118,88 @@ api_key_env = "TEST_KEY_1"
 	}
 	if lastSess == nil || len(lastSess.Requests) != 1 {
 		t.Errorf("generated session request count = %v", lastSess)
+	}
+}
+
+// The gateway identifies itself on every upstream call: the inbound client's
+// User-Agent is forwarded verbatim when present (Go's http client injects
+// "Go-http-client/1.1" by default, so the fallback path is exercised via an
+// explicitly suppressed UA); a request with no client UA upstreams the shared
+// config.UserAgent constant instead of Go's generic default.
+func TestUserAgentForwardedToUpstream(t *testing.T) {
+	provider := newFakeProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	})
+	gs, _ := newGatewayTest(t, provider, twoInstanceTOML, defaultEnv)
+
+	// Client UA forwarded verbatim (stream and non-stream share buildUpstream).
+	drainClose(t, postChat(t, gs, `{"model":"openai/gpt-4o","messages":[{"role":"user","content":"a"}]}`, map[string]string{"User-Agent": "my-agent/1.0"}))
+	drainClose(t, postChat(t, gs, `{"model":"openai/gpt-4o","stream":true,"messages":[{"role":"user","content":"b"}]}`, map[string]string{"User-Agent": "stream-agent/2.0"}))
+	// No client UA: the gateway's constant replaces Go's default.
+	drainClose(t, postChatNoUA(t, gs, `{"model":"openai/gpt-4o","messages":[{"role":"user","content":"c"}]}`, nil))
+
+	seen := provider.requests()
+	if len(seen) != 3 {
+		t.Fatalf("provider saw %d requests, want 3", len(seen))
+	}
+	wantUA := []string{"my-agent/1.0", "stream-agent/2.0", config.UserAgent}
+	for i, pr := range seen {
+		if pr.UserAgent != wantUA[i] {
+			t.Errorf("request %d User-Agent = %q, want %q", i, pr.UserAgent, wantUA[i])
+		}
+	}
+}
+
+// Templates may declare identity_headers (opencode_go → X-Opencode-Client /
+// X-Opencode-Project): every upstream call to that template carries the
+// declared values, and a client-supplied value for the same header name wins
+// over the declared default. Templates without identity_headers never get
+// them.
+func TestIdentityHeadersForwardedToUpstream(t *testing.T) {
+	const tmpl = `
+[providers.opencode_go]
+base_url = "FAKE"
+api_key_env = "TEST_KEY_1"
+models = ["deepseek-v4-flash"]
+session_header = "x-opencode-session"
+identity_headers = { "X-Opencode-Client" = "cli", "X-Opencode-Project" = "global" }
+
+[[instances]]
+alias = "opencode_go_ali"
+template = "opencode_go"
+
+[[instances]]
+alias = "openai"
+template = "openai"
+api_key_env = "TEST_KEY_1"
+`
+	provider := newFakeProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	})
+	cfg := strings.ReplaceAll(tmpl, "FAKE", provider.url())
+	gs, _ := newGatewayTest(t, provider, cfg, defaultEnv)
+
+	// Declared defaults ride upstream.
+	drainClose(t, postChat(t, gs, `{"model":"opencode_go_ali/deepseek-v4-flash","messages":[{"role":"user","content":"a"}]}`, nil))
+	// Client-supplied X-Opencode-Client wins over the declared default.
+	drainClose(t, postChat(t, gs, `{"model":"opencode_go_ali/deepseek-v4-flash","messages":[{"role":"user","content":"b"}]}`, map[string]string{"X-Opencode-Client": "my-cli"}))
+	// Template without identity_headers never gets them.
+	drainClose(t, postChat(t, gs, `{"model":"openai/gpt-4o","messages":[{"role":"user","content":"c"}]}`, nil))
+
+	seen := provider.requests()
+	if len(seen) != 3 {
+		t.Fatalf("provider saw %d requests, want 3", len(seen))
+	}
+	if got := seen[0]; got.XOpencodeClient != "cli" || got.XOpencodeProject != "global" {
+		t.Errorf("request 0 identity headers = (%q, %q), want (cli, global)", got.XOpencodeClient, got.XOpencodeProject)
+	}
+	if got := seen[1]; got.XOpencodeClient != "my-cli" || got.XOpencodeProject != "global" {
+		t.Errorf("request 1 identity headers = (%q, %q), want (my-cli, global)", got.XOpencodeClient, got.XOpencodeProject)
+	}
+	if got := seen[2]; got.XOpencodeClient != "" || got.XOpencodeProject != "" {
+		t.Errorf("request 2 (openai) identity headers = (%q, %q), want none", got.XOpencodeClient, got.XOpencodeProject)
 	}
 }
 

@@ -55,12 +55,21 @@ models = ["openrouter/auto"]
 # [providers.opencode_go] mirrors the built-in template: Console Go's deepseek
 # thinking models, plus the session_header the upstream requires — the gateway
 # synthesises the request's session id into x-opencode-session on every call
-# (without it Console Go answers HTTP 400 MissingSessionID).
+# (without it Console Go answers HTTP 400 MissingSessionID). identity_headers
+# are the coding-agent identity headers the upstream expects on every call;
+# the gateway sends these values (a client-supplied value for the same header
+# wins). Every outbound request also carries an explicit User-Agent — the
+# client's UA when present, else "shimmer-gateway/1.0". style = "responses"
+# speaks the Responses API upstream (POST <base>/responses), not
+# /chat/completions — muse contributor models 500 on /chat/completions but
+# work on /responses, so keep the style line when copying this section.
 [providers.opencode_go]
 base_url = "https://opencode.ai/zen/go/v1"
+style = "responses"
 api_key_env = "OPENCODE_API_KEY"
 models = ["deepseek-v4-flash", "deepseek-v4-pro"]
 session_header = "x-opencode-session"
+identity_headers = { "X-Opencode-Client" = "cli", "X-Opencode-Project" = "global" }
 # fill_reasoning_content (request-side) prevents Console Go's thinking-mode
 # 400: "The `reasoning_content` in the thinking mode must be passed back to
 # the API." deepseek thinking models on this endpoint require every assistant

@@ -60,6 +60,15 @@ const AliasPattern = `[A-Za-z0-9_.-]+(?: [A-Za-z0-9_.-]+)*`
 // explicit non-positive retention_days still disables purging entirely.
 const DefaultRetentionDays = 7
 
+// UserAgent is the User-Agent header the gateway sends on every outbound
+// provider request: the chat/stream/responses forward path forwards the
+// inbound client's User-Agent verbatim when present and falls back to this
+// constant when absent, and the /models model-fetch and quota-probe requests
+// (which have no inbound client) always use it. A constant own product name
+// keeps upstream accounts from being fingerprinted as generic Go
+// ("Go-http-client/1.1") HTTP traffic.
+const UserAgent = "shimmer-gateway/1.0"
+
 // genericReasoningLevels is the fallback effort vocabulary for models whose
 // template advertises no ModelReasoningOptions. Sentinels ("", "default",
 // "none") are handled separately in Validate.
@@ -98,7 +107,9 @@ type Template struct {
 	// provider: "" or "openai" (default) forwards to <base_url>/chat/completions
 	// with an OpenAI-shaped body, "anthropic" forwards to <base_url>/messages
 	// and translates between the OpenAI chat format and the Anthropic Messages
-	// API (request, non-stream response, and SSE stream).
+	// API (request, non-stream response, and SSE stream), and "responses"
+	// forwards to <base_url>/responses and translates between the OpenAI chat
+	// format and the OpenAI Responses API (§4.2).
 	Style  string   `toml:"style,omitempty"`
 	Models []string `toml:"models"`
 	// DefaultPlugins is a materialization seed only: when an instance of this
@@ -124,7 +135,16 @@ type Template struct {
 	// session. The header is synthesised by the forward path only; the
 	// provider model fetch (/models) and quota probes are not affected.
 	SessionHeader string `toml:"session_header,omitempty"`
-	Docs          string `toml:"docs,omitempty"`
+	// IdentityHeaders are request headers the upstream expects every call to
+	// carry so it can identify the calling client (the §4.2 opencode_go
+	// template declares X-Opencode-Client: cli and X-Opencode-Project: global,
+	// which the real opencode client sends). For each declared header the
+	// gateway sends the declared value upstream on every request to this
+	// template; when the inbound client request carries the same header name
+	// (case-insensitive), the client's value wins so a faithful client
+	// identity is forwarded as-is.
+	IdentityHeaders map[string]string `toml:"identity_headers,omitempty"`
+	Docs            string            `toml:"docs,omitempty"`
 }
 
 // Instance is a concrete account of a template: alias, template, api_key_env,
@@ -227,6 +247,12 @@ func (c *Config) Clone() *Config {
 			tc.ModelReasoningOptions = make(map[string][]string, len(t.ModelReasoningOptions))
 			for k, v := range t.ModelReasoningOptions {
 				tc.ModelReasoningOptions[k] = append([]string{}, v...)
+			}
+		}
+		if t.IdentityHeaders != nil {
+			tc.IdentityHeaders = make(map[string]string, len(t.IdentityHeaders))
+			for k, v := range t.IdentityHeaders {
+				tc.IdentityHeaders[k] = v
 			}
 		}
 		out.Templates[name] = &tc
@@ -622,9 +648,16 @@ func builtinTemplates() map[string]Template {
 		"opencode_go": {
 			BaseURL:       "https://opencode.ai/zen/go/v1",
 			APIKeyEnv:     "OPENCODE_API_KEY",
+			Style:         StyleResponses,
 			Models:        []string{"deepseek-v4-flash", "deepseek-v4-pro"},
 			SessionHeader: "x-opencode-session",
-			Docs:          "https://opencode.ai/docs/go/",
+			// The upstream expects coding-agent identity headers on every
+			// call; these mirror what the real opencode client sends.
+			IdentityHeaders: map[string]string{
+				"X-Opencode-Client":  "cli",
+				"X-Opencode-Project": "global",
+			},
+			Docs: "https://opencode.ai/docs/go/",
 		},
 		// commandcode: hybrid gateway (OpenAI-compatible /chat/completions and
 		// Anthropic-style /messages on one base); the catalog entry is
@@ -807,14 +840,25 @@ func Validate(c *Config) error {
 		if !aliasRe.MatchString(name) {
 			problems = append(problems, fmt.Sprintf("template name %q must match %s", name, AliasPattern))
 		}
-		if t.Style != "" && t.Style != StyleOpenAI && t.Style != StyleAnthropic {
-			problems = append(problems, fmt.Sprintf("template %q: style must be %q, %q, or empty", name, StyleOpenAI, StyleAnthropic))
+		if t.Style != "" && t.Style != StyleOpenAI && t.Style != StyleAnthropic && t.Style != StyleResponses {
+			problems = append(problems, fmt.Sprintf("template %q: style must be %q, %q, %q, or empty", name, StyleOpenAI, StyleAnthropic, StyleResponses))
 		}
 		// The custom placeholders are endpoint-less by design; their endpoint
 		// is supplied (and validated) when an instance is created.
 		if !IsCustomTemplatePlaceholder(name) {
 			if err := ValidateBaseURL(t.BaseURL); err != nil {
 				problems = append(problems, fmt.Sprintf("template %q: %v", name, err))
+			}
+		}
+		// Identity headers become literal upstream headers, so a bad name or
+		// a value carrying CR/LF would be a header-smuggling vector; reject
+		// both at load.
+		for hname, hvalue := range t.IdentityHeaders {
+			if hname == "" {
+				problems = append(problems, fmt.Sprintf("template %q: identity_headers contains an empty header name", name))
+			}
+			if strings.ContainsAny(hname, "\r\n") || strings.ContainsAny(hvalue, "\r\n") {
+				problems = append(problems, fmt.Sprintf("template %q: identity header %q must not contain CR/LF", name, hname))
 			}
 		}
 	}
