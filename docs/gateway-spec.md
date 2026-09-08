@@ -435,8 +435,11 @@ without the file serve the embedded asset.
 ### 6.2 REST API
 
 `GET /api/templates`, `POST /api/templates` (custom provider endpoints; the
-`custom_openai` / `custom_anthropic` placeholders resolve to concrete
-templates named after the endpoint) · `GET /api/instances`,
+`custom_openai` / `custom_anthropic` placeholders resolve to the template
+already serving the supplied endpoint — a built-in or a user template, so a
+custom add never duplicates a known provider — and only mint a new template
+when the endpoint is unknown, named after the instance alias the user typed,
+or after the endpoint when the alias is blank) · `GET /api/instances`,
 `POST /api/instances`, `PUT /api/instances/order` (instance reordering for
 unprefixed resolution), `PATCH /api/instances/{alias}` (rename / enable-
 disable / `priority` / `model_aliases` / `model_reasoning` / `plugins` and

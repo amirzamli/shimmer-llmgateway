@@ -447,8 +447,9 @@ function routingCompare(a, b) {
 // order), the alias editor lives directly under each provider, and dragging a
 // header reorders routing priority (top of the list = highest priority).
 function instanceBlockHtml(x) {
-  // Custom per-endpoint templates show the endpoint instead of the long
-  // generated template name; anthropic-style providers get a badge.
+  // Endpoint-derived custom-* templates (blank-alias adds) show the endpoint
+  // instead of the machine name; alias-named custom templates and built-ins
+  // show their name. anthropic-style providers get a badge.
   const tmplLabel = x.template && x.template.startsWith("custom-") && x.base_url ? x.base_url : x.template;
   const styleBadge = x.style === "anthropic" ? `<span class="badge warn" title="Anthropic Messages API">anthropic</span>` : "";
   return `<details class="aliases-instance instance-row" data-alias="${esc(x.alias)}" ${persistedAliasOpen(x.alias, !!x.disabled) ? "open" : ""}>
@@ -699,9 +700,15 @@ function updateEndpointHint() {
   if (isCustomTemplate()) {
     endpoint.required = true;
     $("endpoint-hint").textContent = "required for " + $("add-template").value;
+    // For a custom endpoint the alias the user types becomes the new provider
+    // template's name in the Providers list; an existing template already
+    // serving the endpoint is reused instead (never duplicated). A blank
+    // alias falls back to an endpoint-derived custom-* name.
+    $("add-alias").placeholder = "names the new template (blank = endpoint-derived)";
   } else {
     endpoint.required = false;
     $("endpoint-hint").textContent = "optional — override any provider, incl. local servers";
+    $("add-alias").placeholder = "auto: " + suggestAlias($("add-template").value);
   }
 }
 

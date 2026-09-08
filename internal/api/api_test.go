@@ -1587,13 +1587,14 @@ func TestInstanceCreateCustomEndpoint(t *testing.T) {
 	}
 
 	// With an endpoint URL the placeholder resolves into a concrete custom
-	// template and the instance is created against it.
+	// template named after the alias the user typed, and the instance is
+	// created against it.
 	status, inst := doJSON(t, gs, "POST", "/api/instances", `{"template":"custom_openai","alias":"myai","base_url":"http://localhost:8080/v1","models":["my-model"]}`)
 	if status != http.StatusCreated {
 		t.Fatalf("custom create status = %d, body %v", status, inst)
 	}
-	if got := inst["template"]; got != "custom-openai-localhost-8080-v1" {
-		t.Errorf("instance template = %v, want custom-openai-localhost-8080-v1", got)
+	if got := inst["template"]; got != "myai" {
+		t.Errorf("instance template = %v, want myai (named after the alias)", got)
 	}
 	if got := inst["style"]; got != "openai" {
 		t.Errorf("instance style = %v, want openai", got)
@@ -1603,18 +1604,19 @@ func TestInstanceCreateCustomEndpoint(t *testing.T) {
 	}
 
 	// The custom template is persisted to the config file and reusable: a
-	// second instance with the same endpoint reuses it (no duplicate).
+	// second instance on the same endpoint reuses the template that already
+	// serves it (no duplicate) even under a different alias.
 	status, inst2 := doJSON(t, gs, "POST", "/api/instances", `{"template":"custom_openai","alias":"myai-2","base_url":"http://localhost:8080/v1"}`)
 	if status != http.StatusCreated {
 		t.Fatalf("second custom create status = %d, body %v", status, inst2)
 	}
-	if got := inst2["template"]; got != "custom-openai-localhost-8080-v1" {
-		t.Errorf("second instance template = %v", got)
+	if got := inst2["template"]; got != "myai" {
+		t.Errorf("second instance template = %v, want myai (endpoint reused)", got)
 	}
 	status, tmplList := doJSON(t, gs, "GET", "/api/templates", "")
 	count := 0
 	for _, x := range tmplList["templates"].([]any) {
-		if x.(map[string]any)["name"] == "custom-openai-localhost-8080-v1" {
+		if x.(map[string]any)["name"] == "myai" {
 			count++
 		}
 	}
@@ -1622,19 +1624,50 @@ func TestInstanceCreateCustomEndpoint(t *testing.T) {
 		t.Errorf("custom template count = %d, want 1 (reused, not duplicated)", count)
 	}
 
-	// Anthropic style: custom_anthropic resolves to the anthropic-styled name.
+	// A blank alias falls back to the endpoint-derived custom-* name.
+	status, instBlank := doJSON(t, gs, "POST", "/api/instances", `{"template":"custom_openai","base_url":"http://localhost:9090/v1"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("blank-alias custom create status = %d, body %v", status, instBlank)
+	}
+	if got := instBlank["template"]; got != "custom-openai-localhost-9090-v1" {
+		t.Errorf("blank-alias instance template = %v, want custom-openai-localhost-9090-v1", got)
+	}
+
+	// A custom add pointed at an endpoint a built-in already serves adopts
+	// that built-in instead of minting a custom-* duplicate: this is the case
+	// that used to create a second "z.ai" entry alongside the builtin zai.
+	status, instBuiltin := doJSON(t, gs, "POST", "/api/instances", `{"template":"custom_openai","alias":"zai-custom","base_url":"https://api.z.ai/api/paas/v4"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("builtin-reuse create status = %d, body %v", status, instBuiltin)
+	}
+	if got := instBuiltin["template"]; got != "zai" {
+		t.Errorf("instance at builtin base = %v, want zai (existing template reused)", got)
+	}
+	status, tmplList = doJSON(t, gs, "GET", "/api/templates", "")
+	zaiTemplates := 0
+	for _, x := range tmplList["templates"].([]any) {
+		if x.(map[string]any)["base_url"] == "https://api.z.ai/api/paas/v4" {
+			zaiTemplates++
+		}
+	}
+	if zaiTemplates != 1 {
+		t.Errorf("templates serving the z.ai base = %d, want 1 (builtin zai only, no custom-* duplicate)", zaiTemplates)
+	}
+
+	// Anthropic style: custom_anthropic names the template after the alias.
 	status, inst3 := doJSON(t, gs, "POST", "/api/instances", `{"template":"custom_anthropic","alias":"claude","base_url":"http://localhost:9000","models":["claude-sonnet-4"]}`)
 	if status != http.StatusCreated {
 		t.Fatalf("custom anthropic create status = %d, body %v", status, inst3)
 	}
-	if got := inst3["template"]; got != "custom-anthropic-localhost-9000" {
-		t.Errorf("anthropic instance template = %v, want custom-anthropic-localhost-9000", got)
+	if got := inst3["template"]; got != "claude" {
+		t.Errorf("anthropic instance template = %v, want claude", got)
 	}
 	if got := inst3["style"]; got != "anthropic" {
 		t.Errorf("anthropic instance style = %v", got)
 	}
 
-	// A user-defined anthropic template + endpoint override keeps the style.
+	// A user-defined anthropic template + endpoint override keeps the style;
+	// the override endpoint is unknown, so the new template takes the alias.
 	status, _ = doJSON(t, gs, "POST", "/api/templates", `{"name":"my-anth","base_url":"https://api.example.com/v1","style":"anthropic","models":["m"]}`)
 	if status != http.StatusCreated {
 		t.Fatalf("template create status = %d", status)
@@ -1643,8 +1676,15 @@ func TestInstanceCreateCustomEndpoint(t *testing.T) {
 	if status != http.StatusCreated {
 		t.Fatalf("override create status = %d, body %v", status, inst4)
 	}
-	if got := inst4["template"]; got != "custom-anthropic-localhost-9001" {
-		t.Errorf("override instance template = %v, want custom-anthropic-localhost-9001", got)
+	if got := inst4["template"]; got != "claude-2" {
+		t.Errorf("override instance template = %v, want claude-2", got)
+	}
+
+	// An alias that collides with an existing template serving a different
+	// endpoint is refused loudly instead of shadowing it.
+	status, out = doJSON(t, gs, "POST", "/api/instances", `{"template":"custom_openai","alias":"zai","base_url":"http://localhost:9999/v1"}`)
+	if status != http.StatusBadRequest {
+		t.Errorf("alias/template collision status = %d, want 400 (%v)", status, out)
 	}
 
 	// An invalid endpoint URL is rejected before any write.
@@ -1658,7 +1698,7 @@ func TestInstanceCreateCustomEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload persisted config: %v", err)
 	}
-	for _, want := range []string{"custom-openai-localhost-8080-v1", "custom-anthropic-localhost-9000", "custom-anthropic-localhost-9001"} {
+	for _, want := range []string{"myai", "custom-openai-localhost-9090-v1", "claude", "claude-2"} {
 		if _, ok := reloaded.Templates[want]; !ok {
 			t.Errorf("reloaded config missing template %q", want)
 		}

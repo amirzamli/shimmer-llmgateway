@@ -643,8 +643,11 @@ func builtinTemplates() map[string]Template {
 		// endpoints (any provider, including local servers such as llama.cpp or
 		// a local Anthropic-compatible proxy). They carry no base_url — the
 		// endpoint is required when creating an instance — and the API resolves
-		// the placeholder to a concrete custom template (named after the
-		// endpoint) before the instance is created.
+		// the placeholder to a concrete template before the instance is
+		// created: an existing template already serving that endpoint is
+		// reused, otherwise a custom template is minted named after the
+		// instance alias (falling back to the endpoint when the alias is
+		// blank).
 		"custom_openai": {
 			Models: []string{"my-model"},
 		},
@@ -669,14 +672,16 @@ func BuiltinTemplates() map[string]Template {
 }
 
 // CustomOpenAI and CustomAnthropic are the built-in placeholder templates that
-// the add-instance flow resolves into concrete per-endpoint templates. They
-// are exempt from the base_url requirement at config load (their endpoint is
-// user-supplied at instance creation).
+// the add-instance flow resolves into a concrete template (reusing an existing
+// one serving the endpoint, or minting one named after the instance alias).
+// They are exempt from the base_url requirement at config load (their endpoint
+// is user-supplied at instance creation).
 const (
 	CustomOpenAI    = "custom_openai"
 	CustomAnthropic = "custom_anthropic"
 	StyleOpenAI     = "openai"
 	StyleAnthropic  = "anthropic"
+	StyleResponses  = "responses"
 )
 
 // IsCustomTemplatePlaceholder reports whether name is one of the endpoint-less

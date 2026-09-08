@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 
 	"github.com/amirzamli/shimmer-llmgateway/internal/config"
@@ -126,10 +127,14 @@ type instanceCreateReq struct {
 	Plugins   *[]string `json:"plugins"`
 	Key       string    `json:"key"`
 	Priority  int       `json:"priority"`
-	// BaseURL supplies the provider endpoint (required for the custom_openai
-	// / custom_anthropic placeholders, optional as an override for any other
-	// template). It resolves to a concrete per-endpoint custom template before
-	// the instance is created; see resolveCustomTemplate.
+	// BaseURL supplies the provider endpoint (required for the custom_openai /
+	// custom_anthropic placeholders, optional as an override for any other
+	// template). Before the instance is created the endpoint resolves to the
+	// concrete template that serves it: an existing template with the same
+	// endpoint+protocol is reused (so a custom add pointed at a built-in base
+	// adopts that template instead of duplicating it); otherwise a custom
+	// template is minted, named after the instance alias when one was typed
+	// and after the endpoint when the alias is left blank.
 	BaseURL string `json:"base_url"`
 }
 
@@ -160,20 +165,30 @@ func (a *API) handleInstancesCreate(w http.ResponseWriter, r *http.Request) {
 			return badRequest("unknown template %q", req.Template)
 		}
 		if req.BaseURL != "" {
-			// A custom endpoint resolves to a concrete per-endpoint template
-			// (named after the endpoint, styled after the source template) so
-			// the config file records a real provider the gateway can route
-			// to. The same endpoint+protocol reuses the template; a different
-			// endpoint under the same generated name is refused loudly.
-			name := customTemplateName(src.Style, req.BaseURL)
-			if existing, ok := c.Templates[name]; ok {
-				if existing.BaseURL != req.BaseURL {
-					return badRequest("endpoint template %q already exists with a different base url (%s)", name, existing.BaseURL)
+			// A custom endpoint resolves to the concrete template that serves
+			// it, styled after the source template, so the config file records
+			// a real provider the gateway can route to. Resolution order:
+			//   1. an existing template already serving this exact endpoint+
+			//      protocol is reused — a custom add pointed at a known base
+			//      URL (e.g. a built-in provider) adopts that template and no
+			//      custom-* entry is minted;
+			//   2. otherwise the new template is named after the instance
+			//      alias the user typed, so the Providers list shows their
+			//      label instead of a mangled form of the URL;
+			//   3. a blank alias (auto-named instance) falls back to the
+			//      endpoint-derived custom-<style>-<host>-… name.
+			name, ok := templateForEndpoint(c, src.Style, req.BaseURL)
+			if !ok {
+				name = req.Alias
+				if name == "" {
+					name = customTemplateName(src.Style, req.BaseURL)
 				}
-				if existing.Style != src.Style {
-					return badRequest("endpoint template %q already exists with a different protocol", name)
+				if existing, ok := c.Templates[name]; ok {
+					// The requested name already belongs to a template serving
+					// a different endpoint; never shadow it — either add the
+					// instance against that template or pick another alias.
+					return badRequest("template %q already exists (base_url %s) — pick a different alias or add the instance against that template", name, existing.BaseURL)
 				}
-			} else {
 				c.Templates[name] = &config.Template{
 					Name:    name,
 					BaseURL: req.BaseURL,
@@ -404,11 +419,44 @@ func aliasPatternOK(alias string) bool {
 	return true
 }
 
-// customTemplateName derives the concrete template name for a user-supplied
-// endpoint: "custom-" + protocol style + "-" + host (and port when non-default)
-// + first path segments, lowercased and sanitized to [a-z0-9._-]+. The same
-// endpoint+protocol always maps to the same name, so repeated adds reuse the
-// template instead of duplicating it.
+// templateForEndpoint returns the name of an existing template that already
+// serves baseURL with the given protocol style (an empty style meaning the
+// "openai" default). Exact endpoint+protocol matches are reused so adding a
+// custom endpoint never duplicates a template — in particular, a custom add
+// pointed at a built-in provider's base URL resolves to that built-in. When
+// several templates match, the alphabetically-first name wins for determinism.
+func templateForEndpoint(c *config.Config, style, baseURL string) (string, bool) {
+	if style == "" {
+		style = config.StyleOpenAI
+	}
+	names := make([]string, 0, len(c.Templates))
+	for name := range c.Templates {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		t := c.Templates[name]
+		if t.BaseURL != baseURL {
+			continue
+		}
+		s := t.Style
+		if s == "" {
+			s = config.StyleOpenAI
+		}
+		if s == style {
+			return name, true
+		}
+	}
+	return "", false
+}
+
+// customTemplateName derives a template name for a user-supplied endpoint:
+// "custom-" + protocol style + "-" + host (and port when non-default) + first
+// path segments, lowercased and sanitized to [a-z0-9._-]+. It is the fallback
+// for the blank-alias add flow — when the user typed an alias the new custom
+// template takes that alias verbatim instead (see handleInstancesCreate). The
+// same endpoint+protocol always maps to the same name, so repeated blank-alias
+// adds reuse the template instead of duplicating it.
 func customTemplateName(style, baseURL string) string {
 	if style == "" {
 		style = config.StyleOpenAI

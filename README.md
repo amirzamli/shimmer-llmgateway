@@ -5,8 +5,6 @@ chat completions plus the OpenAI Responses API (stream and non-stream), recordin
 every request and response full-fidelity to SQLite. An embedded UI manages providers,
 instances, and traces; a separate MCP inspection server exposes captured traffic to agents.
 
-![Traces view](docs/screenshots/traces.png) ![Trace detail view](docs/screenshots/trace-detail.png) ![Usage view](docs/screenshots/usage.png)
-
 [![CI](https://img.shields.io/github/actions/workflow/status/amirzamli/shimmer-llmgateway/ci.yml?branch=main&label=CI)](https://github.com/amirzamli/shimmer-llmgateway/actions/workflows/ci.yml) [![Go 1.26](https://img.shields.io/badge/go-1.26-00ADD8?logo=go&logoColor=white)](https://go.dev) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Go Report Card](https://goreportcard.com/badge/github.com/amirzamli/shimmer-llmgateway)](https://goreportcard.com/report/github.com/amirzamli/shimmer-llmgateway)
 
 ## Requirements
@@ -42,6 +40,7 @@ retention_days = 7                  # default when unset; <= 0 disables
 base_url = 'https://api.openai.com/v1'
 api_key_env = 'OPENAI_API_KEY'
 models = ['gpt-4o', 'gpt-4o-mini']
+
 [[instances]]                       # INSTANCE of openai — alias defaults to "openai"
 alias = 'openai'
 template = 'openai'

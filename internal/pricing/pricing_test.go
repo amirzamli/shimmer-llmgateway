@@ -249,13 +249,13 @@ func TestLookupResolutionLadder(t *testing.T) {
 
 	// A user-defined custom endpoint resolves by base URL to its catalog
 	// provider, without the provider name matching anything.
-	p, ok = tab.Lookup("glm-5.3-flash", "custom-openai-api.z.ai-api-paas", "https://api.z.ai/api/paas/v4/")
+	p, ok = tab.Lookup("glm-5.3-flash", "zai-custom", "https://api.z.ai/api/paas/v4/")
 	if !ok || p.Input != 0.075 {
 		t.Errorf("baseURL resolve = %+v ok %v", p, ok)
 	}
 	// An unmatchable base URL falls through the ladder to the bare model id
 	// (first provider in table order) — the pre-existing bare-lookup behavior.
-	p, ok = tab.Lookup("glm-5.3-flash", "custom-openai-api.z.ai-api-paas", "https://other.example/v1")
+	p, ok = tab.Lookup("glm-5.3-flash", "zai-custom", "https://other.example/v1")
 	if !ok || p.Input != 0.075 {
 		t.Errorf("unmatched baseURL falls through to bare id = %+v ok %v", p, ok)
 	}
