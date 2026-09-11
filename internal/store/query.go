@@ -32,10 +32,131 @@ type rowScanner interface {
 func scanSessionSummary(s rowScanner) (SessionSummary, error) {
 	var out SessionSummary
 	var expired int
+	var firstRequest []byte
 	err := s.Scan(&out.ID, &out.CreatedAt, &out.FirstAlias, &out.FirstModel,
-		&out.RequestCount, &out.ToolCallCount, &out.FailureCount, &expired)
+		&out.RequestCount, &out.ToolCallCount, &out.FailureCount, &expired, &firstRequest)
 	out.Expired = expired != 0
+	out.FirstUserMessage = firstUserMessagePreview(firstRequest)
 	return out, err
+}
+
+// firstUserMessagePreview extracts a compact context string for session list
+// views without making them load every request payload. It accepts both the
+// Chat Completions messages shape and the Responses input shape.
+func firstUserMessagePreview(raw []byte) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return ""
+	}
+	// A few older capture paths stored the body as a JSON string. Unwrap it so
+	// session previews work for those rows too.
+	var encoded string
+	if json.Unmarshal(raw, &encoded) == nil && strings.TrimSpace(encoded) != "" {
+		raw = []byte(encoded)
+	}
+	var body map[string]json.RawMessage
+	if json.Unmarshal(raw, &body) == nil {
+		for _, key := range []string{"messages", "input"} {
+			candidate, ok := body[key]
+			if !ok {
+				continue
+			}
+			if text := firstUserMessageValue(candidate); text != "" {
+				return shortenPreview(text)
+			}
+		}
+		// Keep compatibility with captures that wrapped the provider body.
+		for _, key := range []string{"body", "payload", "request"} {
+			if nested, ok := body[key]; ok {
+				if text := firstUserMessagePreview(nested); text != "" {
+					return text
+				}
+			}
+		}
+	}
+	// Responses payloads can also be represented as a top-level input/message
+	// array in legacy rows.
+	if text := firstUserMessageValue(raw); text != "" {
+		return shortenPreview(text)
+	}
+	return ""
+}
+
+func firstUserMessageValue(raw json.RawMessage) string {
+	var text string
+	if json.Unmarshal(raw, &text) == nil && text != "" {
+		return text
+	}
+	var items []json.RawMessage
+	if json.Unmarshal(raw, &items) == nil {
+		for _, item := range items {
+			if text := userMessageText(item); text != "" {
+				return text
+			}
+		}
+		return ""
+	}
+	var item map[string]json.RawMessage
+	if json.Unmarshal(raw, &item) == nil && len(item) > 0 {
+		return userMessageText(raw)
+	}
+	return ""
+}
+
+func userMessageText(raw json.RawMessage) string {
+	var message struct {
+		Role    string          `json:"role"`
+		Type    string          `json:"type"`
+		Text    string          `json:"text"`
+		Content json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(raw, &message) != nil {
+		return ""
+	}
+	if message.Role != "user" && !(message.Type == "message" && message.Role == "") && message.Type != "input_text" {
+		return ""
+	}
+	if len(message.Content) > 0 {
+		if text := jsonContentText(message.Content); text != "" {
+			return text
+		}
+	}
+	return message.Text
+}
+
+func jsonContentText(raw json.RawMessage) string {
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return text
+	}
+	var part struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &part) == nil && part.Text != "" {
+		return part.Text
+	}
+	var parts []struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &parts) != nil {
+		return ""
+	}
+	var values []string
+	for _, part := range parts {
+		if part.Text != "" {
+			values = append(values, part.Text)
+		}
+	}
+	return strings.Join(values, " ")
+}
+
+func shortenPreview(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	runes := []rune(value)
+	if len(runes) > 180 {
+		return string(runes[:177]) + "…"
+	}
+	return value
 }
 
 func scanRequest(s rowScanner) (Request, error) {
@@ -125,7 +246,11 @@ func (s *Store) ListSessions(ctx context.Context, f SessionFilter) ([]*SessionSu
 		args = append(args, like, like, like, like)
 	}
 
-	q := `SELECT id, created_at, first_alias, first_model, request_count, tool_call_count, failure_count, expired FROM sessions`
+	q := `SELECT id, created_at, first_alias, first_model, request_count, tool_call_count, failure_count, expired,
+		(SELECT COALESCE(request_json, request_filtered_json) FROM requests first_request
+		 WHERE first_request.session_id = sessions.id
+		 ORDER BY first_request.seq ASC, first_request.created_at ASC LIMIT 1)
+		FROM sessions`
 	if len(conds) > 0 {
 		q += ` WHERE ` + strings.Join(conds, " AND ")
 	}
@@ -154,6 +279,9 @@ func (s *Store) ListSessions(ctx context.Context, f SessionFilter) ([]*SessionSu
 func (s *Store) GetSession(ctx context.Context, sessionID string) (*Session, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, created_at, first_alias, first_model, request_count, tool_call_count, failure_count, expired
+			, (SELECT COALESCE(request_json, request_filtered_json) FROM requests first_request
+			   WHERE first_request.session_id = sessions.id
+			   ORDER BY first_request.seq ASC, first_request.created_at ASC LIMIT 1)
 		 FROM sessions WHERE id = ?`, sessionID)
 	sum, err := scanSessionSummary(row)
 	if errors.Is(err, sql.ErrNoRows) {

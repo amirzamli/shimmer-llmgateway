@@ -119,6 +119,32 @@ func baseRecord() *CaptureRecord {
 	}
 }
 
+func TestFirstUserMessagePreview(t *testing.T) {
+	wrapped := `{"body":{"messages":[{"role":"user","content":"wrapped prompt"}]}}`
+	doubleEncoded, err := json.Marshal(`{"messages":[{"role":"user","content":"encoded prompt"}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
+		raw  []byte
+		want string
+	}{
+		{name: "chat completions", raw: []byte(`{"messages":[{"role":"system","content":"ignore"},{"role":"user","content":"hello"}]}`), want: "hello"},
+		{name: "responses input", raw: []byte(`{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"response prompt"}]}]}`), want: "response prompt"},
+		{name: "input text item", raw: []byte(`{"input":[{"type":"input_text","text":"direct prompt"}]}`), want: "direct prompt"},
+		{name: "wrapped body", raw: []byte(wrapped), want: "wrapped prompt"},
+		{name: "double encoded", raw: doubleEncoded, want: "encoded prompt"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := firstUserMessagePreview(test.raw); got != test.want {
+				t.Fatalf("preview = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestOpenCreatesSchemaAndPragmas(t *testing.T) {
 	st := openTestStore(t)
 

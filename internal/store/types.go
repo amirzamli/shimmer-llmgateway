@@ -77,13 +77,17 @@ type CaptureRecord struct {
 
 // SessionSummary is a sessions row.
 type SessionSummary struct {
-	ID            string
-	CreatedAt     string
-	FirstAlias    string
-	FirstModel    string
-	RequestCount  int
-	ToolCallCount int
-	FailureCount  int
+	ID         string
+	CreatedAt  string
+	FirstAlias string
+	FirstModel string
+	// FirstUserMessage is a short preview extracted from the first captured
+	// request. It lets list views provide context without loading each full
+	// session payload.
+	FirstUserMessage string
+	RequestCount     int
+	ToolCallCount    int
+	FailureCount     int
 	// Expired reports whether retention removed this session's payloads:
 	// the requests rows keep only usage metadata and the tool_calls rows
 	// are gone, so conversation views render "payloads expired" instead.

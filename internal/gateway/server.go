@@ -141,7 +141,8 @@ func (s *Server) Close() error {
 
 // Handler returns the HTTP router. Any /v1/* path other than the capture
 // surface and /v1/models returns 404; /healthz is the repo-convention health
-// probe; /api/* is the §6.2 REST surface; / serves the embedded HTML UI. The
+// probe; /api/* is the §6.2 REST surface; / serves the embedded HTML UI and
+// /alt-page1 serves the experimental alternate workspace. The
 // router is wrapped in the access-log middleware, so every request is logged.
 // The browser-facing surfaces (/api/* and the UI) are additionally wrapped in
 // the host/origin guard; the capture surface and /healthz are not — non-browser
@@ -161,6 +162,8 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.Handle("/api/", s.guard(s.api.Handler()))
 	mux.Handle("GET /{$}", s.guard(http.HandlerFunc(s.handleUI)))
+	mux.Handle("GET /alt-page1", s.guard(http.HandlerFunc(s.handleAltPage1)))
+	mux.Handle("GET /alt-page1/", s.guard(http.HandlerFunc(s.handleAltPage1)))
 	return s.accessLog(mux)
 }
 
@@ -254,6 +257,7 @@ func sessionIDFromRequest(r *http.Request) string {
 // working directory shadows the copy embedded at build time, so UI edits show
 // up on browser refresh without rebuilding or restarting the gateway.
 const uiDiskPath = "web/index.html"
+const altPage1DiskPath = "web/alt-page1.html"
 
 // indexHTML caches the embedded single-page UI; it is read from embed.FS once
 // (first fallback request) instead of on every request. indexHTML is nil only
@@ -286,6 +290,37 @@ func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write(indexHTML)
+}
+
+var (
+	altPage1HTMLOnce sync.Once
+	altPage1HTML     []byte
+)
+
+// handleAltPage1 serves the experimental three-pane workspace. Like the
+// primary UI, the working-tree file wins so frontend edits appear after a
+// browser refresh; the embedded copy keeps the route available in a built
+// binary that has no source checkout beside it.
+func (s *Server) handleAltPage1(w http.ResponseWriter, r *http.Request) {
+	if data, err := os.ReadFile(altPage1DiskPath); err == nil {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(data)
+		return
+	}
+	altPage1HTMLOnce.Do(func() {
+		data, err := web.FS.ReadFile("alt-page1.html")
+		if err != nil {
+			altPage1HTML = nil
+			return
+		}
+		altPage1HTML = data
+	})
+	if altPage1HTML == nil {
+		http.Error(w, "embedded alternate UI missing", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(altPage1HTML)
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {

@@ -17,6 +17,10 @@ type templateView struct {
 	Style     string   `json:"style"`
 	APIKeyEnv string   `json:"api_key_env"`
 	Models    []string `json:"models"`
+	// ModelStyles carries per-model protocol overrides for templates such as
+	// opencode_go, whose catalog mixes OpenAI chat, Responses, and Anthropic
+	// Messages models on one endpoint.
+	ModelStyles map[string]string `json:"model_styles,omitempty"`
 	// ModelReasoningOptions advertises the valid reasoning effort levels per
 	// model so the UI can render a per-model dropdown instead of one fixed
 	// list. Omitted when the template carries no metadata.
@@ -25,7 +29,7 @@ type templateView struct {
 }
 
 func templateViewOf(t *config.Template) templateView {
-	return templateView{Name: t.Name, BaseURL: t.BaseURL, Style: styleOf(t.Style), APIKeyEnv: t.APIKeyEnv, Models: t.Models, ModelReasoningOptions: t.ModelReasoningOptions, Docs: t.Docs}
+	return templateView{Name: t.Name, BaseURL: t.BaseURL, Style: styleOf(t.Style), APIKeyEnv: t.APIKeyEnv, Models: t.Models, ModelStyles: t.ModelStyles, ModelReasoningOptions: t.ModelReasoningOptions, Docs: t.Docs}
 }
 
 // styleOf normalizes an empty style to the "openai" default for the UI.

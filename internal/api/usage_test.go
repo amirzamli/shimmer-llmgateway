@@ -78,7 +78,7 @@ func TestUsageEndpoint(t *testing.T) {
 		t.Fatalf("grouped buckets = %v", buckets)
 	}
 	b = buckets[0].(map[string]any)
-	if b["group"] != "gpt-4o-mini" || b["period"] != "2026-08-01" {
+	if b["group"] != "gpt-4o-mini" || b["provider"] != "openai" || b["period"] != "2026-08-01" {
 		t.Errorf("grouped bucket = %v", b)
 	}
 	if out["group"] != "model" {

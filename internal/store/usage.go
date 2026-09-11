@@ -33,10 +33,13 @@ type UsageFilter struct {
 
 // UsageBucket is one aggregation period (day/week/month) of estimated cost and
 // token usage, plus how many of its requests were unpriced. Group is the
-// provider/model key when UsageFilter.Group was set, else "".
+// provider/model key when UsageFilter.Group was set, else "". Provider is set
+// for model-grouped buckets so consumers can identify the upstream provider
+// for a resolved model.
 type UsageBucket struct {
 	Period           string  `json:"period"`
 	Group            string  `json:"group,omitempty"`
+	Provider         string  `json:"provider,omitempty"`
 	RequestCount     int     `json:"request_count"`
 	PromptTokens     int64   `json:"prompt_tokens"`
 	CompletionTokens int64   `json:"completion_tokens"`
@@ -108,17 +111,25 @@ func (s *Store) AggregateUsage(ctx context.Context, f UsageFilter) ([]*UsageBuck
 		where = ` WHERE ` + strings.Join(conds, " AND ")
 	}
 
-	// grp is NULL when ungrouped so one Scan serves both forms.
+	// grp and providerName are NULL when not needed so one Scan serves all forms.
 	grp := `NULL AS grp`
+	providerName := `NULL AS provider_name`
 	groupBy := `GROUP BY period`
 	orderBy := `ORDER BY period ASC`
 	if grouped {
 		grp = f.Group + ` AS grp`
 		groupBy = `GROUP BY period, grp`
 		orderBy = `ORDER BY period ASC, grp ASC`
+		if f.Group == "model" {
+			// A model can be served by more than one configured provider. Keep
+			// those rows distinct and expose the provider for the model rail.
+			providerName = `provider AS provider_name`
+			groupBy = `GROUP BY period, grp, provider_name`
+			orderBy = `ORDER BY period ASC, grp ASC, provider_name ASC`
+		}
 	}
 
-	q := fmt.Sprintf(`SELECT %[1]s AS period, %[3]s,
+	q := fmt.Sprintf(`SELECT %[1]s AS period, %[3]s, %[4]s,
 			COUNT(*),
 			COALESCE(SUM(prompt_tokens), 0),
 			COALESCE(SUM(completion_tokens), 0),
@@ -130,8 +141,8 @@ func (s *Store) AggregateUsage(ctx context.Context, f UsageFilter) ([]*UsageBuck
 			COALESCE(SUM(cost_total), 0),
 			SUM(CASE WHEN cost_priced = 0 THEN 1 ELSE 0 END)
 		FROM requests%[2]s
-		%[4]s
-		%[5]s`, period, where, grp, groupBy, orderBy)
+		%[5]s
+		%[6]s`, period, where, grp, providerName, groupBy, orderBy)
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -142,14 +153,16 @@ func (s *Store) AggregateUsage(ctx context.Context, f UsageFilter) ([]*UsageBuck
 	for rows.Next() {
 		var b UsageBucket
 		var grpVal sql.NullString
+		var providerVal sql.NullString
 		var unpriced int
-		if err := rows.Scan(&b.Period, &grpVal, &b.RequestCount,
+		if err := rows.Scan(&b.Period, &grpVal, &providerVal, &b.RequestCount,
 			&b.PromptTokens, &b.CompletionTokens, &b.CachedTokens,
 			&b.CostInput, &b.CostOutput, &b.CostCacheRead, &b.CostCacheWrite, &b.CostTotal,
 			&unpriced); err != nil {
 			return nil, err
 		}
 		b.Group = grpVal.String
+		b.Provider = providerVal.String
 		b.UnpricedRequests = unpriced
 		out = append(out, &b)
 	}

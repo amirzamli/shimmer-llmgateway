@@ -237,7 +237,7 @@ func TestAggregateUsageGroupBy(t *testing.T) {
 		t.Fatalf("by-model buckets = %d, want 3: %+v", len(byModel), byModel)
 	}
 	first := byModel[0]
-	if first.Period != "2026-08-01" || first.Group != "gpt-4o" {
+	if first.Period != "2026-08-01" || first.Group != "gpt-4o" || first.Provider != "openai" {
 		t.Errorf("first by-model bucket = %+v", first)
 	}
 	if first.PromptTokens != 500 || !approx(first.CostTotal, 0.6) {
@@ -247,7 +247,7 @@ func TestAggregateUsageGroupBy(t *testing.T) {
 	if mini.Group != "gpt-4o-mini" || mini.PromptTokens != 1000 || mini.CachedTokens != 100 {
 		t.Errorf("gpt-4o-mini bucket = %+v", mini)
 	}
-	if byModel[2].Group != "deepseek-chat" || byModel[2].Period != "2026-08-02" {
+	if byModel[2].Group != "deepseek-chat" || byModel[2].Provider != "deepseek" || byModel[2].Period != "2026-08-02" {
 		t.Errorf("deepseek bucket = %+v", byModel[2])
 	}
 

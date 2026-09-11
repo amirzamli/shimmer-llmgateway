@@ -1,0 +1,1672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shimmer Gateway · Mockup — Option 1: Dashboard stays put</title>
+<!--
+  Standalone interactive design mockup. Build-free: plain HTML + inline CSS +
+  inline vanilla JS, opens via file://. No fetch/XHR/WebSocket, no CDN/fonts/
+  images, no gateway API calls — the mock api() adapter returns in-memory
+  objects only.
+
+  Layout 1 — "Dashboard stays put": left Sessions rail, center Providers
+  panel and right Usage rail are always visible. Opening a session swaps ONLY
+  the center column to the chat; both rails stay visible and interactive
+  (another session can be clicked, usage range chips still work).
+
+  The center provider panel is lifted UNMODIFIED from web/index.html — same
+  CSS, same class names, same DOM structure and the same data-action
+  event-delegation handlers (renderInstances, instanceBlockHtml,
+  instancePluginsHtml, quotaCell, alias rows, drag-to-reorder priority, …)
+  wired to inline mock data through a thin api() shim.
+-->
+<style>
+  /* ================= theme + base (lifted from web/index.html) ================= */
+  :root {
+    --bg: #0f1115; --panel: #171a21; --border: #2a2f3a;
+    --text: #e6e9ef; --text2: #c6cdd9; --muted: #a3adbd; --accent: #4f8cff;
+    --ok: #2ecc71; --warn: #f1c40f; --err: #e74c3c;
+  }
+  body.light {
+    --bg: #f2f4f8; --panel: #ffffff; --border: #d7dce5;
+    --text: #1b1f27; --text2: #414a5a; --muted: #667085; --accent: #3574e0;
+    --ok: #1e9e57; --warn: #a07c00; --err: #d13c30;
+  }
+  body.light .aliases-instance, body.light #add-instance-form, body.light .plugin-card { background: rgba(15,23,42,.02); }
+  body.light .aliases-instance summary:hover { background: rgba(15,23,42,.05); }
+  body.light .plugin-menu { box-shadow: 0 8px 24px rgba(15,23,42,.18); }
+  body.light .plugin-menu button:hover { background: rgba(15,23,42,.05); }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; font-family: system-ui, sans-serif; background: var(--bg); color: var(--text);
+         display: flex; flex-direction: column; }
+  header { flex-shrink: 0; padding: 12px 20px; border-bottom: 1px solid var(--border);
+           display: flex; align-items: center; gap: 16px; }
+  header h1 { font-size: 16px; margin: 0; }
+  nav { display: flex; gap: 4px; }
+  nav button { background: none; border: none; color: var(--muted); padding: 6px 12px;
+               border-radius: 6px; cursor: pointer; font-size: 14px; }
+  nav button.active { color: var(--text); background: var(--panel); }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+  input, select, textarea { background: var(--bg); border: 1px solid var(--border); color: var(--text);
+                            border-radius: 6px; padding: 6px 8px; font-size: 13px; }
+  button { background: var(--accent); border: none; color: white; border-radius: 6px;
+           padding: 6px 12px; cursor: pointer; font-size: 13px; }
+  button.ghost { background: transparent; border: 1px solid var(--border); color: var(--text2); }
+  button.ghost:hover { border-color: var(--muted); color: var(--text); }
+  button.outline { background: transparent; border: 1px solid var(--accent); color: var(--accent); }
+  button.outline:hover { background: rgba(79,140,255,.12); }
+  button.danger-ghost { background: transparent; border: 1px solid transparent; color: var(--err); }
+  button.danger-ghost:hover { border-color: var(--err); }
+  .btn-sm { padding: 3px 10px; font-size: 12px; }
+  .icon-btn { font-size: 15px; line-height: 1; padding: 6px 9px; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; }
+  code, pre { font-family: ui-monospace, monospace; font-size: 12px; }
+  pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px; overflow: auto; max-height: 400px; }
+  .badge { padding: 1px 8px; border-radius: 10px; font-size: 11px; }
+  .badge.ok { background: rgba(46,204,113,.15); color: var(--ok); }
+  .badge.warn { background: rgba(241,196,15,.15); color: var(--warn); }
+  .badge.err { background: rgba(231,76,60,.15); color: var(--err); }
+  .badge.disabled { background: rgba(154,163,178,.15); color: var(--muted); }
+  .muted { color: var(--muted); font-size: 12px; }
+  .hidden { display: none !important; }
+  .spacer { flex: 1; }
+  .clickable { cursor: pointer; text-decoration: underline; }
+
+  /* chat bubbles + tool calls (lifted from web/index.html) */
+  .msg { margin: 6px 0; padding: 8px 10px; border-left: 3px solid var(--border); background: var(--bg); border-radius: 4px; }
+  .msg.user { border-left-color: var(--accent); }
+  .msg.assistant { border-left-color: var(--ok); }
+  .msg.tool { border-left-color: var(--warn); }
+  .chat { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
+  .chat .msg { margin: 0; max-width: 85%; border-left: none; border-radius: 10px; word-break: break-word; white-space: pre-wrap; }
+  .chat .msg.user { align-self: flex-end; background: rgba(79,140,255,.15); }
+  .chat .msg.assistant { align-self: flex-start; background: rgba(46,204,113,.1); }
+  .chat .msg.system { align-self: flex-start; background: rgba(154,163,178,.12); }
+  .chat .msg.tool { align-self: flex-start; width: 100%; max-width: 100%; background: rgba(241,196,15,.08); }
+  .verdict { font-size: 11px; padding: 1px 8px; border-radius: 10px; }
+  .verdict.SUCCESS { background: rgba(46,204,113,.2); color: var(--ok); }
+  .verdict.RECOVERABLE { background: rgba(241,196,15,.2); color: var(--warn); }
+  .verdict.BLIND_ERROR { background: rgba(231,76,60,.2); color: var(--err); }
+  .chat-role { display: block; font-size: 11px; color: var(--muted); margin-bottom: 3px; letter-spacing: .02em; text-transform: uppercase; }
+  .chat-content { white-space: pre-wrap; }
+  .tool-call { margin-top: 6px; padding: 6px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; }
+  .tool-call pre { margin: 4px 0 0; max-height: 220px; }
+  .tool-result { margin-top: 6px; padding: 6px 8px; background: var(--bg); border-left: 3px solid var(--warn); border-radius: 6px; }
+  .tool-result pre { margin: 4px 0 0; max-height: 320px; }
+
+  /* ================= provider panel (lifted from web/index.html) ================= */
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  .panel h2 { margin: 0 0 12px; font-size: 15px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
+  .usage { display: flex; flex-direction: column; gap: 10px; min-width: 240px; }
+  .usage-item { display: flex; flex-direction: column; gap: 3px; }
+  .usage-header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .usage-label { color: var(--muted); font-size: 12px; }
+  .usage-value { font-weight: 600; font-size: 13px; }
+  .progress { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; height: 8px; overflow: hidden; }
+  .progress-bar { background: var(--accent); height: 100%; }
+  .reset-time { color: var(--muted); font-size: 11px; }
+  .aliases-instance { border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; background: rgba(255,255,255,0.015); margin-bottom: 12px; }
+  .aliases-instance summary { cursor: pointer; user-select: none; font-weight: 500; outline: none; display: flex; align-items: center; gap: 10px; padding: 4px 0; border-radius: 4px; transition: background .15s ease; }
+  .aliases-instance summary:hover { background: rgba(255,255,255,0.045); }
+  .aliases-instance summary:hover .aliases-caret { color: var(--accent); }
+  /* the whole summary row is the drag handle: dragging reorders priority */
+  .instance-summary { cursor: grab; }
+  .instance-summary:active { cursor: grabbing; }
+  .drag-grip { color: var(--muted); font-size: 12px; letter-spacing: -2px; user-select: none; }
+  .instance-row.dragging { opacity: .45; }
+  .instance-row.drop-above { box-shadow: 0 -2px 0 0 var(--accent); }
+  .instance-row.drop-below { box-shadow: 0 2px 0 0 var(--accent); }
+  .aliases-caret { display: inline-block; font-size: 10px; line-height: 1; color: var(--muted); transform: rotate(0deg); transition: transform .15s ease; }
+  .aliases-instance[open] .aliases-caret { transform: rotate(90deg); }
+  .aliases-summary-title { font-size: 14px; font-weight: 600; color: var(--text); }
+  .instance-summary .spacer { flex: 1; }
+  .instance-summary .badge { flex-shrink: 0; }
+  /* compact quota summary inline in the instance header */
+  .instance-quota { display: flex; align-items: center; }
+  .instance-quota .usage { min-width: 0; flex-direction: row; flex-wrap: wrap; gap: 2px 14px; }
+  .instance-quota .usage-item { flex-direction: row; align-items: baseline; gap: 5px; }
+  .instance-quota .progress { display: none; }
+  .instance-quota .usage-header { gap: 5px; }
+  .instance-body { margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--border); }
+  /* "Add instance" lives in the Instances panel header: blue with a subtle glow;
+     the form it reveals sits between the header and the provider rows. */
+  #add-instance-toggle { background: var(--accent); box-shadow: 0 0 10px rgba(79,140,255,.45), 0 0 2px rgba(79,140,255,.65); }
+  #add-instance-toggle:hover { box-shadow: 0 0 14px rgba(79,140,255,.6), 0 0 3px rgba(79,140,255,.8); }
+  #instances-panel > h2 { display: flex; align-items: center; gap: 10px; }
+  #instances-panel > h2 .spacer { flex: 1; }
+  #add-instance-form { border: 1px dashed var(--border); border-radius: 8px; padding: 14px; margin-bottom: 14px; background: rgba(255,255,255,0.015); }
+  #add-instance-form .row label { min-width: 150px; }
+  #add-instance-form .templates-fold { margin-top: 12px; }
+  .plugin-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; background: rgba(255,255,255,0.015); }
+  .inst-plugins-list { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .plugin-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; white-space: nowrap; border: 1px solid var(--border); border-radius: 999px; padding: 2px 9px; background: rgba(255,255,255,0.03); }
+  .plugin-chip .chip-x { border: none; background: none; color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1; padding: 0; }
+  .plugin-chip .chip-x:hover { color: var(--err); }
+  .plugin-add-wrap { position: relative; display: inline-block; }
+  .plugin-menu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 20; min-width: 260px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 4px; box-shadow: 0 8px 24px rgba(0,0,0,.45); }
+  .plugin-menu button { display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left; background: none; border: none; color: var(--text); padding: 6px 8px; border-radius: 6px; }
+  .plugin-menu button:hover { background: rgba(255,255,255,.06); }
+  .plugin-menu button .muted { font-size: 11px; white-space: normal; }
+  /* Expanded provider card: labelled subsections (Aliases / Plugins / Connection)
+     plus a form-level footer, so scope of each action is unambiguous. */
+  .instance-section { margin-top: 16px; }
+  .instance-section:first-child { margin-top: 0; }
+  .instance-section-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+  .instance-section-title { font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+  .instance-section-head .spacer { flex: 1; }
+  .instance-footer { display: flex; align-items: center; gap: 8px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); flex-wrap: wrap; }
+  .instance-footer .spacer { flex: 1; }
+  /* instance header actions: subdued group, destructive delete stays ghost */
+  .instance-actions { display: flex; gap: 6px; flex-shrink: 0; }
+  /* alias table: fixed column proportions + full-width editors */
+  .aliases-table th:nth-child(1), .aliases-table td:nth-child(1) { width: 24%; }
+  .aliases-table th:nth-child(2), .aliases-table td:nth-child(2) { width: 40%; }
+  .aliases-table th:nth-child(3), .aliases-table td:nth-child(3) { width: 18%; }
+  .aliases-table th:nth-child(4), .aliases-table td:nth-child(4) { width: 18%; }
+  .aliases-table input, .aliases-table select { width: 100%; }
+  .aliases-empty td { border: 1px dashed var(--border); padding: 16px; text-align: center; color: var(--muted); font-size: 12px; }
+  .aliases-empty button { margin-left: 8px; }
+  /* inline dashed "+ Add plugin" trigger trailing the chip row */
+  .chip-add { background: transparent; border: 1px dashed var(--border); color: var(--muted); border-radius: 999px; padding: 2px 10px; font-size: 12px; }
+  .chip-add:hover { color: var(--accent); border-color: var(--accent); }
+  /* Connection subsection: read-only label/value grid */
+  .connection-grid { display: grid; grid-template-columns: 150px 1fr; gap: 5px 14px; font-size: 12px; margin: 0; }
+  .connection-grid dt { color: var(--muted); }
+  .connection-grid dd { margin: 0; color: var(--text2); word-break: break-all; }
+
+  /* ================= app shell (mockup) ================= */
+  .mock-note { flex-shrink: 0; padding: 5px 20px; font-size: 11px; color: var(--warn);
+               background: rgba(241,196,15,.06); border-bottom: 1px solid var(--border); }
+  .mode-label { font-size: 11px; color: var(--muted); border: 1px dashed var(--border);
+                border-radius: 999px; padding: 2px 10px; white-space: nowrap; }
+
+  /* Layout 1: there is deliberately NO rule that hides .rail — opening a
+     session swaps only the center column, so both rails stay visible. */
+  .desk { flex: 1; min-height: 0; display: flex; --left-w: 260px; --right-w: 300px; }
+  .rail { display: flex; flex-direction: column; min-height: 0; background: var(--panel); }
+  .rail.left { width: var(--left-w); flex-shrink: 0; border-right: 1px solid var(--border); }
+  .rail.right { width: var(--right-w); flex-shrink: 0; border-left: 1px solid var(--border); }
+  .rail-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+               border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .rail-head h2 { margin: 0; font-size: 12px; letter-spacing: .05em; text-transform: uppercase; color: var(--text2); }
+  .mock-tag { font-size: 10px; color: var(--muted); border: 1px dashed var(--border);
+              border-radius: 999px; padding: 0 7px; line-height: 15px; }
+  .rail-scroll { flex: 1; overflow-y: auto; min-height: 0; }
+  .center { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; position: relative; }
+  .resizer { width: 6px; flex-shrink: 0; cursor: col-resize; background: transparent; touch-action: none; }
+  .resizer:hover, body.dragging .resizer { background: rgba(79,140,255,.28); }
+  body.dragging { user-select: none; cursor: col-resize; }
+  #providers-view { padding: 20px; }
+
+  /* ---------- sessions rail ---------- */
+  .session-row { display: block; width: 100%; text-align: left; background: none; border: none;
+                 border-bottom: 1px solid var(--border); padding: 10px 14px; cursor: pointer;
+                 color: var(--text); border-radius: 0; }
+  .session-row:hover { background: rgba(255,255,255,.03); }
+  .session-row.active { background: rgba(79,140,255,.1); box-shadow: inset 3px 0 0 var(--accent); }
+  .sess-top { display: flex; align-items: center; gap: 6px; }
+  .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); flex-shrink: 0;
+              animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+  .sess-id { font-family: ui-monospace, monospace; font-size: 12px; font-weight: 600; }
+  .sess-time { margin-left: auto; font-size: 11px; color: var(--muted); }
+  .sess-sub { display: block; font-size: 11px; color: var(--text2); margin-top: 2px;
+              white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sess-foot { display: flex; align-items: center; gap: 8px; margin-top: 5px; }
+  .sess-reqs { font-size: 11px; color: var(--muted); }
+
+  /* ---------- chat view (inside the center column only) ---------- */
+  .chat-head { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 10px;
+               padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border);
+               flex-wrap: wrap; }
+  .chat-title { font-size: 14px; font-weight: 600; }
+  .chat-body { padding: 14px 20px; max-width: 780px; }
+  .chat-meta { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+  .chat-foot { margin-top: 14px; font-size: 11px; color: var(--muted); }
+
+  /* ---------- usage rail ---------- */
+  .chip-row { position: sticky; top: 0; z-index: 4; display: flex; gap: 6px; padding: 10px 12px;
+              background: var(--panel); border-bottom: 1px solid var(--border); }
+  .chip { background: transparent; border: 1px solid var(--border); color: var(--muted);
+          border-radius: 999px; padding: 3px 12px; font-size: 12px; }
+  .chip.active { color: var(--text); border-color: var(--accent); background: rgba(79,140,255,.12); }
+  .usage-body { padding: 12px; }
+  .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+  .stat { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+  .stat .usage-value { font-size: 15px; }
+  .section-title { font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
+                   color: var(--muted); margin: 14px 0 8px; }
+  .chart { display: flex; align-items: stretch; gap: 3px; height: 132px; padding-top: 6px; }
+  .bar-col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end;
+             align-items: center; gap: 4px; min-width: 0; }
+  .bar { width: 75%; max-width: 18px; background: var(--accent); border-radius: 3px 3px 0 0;
+         min-height: 2px; opacity: .9; }
+  .bar.today { background: var(--ok); }
+  .bar-tick { font-size: 9px; color: var(--muted); height: 11px; line-height: 11px; }
+  .donut { position: relative; width: 96px; height: 96px; flex-shrink: 0; margin: 4px auto 10px; }
+  .donut-hole { position: absolute; inset: 20px; border-radius: 50%; background: var(--panel);
+                display: grid; place-items: center; font-size: 11px; font-weight: 600; }
+  .legend { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+  .legend-row { display: flex; align-items: baseline; gap: 7px; }
+  .swatch { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; align-self: center; }
+  .model-row { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 5px 0;
+               border-bottom: 1px solid var(--border); }
+  .model-name { font-family: ui-monospace, monospace; font-size: 11px; }
+  .model-tok { color: var(--muted); font-size: 11px; }
+  .err-row { display: flex; justify-content: space-between; font-size: 12px; padding: 4px 0; }
+
+  /* ---------- settings slide-over ---------- */
+  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); opacity: 0; visibility: hidden;
+             transition: opacity .22s ease, visibility .22s; z-index: 30; }
+  .overlay.open { opacity: 1; visibility: visible; }
+  .settings-panel { position: fixed; top: 0; right: 0; bottom: 0; width: 400px; max-width: 92vw;
+                    background: var(--panel); border-left: 1px solid var(--border);
+                    box-shadow: -12px 0 32px rgba(0,0,0,.35); transform: translateX(103%);
+                    visibility: hidden; transition: transform .24s ease, visibility .24s;
+                    z-index: 31; display: flex; flex-direction: column; }
+  .settings-panel.open { transform: none; visibility: visible; }
+  .set-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px;
+              border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .set-head h2 { margin: 0; font-size: 15px; }
+  .set-scroll { flex: 1; overflow-y: auto; padding: 14px 16px; }
+  .setting { display: flex; gap: 14px; padding: 10px 0; border-bottom: 1px solid var(--border);
+             align-items: center; }
+  .setting:last-child { border-bottom: none; }
+  .setting-label { font-size: 13px; font-weight: 500; flex: 1; }
+  .setting-desc { color: var(--text2); font-size: 11px; margin-top: 2px; line-height: 1.45; }
+  .plugin-head { display: flex; align-items: center; gap: 10px; }
+  .plugin-name { font-family: ui-monospace, monospace; font-size: 12px; font-weight: 600; }
+  .switch { position: relative; width: 38px; height: 20px; border-radius: 999px; background: var(--bg);
+            border: 1px solid var(--border); padding: 0; flex-shrink: 0; transition: background .15s; }
+  .switch[aria-checked="true"] { background: var(--accent); border-color: var(--accent); }
+  .switch .knob { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px;
+                  border-radius: 50%; background: #fff; transition: left .15s; }
+  .switch[aria-checked="true"] .knob { left: 20px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Shimmer Gateway</h1>
+  <nav aria-label="Mock navigation">
+    <button class="active" aria-pressed="true" data-action="nav" data-nav="providers">Providers</button>
+    <button aria-pressed="false" data-action="nav" data-nav="sessions">Sessions</button>
+    <button aria-pressed="false" data-action="nav" data-nav="usage">Usage</button>
+  </nav>
+  <span class="mode-label">Layout 1 · Dashboard stays put — rails stay visible</span>
+  <span class="spacer"></span>
+  <button id="theme-toggle" class="ghost" data-action="toggle-theme" title="Switch theme">Light</button>
+  <button id="settings-toggle" class="ghost icon-btn" data-action="open-settings"
+          aria-label="Open settings and plugins" title="Settings &amp; plugins">&#9881;</button>
+</header>
+<div class="mock-note">Interactive design mockup — Layout 1 · Dashboard stays put. Provider panel lifted from web/index.html. Inline mock data only, no gateway API calls.</div>
+
+<div class="desk" id="desk">
+  <!-- Left: sessions rail (stays visible and interactive while chat is open) -->
+  <aside class="rail left" aria-label="Sessions">
+    <div class="rail-head"><h2>Sessions</h2><span class="mock-tag">mock</span><span class="spacer"></span><span class="muted">6</span></div>
+    <div id="session-list" class="rail-scroll"></div>
+  </aside>
+
+  <div class="resizer" role="separator" aria-orientation="vertical" aria-label="Resize sessions rail"
+       title="Drag to resize (or use arrow keys)" data-side="left" tabindex="0"></div>
+
+  <!-- Center: the real provider panel, swapped for chat in place when a session opens -->
+  <main class="center" id="center">
+    <section id="providers-view" aria-label="Providers"></section>
+
+    <section id="chat-view" class="hidden" aria-label="Session replay">
+      <div class="chat-head">
+        <div style="min-width:0">
+          <div class="chat-title">Session <span class="mono" id="chat-title-id"></span></div>
+          <div class="chat-meta" id="chat-meta" style="margin-bottom:0"></div>
+        </div>
+        <span class="spacer"></span>
+        <button class="ghost btn-sm" data-action="close-chat" title="Close chat and return to Providers">&#8592; Providers</button>
+        <button class="ghost btn-sm" id="chat-close" data-action="close-chat" aria-label="Close chat">&#10005; Close</button>
+      </div>
+      <div class="chat-body">
+        <div class="chat" id="chat-messages"></div>
+        <div class="chat-foot">Read-only replay of a recorded session &#183; Mock data — not live streaming.</div>
+      </div>
+    </section>
+  </main>
+
+  <div class="resizer" role="separator" aria-orientation="vertical" aria-label="Resize usage rail"
+       title="Drag to resize (or use arrow keys)" data-side="right" tabindex="0"></div>
+
+  <!-- Right: usage rail with pinned filter chips (stays interactive while chat is open) -->
+  <aside class="rail right" aria-label="Usage">
+    <div class="rail-head"><h2>Usage</h2><span class="mock-tag">mock</span></div>
+    <div class="rail-scroll" id="usage-scroll">
+      <div class="chip-row" role="group" aria-label="Usage time range">
+        <button class="chip active" aria-pressed="true" data-action="range" data-range="24h">24h</button>
+        <button class="chip" aria-pressed="false" data-action="range" data-range="7d">7d</button>
+        <button class="chip" aria-pressed="false" data-action="range" data-range="30d">30d</button>
+        <button class="chip" aria-pressed="false" data-action="range" data-range="all">All</button>
+      </div>
+      <div class="usage-body" id="usage-body"></div>
+    </div>
+  </aside>
+</div>
+
+<div id="settings-overlay" class="overlay"></div>
+<aside id="settings" class="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title" tabindex="-1">
+  <div class="set-head">
+    <h2 id="settings-title">Settings &amp; Plugins</h2><span class="spacer"></span>
+    <button class="ghost icon-btn" id="settings-close" data-action="close-settings" aria-label="Close settings and plugins">&#10005;</button>
+  </div>
+  <div class="set-scroll">
+    <div class="section-title">General</div>
+    <div class="setting">
+      <div class="setting-label">Default provider<div class="setting-desc">Used for new sessions and fallbacks.</div></div>
+      <select id="default-provider" aria-label="Default provider">
+        <option>openai_go</option><option>anthropic</option><option>gemini</option><option>local_llama</option>
+      </select>
+    </div>
+    <div class="setting">
+      <div class="setting-label">Show estimated costs<div class="setting-desc">Display cost totals in the usage rail.</div></div>
+      <button class="switch" role="switch" aria-checked="true" aria-label="Show estimated costs" data-action="switch"><span class="knob"></span></button>
+    </div>
+    <div class="setting">
+      <div class="setting-label">Session retention<div class="setting-desc">How long recorded session replays are kept.</div></div>
+      <select aria-label="Session retention"><option>7 days</option><option selected>30 days</option><option>90 days</option></select>
+    </div>
+    <div class="section-title" style="margin-top:18px">Plugins</div>
+    <div class="plugin-card">
+      <div class="plugin-head">
+        <span class="plugin-name">fill_reasoning_content</span><span class="spacer"></span>
+        <button class="switch" role="switch" aria-checked="true" aria-label="Enable fill_reasoning_content" data-action="switch" data-plugin="fill_reasoning_content"><span class="knob"></span></button>
+      </div>
+      <div class="setting-desc">Appends a reasoning summary to the response content.</div>
+    </div>
+    <div class="plugin-card">
+      <div class="plugin-head">
+        <span class="plugin-name">responses-shim</span><span class="spacer"></span>
+        <button class="switch" role="switch" aria-checked="true" aria-label="Enable responses-shim" data-action="switch" data-plugin="responses-shim"><span class="knob"></span></button>
+      </div>
+      <div class="setting-desc">Maps Responses API calls onto chat.completions for compatible upstreams.</div>
+    </div>
+    <div class="plugin-card">
+      <div class="plugin-head">
+        <span class="plugin-name">retry-503</span><span class="spacer"></span>
+        <button class="switch" role="switch" aria-checked="false" aria-label="Enable retry-503" data-action="switch" data-plugin="retry-503"><span class="knob"></span></button>
+      </div>
+      <div class="setting-desc">Retries upstream 503 responses with exponential backoff.</div>
+    </div>
+    <div class="plugin-card">
+      <div class="plugin-head">
+        <span class="plugin-name">log_tool_calls</span><span class="spacer"></span>
+        <button class="switch" role="switch" aria-checked="true" aria-label="Enable log_tool_calls" data-action="switch" data-plugin="log_tool_calls"><span class="knob"></span></button>
+      </div>
+      <div class="setting-desc">Records tool-call arguments and results for session replay.</div>
+    </div>
+    <div class="muted" style="margin-top:12px">Global plugin toggles here update the "global defaults" chips on the Providers panel. Mock controls — not wired to the gateway.</div>
+  </div>
+</aside>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? "" : s)
+  .replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+// domId maps an alias to a safe HTML id fragment (lifted from web/index.html).
+function domId(alias) {
+  return String(alias == null ? "" : alias).replace(/_/g, "_u95_").replace(/[^A-Za-z0-9-]/g, c => "_u" + c.codePointAt(0) + "_");
+}
+
+/* ================= inline mock data (no gateway API) ================= */
+const nowMs = Date.now();
+const MOCK = {
+  templates: [
+    { name: "openai", style: "openai", base_url: "https://api.openai.com/v1", api_key_env: "OPENAI_API_KEY",
+      models: ["gpt-4o", "gpt-4o-mini", "o3-mini"],
+      model_reasoning_options: { "gpt-4o": ["low", "medium", "high"], "o3-mini": ["low", "medium", "high", "max"] } },
+    { name: "anthropic", style: "anthropic", base_url: "https://api.anthropic.com/v1", api_key_env: "ANTHROPIC_API_KEY",
+      models: ["claude-sonnet-4-20250514", "claude-haiku-4"], model_reasoning_options: {} },
+    { name: "openai-compat", style: "openai", base_url: "", api_key_env: "",
+      models: [], model_reasoning_options: {} },
+    { name: "custom_openai", style: "openai", base_url: "", api_key_env: "",
+      models: [], model_reasoning_options: {} },
+    { name: "custom_anthropic", style: "anthropic", base_url: "", api_key_env: "",
+      models: [], model_reasoning_options: {} }
+  ],
+  instances: [
+    { alias: "openai_go", template: "openai", style: "openai",
+      base_url: "https://api.openai.com/v1", key_masked: "sk-proj-…f4a2", api_key_env: "",
+      priority: 1, disabled: false, plugins: null,
+      model_aliases: { small: "gpt-4o-mini", large: "gpt-4o" },
+      model_reasoning: { large: "high" },
+      models: ["gpt-4o", "gpt-4o-mini", "o3-mini"] },
+    { alias: "anthropic", template: "anthropic", style: "anthropic",
+      base_url: "https://api.anthropic.com/v1", key_masked: "", api_key_env: "ANTHROPIC_API_KEY",
+      priority: null, disabled: false, plugins: ["retry-503"],
+      model_aliases: { claude: "claude-sonnet-4-20250514" },
+      model_reasoning: {},
+      models: ["claude-sonnet-4-20250514", "claude-haiku-4"] },
+    { alias: "gemini", template: "openai-compat", style: "openai",
+      base_url: "https://generativelanguage.googleapis.com/v1beta/openai", key_masked: "AIza…9c31", api_key_env: "",
+      priority: null, disabled: false, plugins: null,
+      model_aliases: { fast: "gemini-2.0-flash" },
+      model_reasoning: {},
+      models: ["gemini-2.0-flash", "gemini-2.0-pro"] },
+    { alias: "local_llama", template: "custom_openai", style: "openai",
+      base_url: "http://localhost:8080/v1", key_masked: "", api_key_env: "",
+      priority: null, disabled: true, plugins: [],
+      model_aliases: {}, model_reasoning: {},
+      models: ["llama-3.1-8b"] }
+  ],
+  quota: [
+    { alias: "openai_go", supported: true, configured: true, ok: true, windows: {
+        "5h": { used_percent: 62, reset_at: nowMs + 3 * 3600e3 },
+        "weekly": { used_percent: 41, reset_at: nowMs + 2 * 86400e3 },
+        "monthly": { used_percent: 12, reset_at: nowMs + 18 * 86400e3 } } },
+    { alias: "anthropic", supported: true, configured: true, ok: true, windows: {
+        "5h": { used_percent: 31, reset_at: nowMs + 5 * 3600e3 },
+        "weekly": { used_percent: 8, reset_at: nowMs + 3 * 86400e3 } } },
+    { alias: "gemini", supported: true, configured: true, ok: true, windows: {
+        "credits_balance": { value_label: "$8.20" } } },
+    { alias: "local_llama", supported: false }
+  ],
+  plugins: {
+    request_plugins: ["fill_reasoning_content", "responses-shim"],
+    response_plugins: ["fill_reasoning_content", "log_tool_calls"],
+    plugins: [
+      { name: "fill_reasoning_content", source: "built-in", description: "Appends a reasoning summary to the response content." },
+      { name: "responses-shim", source: "built-in", description: "Maps Responses API calls onto chat.completions for compatible upstreams." },
+      { name: "retry-503", source: "built-in", description: "Retries upstream 503 responses with exponential backoff." },
+      { name: "log_tool_calls", source: "built-in", description: "Records tool-call arguments and results for session replay." }
+    ],
+    plugin_config: {}
+  },
+  models: {
+    openai_go: ["gpt-4o", "gpt-4o-mini", "o3-mini", "gpt-4.1"],
+    anthropic: ["claude-sonnet-4-20250514", "claude-haiku-4", "claude-opus-4"],
+    gemini: ["gemini-2.0-flash", "gemini-2.0-pro", "gemini-2.5-flash"],
+    local_llama: ["llama-3.1-8b", "llama-3.1-70b"]
+  }
+};
+
+const SESSIONS = [
+  { id: "8f21ab3c-9d4e-4f2a-b1c7-6e9d0a2b5c41", time: "2m ago",  alias: "openai_go", model: "gpt-4o-mini", reqs: 3,  status: "ok",  errs: 0, recent: true },
+  { id: "4c9e07a1-1f2b-4d3c-8a6e-2b1f0c9d7e44", time: "14m ago", alias: "anthropic", model: "claude-sonnet-4-20250514", reqs: 7, status: "ok", errs: 0, recent: true },
+  { id: "a1b2c3d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d", time: "1h ago",  alias: "openai_go", model: "gpt-4o-mini", reqs: 12, status: "err", errs: 1 },
+  { id: "77d0f4e2-3b4a-4c5d-9e6f-0a1b2c3d4e5f", time: "3h ago",  alias: "gemini", model: "gemini-2.0-flash", reqs: 2, status: "ok", errs: 0 },
+  { id: "2e5a9bf1-6c7d-4e8f-9a0b-1c2d3e4f5a6b", time: "yesterday", alias: "anthropic", model: "claude-haiku-4", reqs: 5, status: "ok", errs: 0 },
+  { id: "91c3d8e0-7f8a-4b9c-8d0e-1f2a3b4c5d6e", time: "2d ago",  alias: "local_llama", model: "llama-3.1-8b", reqs: 4, status: "err", errs: 2 }
+];
+
+// One canned conversation, rendered read-only (like the Traces view).
+const CHAT = {
+  created: "2026-09-11T09:42:11Z",
+  tools: 1,
+  turns: [
+    { role: "user", text: "Summarize the open PRs in Shimmer-LLMGateway and flag any that look blocked." },
+    { role: "assistant", text: "Let me pull the open PRs and their CI status.",
+      tool: {
+        name: "list_open_prs",
+        verdict: "SUCCESS",
+        args: '{\n  "repo": "Shimmer-LLMGateway",\n  "state": "open",\n  "limit": 10\n}',
+        result: "3 open PRs:\n#142 fix: retry 503s in anthropic upstream (checks: pass)\n#147 feat: per-model styles for opencode_go (checks: fail — flaky e2e)\n#151 docs: refresh gateway spec (checks: pending)"
+      } },
+    { role: "user", text: "Which one is blocked, and what is failing?" },
+    { role: "assistant", text: "#147 is the one to watch: its e2e suite failed on the openai-responses workflow twice this week (flaky, not a code change). #151 is just waiting on CI. #142 is green and ready to merge." }
+  ]
+};
+
+const USAGE = {
+  "24h": {
+    label: "24h", requests: "342", cost: "$1.42", tokShort: "84.2k / 41.3k", errs: "3",
+    ticks: ["00","02","04","06","08","10","12","14","16","18","20","22"],
+    bars: [12,18,9,14,22,17,25,31,28,24,19,15],
+    donut: { input: 0.58, cacheRead: 0.31, cacheWrite: 0.06, output: 0.47 },
+    models: [
+      { m: "gpt-4o-mini", tok: "41.2k", errs: 0 },
+      { m: "claude-sonnet-4", tok: "22.8k", errs: 1 },
+      { m: "gemini-2.0-flash", tok: "9.4k", errs: 0 },
+      { m: "llama-3.1-8b", tok: "6.1k", errs: 2 }
+    ],
+    errors: [ { e: "502 upstream timeout", n: 2 }, { e: "rate_limit_exceeded", n: 1 } ]
+  },
+  "7d": {
+    label: "7d", requests: "2,847", cost: "$11.68", tokShort: "640k / 311k", errs: "17",
+    ticks: ["Mon","Tue","Wed","Thu","Fri","Sat","Sun","Mon","Tue","Wed","Thu","Fri"],
+    bars: [18,22,15,26,21,30,28,24,19,23,27,20],
+    donut: { input: 4.72, cacheRead: 2.6, cacheWrite: 0.5, output: 3.86 },
+    models: [
+      { m: "gpt-4o-mini", tok: "312k", errs: 1 },
+      { m: "claude-sonnet-4", tok: "184k", errs: 3 },
+      { m: "gemini-2.0-flash", tok: "78k", errs: 0 },
+      { m: "llama-3.1-8b", tok: "42k", errs: 13 }
+    ],
+    errors: [ { e: "502 upstream timeout", n: 11 }, { e: "rate_limit_exceeded", n: 4 }, { e: "context_length_exceeded", n: 2 } ]
+  },
+  "30d": {
+    label: "30d", requests: "9,412", cost: "$43.21", tokShort: "2.1M / 1.0M", errs: "41",
+    ticks: ["Aug 12","Aug 15","Aug 18","Aug 21","Aug 24","Aug 27","Aug 30","Sep 2","Sep 5","Sep 8","Sep 10","Sep 11"],
+    bars: [30,34,28,41,37,44,39,48,45,52,40,36],
+    donut: { input: 17.4, cacheRead: 9.8, cacheWrite: 2.1, output: 13.9 },
+    models: [
+      { m: "gpt-4o-mini", tok: "1.02M", errs: 4 },
+      { m: "claude-sonnet-4", tok: "580k", errs: 9 },
+      { m: "gemini-2.0-flash", tok: "260k", errs: 1 },
+      { m: "llama-3.1-8b", tok: "150k", errs: 27 }
+    ],
+    errors: [ { e: "502 upstream timeout", n: 24 }, { e: "rate_limit_exceeded", n: 9 }, { e: "context_length_exceeded", n: 5 }, { e: "invalid_api_key", n: 3 } ]
+  },
+  "all": {
+    label: "All", requests: "18,204", cost: "$82.09", tokShort: "4.3M / 2.1M", errs: "88",
+    ticks: ["Oct","Nov","Dec","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep"],
+    bars: [55,60,48,70,64,82,76,88,79,95,84,74],
+    donut: { input: 33.5, cacheRead: 18.2, cacheWrite: 3.9, output: 26.5 },
+    models: [
+      { m: "gpt-4o-mini", tok: "2.1M", errs: 12 },
+      { m: "claude-sonnet-4", tok: "1.2M", errs: 21 },
+      { m: "gemini-2.0-flash", tok: "540k", errs: 2 },
+      { m: "llama-3.1-8b", tok: "310k", errs: 53 }
+    ],
+    errors: [ { e: "502 upstream timeout", n: 47 }, { e: "rate_limit_exceeded", n: 19 }, { e: "context_length_exceeded", n: 12 }, { e: "invalid_api_key", n: 10 } ]
+  }
+};
+
+/* ================= thin mock api() adapter =================
+ * Same call sites as web/index.html; every route returns in-memory objects
+ * instead of touching the gateway. Mutations update MOCK.* so a following
+ * loadProviders() re-render behaves like the real app. */
+async function api(path, opts) {
+  const method = (opts && opts.method) || "GET";
+  const payload = opts && opts.body ? JSON.parse(opts.body) : null;
+  await Promise.resolve();
+  if (method === "GET") {
+    if (path === "/api/templates") return { templates: MOCK.templates };
+    if (path === "/api/instances") return { instances: MOCK.instances };
+    if (path.startsWith("/api/quota")) return { quota: MOCK.quota };
+    if (path === "/api/plugins") return MOCK.plugins;
+    const mm = path.match(/^\/api\/instances\/(.+)\/models/);
+    if (mm) {
+      const alias = decodeURIComponent(mm[1]);
+      return { models: MOCK.models[alias] || [], source: "provider", fetched_at: new Date().toISOString() };
+    }
+  }
+  if (method === "POST" && path === "/api/instances") {
+    const alias = payload.alias || suggestAlias(payload.template);
+    const t = MOCK.templates.find(x => x.name === payload.template);
+    MOCK.instances.push({
+      alias, template: payload.template, style: (t && t.style) || "openai",
+      base_url: payload.base_url || "", key_masked: payload.key ? "…" + String(payload.key).slice(-4) : "",
+      api_key_env: "", priority: null, disabled: false, plugins: null,
+      model_aliases: {}, model_reasoning: {}, models: []
+    });
+    return {};
+  }
+  if (method === "PATCH" && path.startsWith("/api/instances/")) {
+    const alias = decodeURIComponent(path.slice("/api/instances/".length));
+    const inst = MOCK.instances.find(x => x.alias === alias);
+    if (inst) {
+      if (payload.alias) inst.alias = payload.alias;
+      if (payload.key !== undefined) inst.key_masked = payload.key ? "…" + String(payload.key).slice(-4) : "";
+      if (payload.model_aliases !== undefined) inst.model_aliases = payload.model_aliases;
+      if (payload.model_reasoning !== undefined) inst.model_reasoning = payload.model_reasoning;
+      if (payload.plugins !== undefined) inst.plugins = payload.plugins;
+      if (payload.disabled !== undefined) inst.disabled = payload.disabled;
+    }
+    return {};
+  }
+  if (method === "DELETE" && path.startsWith("/api/instances/")) {
+    const alias = decodeURIComponent(path.slice("/api/instances/".length));
+    const i = MOCK.instances.findIndex(x => x.alias === alias);
+    if (i !== -1) MOCK.instances.splice(i, 1);
+    return {};
+  }
+  if (method === "PUT" && path === "/api/instances/order") {
+    (payload.aliases || []).forEach((a, i) => {
+      const inst = MOCK.instances.find(x => x.alias === a);
+      if (inst) inst.priority = i + 1;
+    });
+    return {};
+  }
+  if (method === "PATCH" && path.startsWith("/api/plugins/")) {
+    const name = decodeURIComponent(path.slice("/api/plugins/".length));
+    const on = !!(payload && payload.enabled);
+    const add = (list) => (list.includes(name) ? list : list.concat([name]));
+    const drop = (list) => list.filter(n => n !== name);
+    MOCK.plugins.request_plugins = on ? add(MOCK.plugins.request_plugins) : drop(MOCK.plugins.request_plugins);
+    MOCK.plugins.response_plugins = on ? add(MOCK.plugins.response_plugins) : drop(MOCK.plugins.response_plugins);
+    return {};
+  }
+  if (method === "PATCH" && path === "/api/settings") return {};
+  return {};
+}
+
+/* ================= theme toggle (dark default / light) ================= */
+const THEME_KEY = "shimmer.mock.theme";
+function applyTheme(mode) {
+  const light = mode === "light";
+  document.body.classList.toggle("light", light);
+  const btn = $("theme-toggle");
+  if (btn) {
+    btn.textContent = light ? "Dark" : "Light";
+    btn.title = light ? "Switch to the dark theme" : "Switch to the light theme";
+  }
+}
+function toggleTheme() {
+  const next = document.body.classList.contains("light") ? "dark" : "light";
+  applyTheme(next);
+  try { localStorage.setItem(THEME_KEY, next); } catch (e) {}
+}
+function initTheme() {
+  let stored = null;
+  try { stored = localStorage.getItem(THEME_KEY); } catch (e) {}
+  applyTheme(stored === "light" ? "light" : "dark");
+}
+
+/* ================= nav (mock: toggles active tab only) ================= */
+function setNav(v) {
+  document.querySelectorAll("nav button").forEach(b => {
+    const on = b.dataset.nav === v;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-pressed", String(on));
+  });
+}
+
+/* ================= sessions rail / chat ================= */
+let activeSid = null;
+let chatAnchor = null;
+
+function renderSessions() {
+  $("session-list").innerHTML = SESSIONS.map((s, i) => `
+    <button class="session-row" data-action="open-session" data-sid="${i}">
+      <span class="sess-top">
+        ${s.recent ? '<span class="live-dot" title="recent"></span>' : ""}
+        <span class="sess-id">${esc(s.id.slice(0, 8))}</span>
+        <span class="sess-time">${esc(s.time)}</span>
+      </span>
+      <span class="sess-sub">${esc(s.alias)} · ${esc(s.model)}</span>
+      <span class="sess-foot">
+        <span class="sess-reqs">${s.reqs} req${s.reqs === 1 ? "" : "s"}</span>
+        ${s.status === "ok" ? '<span class="badge ok">ok</span>' : `<span class="badge err">${s.errs} err</span>`}
+      </span>
+    </button>`).join("");
+}
+
+function setActiveRow(sid) {
+  document.querySelectorAll(".session-row").forEach(r => {
+    const on = r.dataset.sid === String(sid);
+    r.classList.toggle("active", on);
+    if (on) r.setAttribute("aria-current", "true"); else r.removeAttribute("aria-current");
+  });
+}
+
+function renderChat(s) {
+  $("chat-title-id").textContent = s.id.slice(0, 8);
+  $("chat-meta").textContent = `${CHAT.created} · ${s.alias} · ${s.model} · ${s.reqs} requests · ${CHAT.tools} tool call`;
+  $("chat-messages").innerHTML = CHAT.turns.map(t => {
+    if (t.role === "user") {
+      return `<div class="msg user"><span class="chat-role">user</span><div class="chat-content">${esc(t.text)}</div></div>`;
+    }
+    let html = `<div class="msg assistant"><span class="chat-role">assistant</span><div class="chat-content">${esc(t.text)}</div>`;
+    if (t.tool) {
+      html += `
+        <div class="tool-call">
+          <span class="chat-role">tool call</span><b>${esc(t.tool.name)}</b>
+          <span class="verdict ${esc(t.tool.verdict)}">${esc(t.tool.verdict)}</span>
+          <pre>${esc(t.tool.args)}</pre>
+          <div class="tool-result"><span class="chat-role">tool result</span><div class="chat-content">${esc(t.tool.result)}</div></div>
+        </div>`;
+    }
+    return html + `</div>`;
+  }).join("");
+}
+
+// Layout 1: openChat swaps ONLY the center column. It deliberately never
+// touches #desk or either .rail, so both rails stay visible and interactive:
+// another session row click re-enters openChat and switches the chat in place,
+// and the usage range chips keep working (document-level delegation).
+function openChat(sid) {
+  const s = SESSIONS[sid];
+  if (!s) return;
+  activeSid = sid;
+  chatAnchor = document.activeElement;
+  renderChat(s);
+  $("providers-view").classList.add("hidden");
+  $("chat-view").classList.remove("hidden");
+  setActiveRow(sid);
+  const closeBtn = $("chat-close");
+  if (closeBtn) closeBtn.focus();
+}
+
+function closeChat() {
+  if ($("chat-view").classList.contains("hidden")) return;
+  $("chat-view").classList.add("hidden");
+  $("providers-view").classList.remove("hidden");
+  activeSid = null;
+  setActiveRow(null);
+  if (chatAnchor && chatAnchor.isConnected && chatAnchor.focus) chatAnchor.focus();
+}
+
+function chatOpen() {
+  return !$("chat-view").classList.contains("hidden");
+}
+
+/* ================= usage rail (pinned chips re-render everything) ================= */
+let range = "24h";
+const DONUT_PARTS = [
+  ["input", "Input", "#4f8cff"],
+  ["cacheRead", "Cached in", "#f1c40f"],
+  ["cacheWrite", "Cache write", "#e67e22"],
+  ["output", "Output", "#2ecc71"]
+];
+
+function renderUsage() {
+  const d = USAGE[range];
+  document.querySelectorAll(".chip").forEach(c => {
+    const on = c.dataset.range === range;
+    c.classList.toggle("active", on);
+    c.setAttribute("aria-pressed", String(on));
+  });
+  const max = Math.max(...d.bars);
+  const bars = d.bars.map((v, i) => `
+    <div class="bar-col" title="${esc(d.ticks[i])} · ${v} requests">
+      <div class="bar${i === d.bars.length - 1 ? " today" : ""}" style="height:${Math.max(3, Math.round(v / max * 100))}%"></div>
+      <span class="bar-tick">${i % 2 === 0 ? esc(d.ticks[i]) : ""}</span>
+    </div>`).join("");
+  const total = d.donut.input + d.donut.cacheRead + d.donut.cacheWrite + d.donut.output;
+  let acc = 0;
+  const stops = DONUT_PARTS
+    .filter(([k]) => d.donut[k] > 0)
+    .map(([k, , c]) => { const a = acc; acc += 360 * d.donut[k] / total; return `${c} ${a.toFixed(2)}deg ${acc.toFixed(2)}deg`; });
+  const legend = DONUT_PARTS.map(([k, label, c]) => `
+    <div class="legend-row">
+      <span class="swatch" style="background:${c}"></span>
+      <span>${label}</span>
+      <span class="spacer"></span>
+      <span class="muted">$${d.donut[k].toFixed(2)}</span>
+      <span class="muted" style="width:40px;text-align:right">${(100 * d.donut[k] / total).toFixed(0)}%</span>
+    </div>`).join("");
+  const models = d.models.map(m => `
+    <div class="model-row">
+      <span class="model-name">${esc(m.m)}</span>
+      <span class="model-tok">${esc(m.tok)} tok</span>
+      <span class="spacer"></span>
+      ${m.errs ? `<span class="badge err">${m.errs} err</span>` : '<span class="badge ok">0 err</span>'}
+    </div>`).join("");
+  const errors = d.errors.map(x => `
+    <div class="err-row"><span class="mono" style="font-size:11px">${esc(x.e)}</span><span class="muted">${x.n}</span></div>`).join("");
+  $("usage-body").innerHTML = `
+    <div class="stat-grid">
+      <div class="stat"><div class="usage-label">Est. cost</div><div class="usage-value">${esc(d.cost)}</div></div>
+      <div class="stat"><div class="usage-label">Requests</div><div class="usage-value">${esc(d.requests)}</div></div>
+      <div class="stat"><div class="usage-label">Tokens in / out</div><div class="usage-value" style="font-size:12px">${esc(d.tokShort)}</div></div>
+      <div class="stat"><div class="usage-label">Errors</div><div class="usage-value">${esc(d.errs)}</div></div>
+    </div>
+    <div class="section-title">Requests per period</div>
+    <div class="chart" role="img" aria-label="Bar chart of requests for the last ${esc(d.label)}">${bars}</div>
+    <div class="section-title">Cost split</div>
+    <div class="donut" title="Total ${esc(d.cost)}">
+      <div style="width:100%;height:100%;border-radius:50%;background:conic-gradient(${stops.join(",")})"></div>
+      <div class="donut-hole">${esc(d.cost)}</div>
+    </div>
+    <div class="legend">${legend}</div>
+    <div class="section-title">Top models</div>
+    ${models}
+    <div class="section-title">Errors</div>
+    ${errors}
+    <div class="muted" style="margin-top:12px;font-size:11px">Mock data — illustrative only, mirrors the Usage view shape.</div>`;
+}
+
+/* ================= Providers (lifted from web/index.html) ================= */
+let templates = [];
+let instances = [];
+let quota = [];
+let fetchedModels = {}; // alias -> string[] of available model ids
+let fetchedMeta = {};   // alias -> {source, fetched_at, error}
+let pluginsData = {};
+
+async function loadProviders() {
+  const [t, i, q, p] = await Promise.all([api("/api/templates"), api("/api/instances"), api("/api/quota"), api("/api/plugins")]);
+  templates = t.templates; instances = i.instances; quota = (q && q.quota) || [];
+  pluginsData = p;
+  // Pre-fetch each instance's provider model list so the alias editor can
+  // offer them; fetchModels never throws.
+  await Promise.all(instances.map(x => fetchModels(x.alias)));
+  const tmplOptions = templates.map(x => `<option value="${esc(x.name)}">${esc(x.name)}</option>`).join("");
+  $("providers-view").innerHTML = renderInstances(tmplOptions);
+  const sel = $("add-template");
+  sel.addEventListener("change", applyTemplatePrefill);
+  applyTemplatePrefill();
+}
+function suggestAlias(template) {
+  const count = instances.filter(i => i.template === template).length;
+  const base = templates.find(t => t.name === template) ? template : "";
+  return count === 0 ? base : base + "-" + (count + 1);
+}
+async function addInstance() {
+  const body = { template: $("add-template").value, alias: $("add-alias").value || undefined };
+  const endpoint = $("add-endpoint").value.trim();
+  if (isCustomTemplate(body.template) && !endpoint) {
+    alert("An endpoint URL is required for " + body.template + ": point it at any OpenAI- or Anthropic-compatible server, including local ones (e.g. http://localhost:8080/v1).");
+    return;
+  }
+  if (endpoint) body.base_url = endpoint;
+  const key = $("add-key").value;
+  if (key) body.key = key;
+  try {
+    await api("/api/instances", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    await loadProviders();
+  } catch (e) { alert(e.message); }
+}
+async function editInstance(alias) {
+  const inst = instances.find(x => x.alias === alias);
+  if (!inst) return;
+  const newAlias = prompt("Alias:", inst.alias);
+  if (newAlias == null) return;
+  const key = prompt("Replace key (leave empty to keep, type '-' to clear):", "");
+  const patch = {};
+  if (newAlias.trim() && newAlias.trim() !== inst.alias) patch.alias = newAlias.trim();
+  if (key === "-") patch.key = "";
+  else if (key) patch.key = key;
+  try {
+    await api("/api/instances/" + encodeURIComponent(inst.alias), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
+    await loadProviders();
+  } catch (e) { alert(e.message); }
+}
+async function toggleInstance(alias) {
+  try {
+    const inst = instances.find(x => x.alias === alias);
+    const disabling = !inst.disabled;
+    await api("/api/instances/" + encodeURIComponent(alias), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ disabled: disabling }) });
+    // A disabled provider's alias list collapses by default; clear any stored
+    // open state so the collapse sticks after a reload.
+    if (disabling) {
+      const s = aliasOpenState();
+      s[alias] = false;
+      try { localStorage.setItem(ALIAS_OPEN_KEY, JSON.stringify(s)); } catch {}
+    }
+    await loadProviders();
+  } catch (e) { alert(e.message); }
+}
+async function deleteInstance(alias) {
+  if (!confirm("Delete instance " + alias + "?")) return;
+  try {
+    await api("/api/instances/" + encodeURIComponent(alias), { method: "DELETE" });
+    await loadProviders();
+  } catch (e) { alert(e.message); }
+}
+
+// routingCompare mirrors the server's routing order: enabled instances before
+// disabled, then explicit priority ascending (unset = last, keeping file
+// order). Array.prototype.sort is stable, so equal items keep config order.
+function routingCompare(a, b) {
+  if (a.disabled !== b.disabled) return a.disabled ? 1 : -1;
+  const pa = a.priority || 0, pb = b.priority || 0;
+  if (pa && pb) return pa - pb;
+  if (pa) return -1;
+  if (pb) return 1;
+  return 0;
+}
+
+// instanceBlockHtml renders one provider as a collapsible row whose header is
+// the drag handle: enabled instances render above disabled ones (in routing
+// order), the alias editor lives directly under each provider, and dragging a
+// header reorders routing priority (top of the list = highest priority).
+function instanceBlockHtml(x) {
+  // Endpoint-derived custom-* templates (blank-alias adds) show the endpoint
+  // instead of the machine name; alias-named custom templates and built-ins
+  // show their name. anthropic-style providers get a badge.
+  const tmplLabel = x.template && x.template.startsWith("custom-") && x.base_url ? x.base_url : x.template;
+  const styleBadge = x.style === "anthropic" ? `<span class="badge warn" title="Anthropic Messages API">anthropic</span>` : "";
+  return `<details class="aliases-instance instance-row" data-alias="${esc(x.alias)}" ${persistedAliasOpen(x.alias, !!x.disabled) ? "open" : ""}>
+    <summary class="instance-summary" draggable="true">
+      <span class="drag-grip" aria-hidden="true" title="Drag to reorder">⋮⋮</span>
+      <span class="aliases-caret" aria-hidden="true">▶</span>
+      <span class="aliases-summary-title">${esc(x.alias)}</span>
+      <span class="muted">${esc(tmplLabel)}</span>
+      ${styleBadge}
+      ${x.disabled ? `<span class="badge disabled">disabled</span>` : `<span class="badge ok">enabled</span>`}
+      <span class="instance-quota">${quotaCellFor(x.alias)}</span>
+      <span class="spacer"></span>
+      <span class="instance-actions">
+        <button class="ghost btn-sm" data-action="edit-instance" data-alias="${esc(x.alias)}">Edit</button>
+        <button class="ghost btn-sm" data-action="toggle-instance" data-alias="${esc(x.alias)}">${x.disabled ? "Enable" : "Disable"}</button>
+        <button class="danger-ghost btn-sm" data-action="delete-instance" data-alias="${esc(x.alias)}">Delete</button>
+      </span>
+    </summary>
+    <div class="instance-body">
+      <datalist id="dl-models-${domId(x.alias)}">${modelOptions(x.alias)}</datalist>
+      <div class="instance-section">
+        <div class="instance-section-head">
+          <span class="instance-section-title">Aliases</span>
+          <span class="muted" id="models-status-${domId(x.alias)}">${aliasesStatus(x.alias)}</span>
+          <span class="spacer"></span>
+          <button class="ghost btn-sm" data-action="models-refresh" data-alias="${esc(x.alias)}" title="Re-fetch the model list from this provider">Refresh models</button>
+          <button class="outline btn-sm" data-action="aliases-add" data-alias="${esc(x.alias)}">+ Add alias</button>
+        </div>
+        <table class="aliases-table">
+          <thead><tr><th>Alias name</th><th>Model</th><th>Reasoning</th><th></th></tr></thead>
+          <tbody id="aliases-body-${domId(x.alias)}">${renderAliasRows(x)}</tbody>
+        </table>
+      </div>
+      ${instancePluginsHtml(x)}
+      ${instanceConnectionHtml(x)}
+      <div class="instance-footer">
+        <span class="muted">Alias and plugin changes are staged until you save.</span>
+        <span class="spacer"></span>
+        <button class="ghost" data-action="instance-cancel" data-alias="${esc(x.alias)}">Cancel</button>
+        <button data-action="instance-save" data-alias="${esc(x.alias)}" title="Saves the model aliases and the plugin list for this provider">Save</button>
+      </div>
+    </div>
+  </details>`;
+}
+
+// instanceConnectionHtml renders the read-only Connection subsection: how the
+// provider is reached (protocol, endpoint, credential) plus its routing
+// priority. Values come from config/secrets and are esc()'d.
+function instanceConnectionHtml(x) {
+  const key = x.key_masked
+    ? `<code>${esc(x.key_masked)}</code>`
+    : (x.api_key_env ? `<code>env: ${esc(x.api_key_env)}</code>` : `<span class="muted">none</span>`);
+  return `<div class="instance-section">
+    <div class="instance-section-head"><span class="instance-section-title">Connection</span></div>
+    <dl class="connection-grid">
+      <dt>Protocol</dt><dd>${esc(x.style || "openai")}</dd>
+      <dt>Endpoint</dt><dd>${x.base_url ? `<code>${esc(x.base_url)}</code>` : `<span class="muted">—</span>`}</dd>
+      <dt>Credential</dt><dd>${key}</dd>
+      <dt>Routing priority</dt><dd>${x.priority ? esc(String(x.priority)) + " <span class=\"muted\">(1 = highest)</span>" : `<span class="muted">unset — list order</span>`}</dd>
+    </dl>
+  </div>`;
+}
+
+/* ---------- per-provider plugins (Providers view) ---------- */
+// effectivePluginNames returns the chain an instance actually runs: its own
+// plugins list when set (an instance list replaces the global chain entirely),
+// otherwise the global request/response defaults deduped in order.
+function effectivePluginNames(inst) {
+  if (inst.plugins != null) return inst.plugins || [];
+  const req = pluginsData.request_plugins || [];
+  const resp = pluginsData.response_plugins || [];
+  return req.concat(resp.filter(n => !req.includes(n)));
+}
+// instancePluginsHtml renders the provider's plugin chain as a list of chips
+// staged client-side — the list shows exactly what runs for this provider now,
+// and edits (removing a chip, adding via the inline "+ Add plugin" popup)
+// stay unsaved until the provider's Save button is pressed, exactly like the
+// alias rows above.
+function instancePluginsHtml(x) {
+  const inherit = x.plugins == null;
+  const names = effectivePluginNames(x);
+  const chips = names.map(n => pluginChipHtml(x.alias, n)).join("")
+    || `<span class="muted none-placeholder" style="font-size:12px">none</span>`;
+  return `<div class="instance-section" id="inst-plugins-${domId(x.alias)}" data-alias="${esc(x.alias)}">
+    <div class="instance-section-head">
+      <span class="instance-section-title">Plugins</span>
+      ${inherit
+        ? `<span class="badge disabled" title="Following the global enable/disable toggles (Settings → Plugins). Saving a changed list here overrides them for this provider only.">global defaults</span>`
+        : `<span class="badge warn" title="Custom list — replaces the global defaults for this provider entirely.">custom</span>`}
+    </div>
+    <div class="inst-plugins-list">${chips}<span class="plugin-add-wrap"><button class="chip-add" data-action="plugins-menu" data-alias="${esc(x.alias)}">+ Add plugin</button><div class="plugin-menu hidden"></div></span></div>
+  </div>`;
+}
+// pluginChipHtml renders one staged plugin chip; the × only removes the chip
+// client-side (unsaved until Save, like the alias rows).
+function pluginChipHtml(alias, name) {
+  const info = (pluginsData.plugins || []).find(p => p.name === name);
+  return `<span class="plugin-chip" data-name="${esc(name)}" title="${esc((info && info.description) || name)}">${esc(name)}
+    <button class="chip-x" data-action="plugins-remove" title="Remove ${esc(name)} from this provider (applied when you press Save)" aria-label="Remove ${esc(name)}">×</button>
+  </span>`;
+}
+// stagedPluginNames reads the provider's staged plugin list back from the DOM
+// (the chips are the staging area, so no extra state to keep in sync).
+function stagedPluginNames(alias) {
+  const root = document.getElementById("inst-plugins-" + domId(alias));
+  return root ? Array.from(root.querySelectorAll(".plugin-chip")).map(c => c.dataset.name) : [];
+}
+// pluginsPatchValue returns the explicit plugins list to include in a save
+// PATCH, or undefined when the staged list equals what the instance already
+// runs — so plain alias edits never silently convert an inheriting provider
+// into a custom list.
+function pluginsPatchValue(inst, staged) {
+  const current = effectivePluginNames(inst);
+  const same = staged.length === current.length && staged.every((n, i) => n === current[i]);
+  return same ? undefined : staged;
+}
+// pluginMenuItems builds the popup contents: one entry per known plugin not
+// yet staged as a chip (so a just-removed plugin can be re-added without a
+// reload), or a muted note when everything is already staged.
+function pluginMenuItems(alias, staged) {
+  const items = (pluginsData.plugins || []).filter(p => !staged.includes(p.name));
+  return items.length
+    ? items.map(p => `<button data-action="plugins-pick" data-alias="${esc(alias)}" data-name="${esc(p.name)}" title="${esc(p.description || "")}"><span>${esc(p.name)}</span><span class="muted">${esc(p.description || "")}</span></button>`).join("")
+    : `<div class="muted" style="padding:6px 8px">all plugins added</div>`;
+}
+// togglePluginMenu opens the "Add plugin" popup, rebuilding its items from the
+// plugins not currently staged as chips.
+function togglePluginMenu(el) {
+  const wrap = el.closest(".plugin-add-wrap");
+  const menu = wrap && wrap.querySelector(".plugin-menu");
+  if (!menu) return;
+  if (!menu.classList.contains("hidden")) { menu.classList.add("hidden"); return; }
+  menu.innerHTML = pluginMenuItems(el.dataset.alias, stagedPluginNames(el.dataset.alias));
+  menu.classList.remove("hidden");
+}
+// pickPlugin stages the chosen plugin as a chip (deduped) ahead of the inline
+// "+ Add plugin" trigger and closes the popup.
+function pickPlugin(el) {
+  const alias = el.dataset.alias;
+  const name = el.dataset.name;
+  const root = document.getElementById("inst-plugins-" + domId(alias));
+  const list = root && root.querySelector(".inst-plugins-list");
+  if (!list || stagedPluginNames(alias).includes(name)) return;
+  const none = list.querySelector(".none-placeholder");
+  if (none) none.remove();
+  const wrap = list.querySelector(".plugin-add-wrap");
+  if (wrap) wrap.insertAdjacentHTML("beforebegin", pluginChipHtml(alias, name));
+  else list.insertAdjacentHTML("beforeend", pluginChipHtml(alias, name));
+  const menu = el.closest(".plugin-menu");
+  if (menu) menu.classList.add("hidden");
+}
+// removePluginChip unstages a chip; removing the last one restores the "none"
+// placeholder (both unsaved until Save).
+function removePluginChip(el) {
+  const chip = el.closest(".plugin-chip");
+  const list = chip && chip.parentElement;
+  if (chip) chip.remove();
+  if (list && !list.querySelector(".plugin-chip") && !list.querySelector(".none-placeholder")) {
+    const wrap = list.querySelector(".plugin-add-wrap");
+    const html = `<span class="muted none-placeholder" style="font-size:12px">none</span>`;
+    if (wrap) wrap.insertAdjacentHTML("beforebegin", html);
+    else list.insertAdjacentHTML("beforeend", html);
+  }
+}
+
+// renderInstances builds the merged Providers list: each instance is a
+// collapsible row (aliases editor inside), enabled first, then disabled, each
+// group in routing order. The header carries the Add-instance toggle (blue,
+// glowing) whose click reveals the inline form with the endpoint URL field
+// for custom providers. refreshQuota re-renders only this panel in place.
+function renderInstances(tmplOptions) {
+  if (tmplOptions == null) {
+    tmplOptions = templates.map(x => `<option value="${esc(x.name)}">${esc(x.name)}</option>`).join("");
+  }
+  const sorted = instances.slice().sort(routingCompare);
+  return `<div class="panel" id="instances-panel">
+    <h2>Instances
+      <span class="spacer"></span>
+      <button id="add-instance-toggle" data-action="toggle-add">+ Add instance</button>
+      <button class="ghost" data-action="quota-refresh">Refresh</button>
+    </h2>
+    <div class="muted" style="margin-bottom:12px">Enabled providers are listed first, disabled ones below. <b>Drag a provider's header to reorder it — top of the list is highest priority</b> for unprefixed model names (e.g. <code>small</code>). Click a header to expand its model aliases.</div>
+    <div id="add-instance-form" class="hidden">
+      <div class="row">
+        <label>Template
+          <select id="add-template">${tmplOptions}</select>
+        </label>
+        <label>Alias (auto-filled)
+          <input id="add-alias" placeholder="auto">
+        </label>
+        <label>Endpoint URL <span class="muted" id="endpoint-hint"></span>
+          <input id="add-endpoint" type="url" placeholder="https://api.example.com/v1">
+        </label>
+        <label>Key (optional) <span class="muted" id="key-hint"></span>
+          <input id="add-key" type="password" placeholder="sk-...">
+        </label>
+        <button data-action="add-instance">Add</button>
+        <button class="ghost" data-action="toggle-add">Cancel</button>
+      </div>
+      <details class="templates-fold"><summary class="clickable muted">Templates</summary>
+        <table style="margin-top:8px"><thead><tr><th>Name</th><th>Style</th><th>Base URL</th><th>Key env</th><th>Models</th></tr></thead>
+        <tbody>
+          ${templates.map(x => `<tr><td>${esc(x.name)}</td><td>${esc(x.style || "openai")}</td><td>${esc(x.base_url) || '<span class="muted">endpoint required</span>'}</td><td>${esc(x.api_key_env)}</td><td class="muted">${esc((x.models||[]).join(", "))}</td></tr>`).join("")}
+        </tbody></table>
+      </details>
+    </div>
+    ${sorted.map(instanceBlockHtml).join("")}
+  </div>`;
+}
+
+// isCustomTemplate reports whether the selected (or given) template is the
+// endpoint-less custom placeholder that requires an endpoint URL.
+function isCustomTemplate(template) {
+  const name = template || $("add-template").value;
+  return name === "custom_openai" || name === "custom_anthropic";
+}
+
+// applyTemplatePrefill fills the template-specific form fields when a template
+// is selected (or the form is opened): endpoint URL from the template's
+// base_url, a key-hint naming the env var the template reads, plus the
+// auto-suggested alias. The endpoint stays editable — it doubles as the
+// custom-provider override.
+function applyTemplatePrefill() {
+  const sel = $("add-template");
+  const t = templates.find(x => x.name === sel.value);
+  const endpoint = $("add-endpoint"), keyHint = $("key-hint");
+  if (t) {
+    endpoint.value = t.base_url || "";
+    keyHint.textContent = t.api_key_env ? "env: " + t.api_key_env : "";
+  } else {
+    endpoint.value = "";
+    keyHint.textContent = "";
+  }
+  $("add-key").value = "";
+  $("add-alias").value = "";
+  $("add-alias").placeholder = "auto: " + suggestAlias(sel.value);
+  updateEndpointHint();
+}
+
+// updateEndpointHint marks the endpoint URL as required for the custom
+// placeholders and explains the field otherwise.
+function updateEndpointHint() {
+  const endpoint = $("add-endpoint");
+  if (!endpoint) return;
+  if (isCustomTemplate()) {
+    endpoint.required = true;
+    $("endpoint-hint").textContent = "required for " + $("add-template").value;
+    // For a custom endpoint the alias the user types becomes the new provider
+    // template's name in the Providers list; a blank alias falls back to an
+    // endpoint-derived custom-* name.
+    $("add-alias").placeholder = "names the new template (blank = endpoint-derived)";
+  } else {
+    endpoint.required = false;
+    $("endpoint-hint").textContent = "optional — override any provider, incl. local servers";
+    $("add-alias").placeholder = "auto: " + suggestAlias($("add-template").value);
+  }
+}
+
+// toggleAddForm expands/collapses the inline add-instance form; opening it
+// pre-fills the template-specific fields for the current selection.
+function toggleAddForm() {
+  const form = $("add-instance-form");
+  if (!form) return;
+  const opening = form.classList.toggle("hidden");
+  if (opening) {
+    applyTemplatePrefill();
+    $("add-alias").focus();
+  }
+}
+
+/* ---------- Quota ---------- */
+// quotaCellFor looks up the quota entry for an instance alias and reuses the
+// quotaCell logic; aliases without a quota row get a muted placeholder.
+function quotaCellFor(alias) {
+  const entry = quota.find(q => q.alias === alias);
+  return entry ? quotaCell(entry) : `<span class="muted">—</span>`;
+}
+// Friendly labels and canonical order for known window keys.
+const WINDOW_LABELS = {
+  "5h": "Rolling Usage", "weekly": "Weekly Usage", "monthly": "Monthly Usage",
+  "credits_balance": "Balance", "credits": "Credits", "usage": "Usage"
+};
+const WINDOW_ORDER = ["5h", "weekly", "monthly"];
+
+// quotaCell renders the quota summary for one result: gaps are muted labels,
+// fetch failures show a red badge, percent windows render as an OpenCode-style
+// usage card (label + value + progress bar + reset time), and balance windows
+// render as a single inline code line.
+function quotaCell(x) {
+  if (!x.supported) {
+    if (x.usage_url) {
+      return `<a class="usage-link muted" href="${esc(x.usage_url)}" target="_blank" rel="noopener noreferrer" style="text-decoration:underline">view usage ↗</a>`;
+    }
+    return `<span class="muted">not supported</span>`;
+  }
+  if (!x.configured) return `<span class="muted">no key</span>`;
+  if (!x.ok) return `<span class="badge err">${esc(x.error || "unknown error")}</span>`;
+  const windows = x.windows || {};
+  const keys = [
+    ...WINDOW_ORDER.filter(k => windows[k]),
+    ...Object.keys(windows).filter(k => !WINDOW_ORDER.includes(k)).sort()
+  ];
+  const items = keys.map(k => windowItem(WINDOW_LABELS[k] || k, windows[k]));
+  return items.length ? `<div class="usage">${items.join("")}</div>` : `<span class="muted">no data</span>`;
+}
+
+// windowItem renders one window. Percent windows (OpenCode Go) get the full
+// usage card; balance windows (DeepSeek/OpenRouter) are a single code line.
+function windowItem(label, w) {
+  if (w.used_percent != null) return usageItem(label, w);
+  const val = w.value_label != null && w.value_label !== "" ? w.value_label : "";
+  return `<code>${esc(label)}: ${esc(val)}</code>`;
+}
+
+// usageItem renders the OpenCode-style usage card: header (label + value), a
+// progress bar, and the reset time. used_percent is clamped and rounded.
+function usageItem(label, w) {
+  const pct = Math.max(0, Math.min(100, Math.round(w.used_percent)));
+  const reset = resetLabel(w.reset_at);
+  return `<div class="usage-item">
+    <div class="usage-header"><span class="usage-label">${esc(label)}</span><span class="usage-value">${pct}%</span></div>
+    <div class="progress"><div class="progress-bar" style="width:${pct}%"></div></div>
+    ${reset ? `<span class="reset-time">${esc(reset)}</span>` : ""}
+  </div>`;
+}
+
+// resetLabel formats a unix-millisecond reset time as "Resets in 3 hours
+// 0 minutes" or "Resets in 6 days 13 hours", mirroring the OpenCode usage UI.
+function resetLabel(resetAtMs) {
+  if (resetAtMs == null) return "";
+  const ms = resetAtMs - Date.now();
+  if (ms <= 0) return "Resets soon";
+  const totalMinutes = Math.floor(ms / 60000);
+  if (totalMinutes < 1) return "Resets in less than a minute";
+  const days = Math.floor(totalMinutes / 1440);
+  if (days >= 1) {
+    const hours = Math.floor((totalMinutes % 1440) / 60);
+    return `Resets in ${days} day${days === 1 ? "" : "s"} ${hours} hour${hours === 1 ? "" : "s"}`;
+  }
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return `Resets in ${hours} hour${hours === 1 ? "" : "s"} ${minutes} minute${minutes === 1 ? "" : "s"}`;
+}
+// refreshQuota re-fetches quota and re-renders only the combined Instances
+// panel in place, so the Add instance form keeps its state.
+async function refreshQuota() {
+  try {
+    const q = await api("/api/quota?refresh=1");
+    quota = (q && q.quota) || [];
+    const pane = $("instances-panel");
+    if (pane) pane.outerHTML = renderInstances();
+  } catch (e) { alert(e.message); }
+}
+
+/* ---------- Model aliases editor ---------- */
+// Aliases-panel collapse state is persisted per instance in localStorage so
+// the user's collapsed/expanded choices survive refreshes and reloads.
+const ALIAS_OPEN_KEY = "shimmer.aliasOpen.v1";
+function aliasOpenState() {
+  try { return JSON.parse(localStorage.getItem(ALIAS_OPEN_KEY)) || {}; } catch { return {}; }
+}
+function aliasOpenWithDefaults() {
+  const s = aliasOpenState();
+  (instances || []).forEach(x => { if (s[x.alias] == null) s[x.alias] = !x.disabled; });
+  return s;
+}
+function persistedAliasOpen(alias, disabled) {
+  const s = aliasOpenState();
+  return s[alias] != null ? !!s[alias] : !disabled;
+}
+function aliasOpenToggle(alias, open) {
+  const s = aliasOpenWithDefaults();
+  s[alias] = open;
+  try { localStorage.setItem(ALIAS_OPEN_KEY, JSON.stringify(s)); } catch {}
+}
+document.addEventListener("toggle", function (ev) {
+  const d = ev.target;
+  if (!(d instanceof HTMLDetailsElement) || !d.classList.contains("aliases-instance")) return;
+  // A re-render (save, refresh) removes the old <details>, which fires a
+  // toggle with open=false — that is not a user choice and must not persist.
+  if (!document.contains(d)) return;
+  aliasOpenToggle(d.dataset.alias, d.open);
+});
+
+/* ---------- drag-to-reorder (routing priority) ---------- */
+// The whole provider header row is draggable: dragging reorders the merged
+// instance list, and on drop the new order is persisted via
+// PUT /api/instances/order (position → priority, top = highest).
+let dragAlias = null;
+function instanceRowFor(el) {
+  return el ? el.closest("details.instance-row") : null;
+}
+function rowDropSide(sum, ev) {
+  const rect = sum.getBoundingClientRect();
+  return ev.clientY < rect.top + rect.height / 2 ? "drop-above" : "drop-below";
+}
+document.addEventListener("dragstart", function (ev) {
+  const row = instanceRowFor(ev.target);
+  if (!row) return;
+  dragAlias = row.dataset.alias;
+  ev.dataTransfer.effectAllowed = "move";
+  try { ev.dataTransfer.setData("text/plain", dragAlias); } catch {}
+  row.classList.add("dragging");
+});
+document.addEventListener("dragend", function (ev) {
+  const row = instanceRowFor(ev.target);
+  if (row) row.classList.remove("dragging");
+  document.querySelectorAll(".instance-row.drop-above, .instance-row.drop-below").forEach(r => r.classList.remove("drop-above", "drop-below"));
+  if (!dragAlias) return;
+  dragAlias = null;
+  persistInstanceOrder();
+});
+document.addEventListener("dragover", function (ev) {
+  if (!dragAlias) return;
+  const sum = ev.target.closest("summary.instance-summary");
+  const row = instanceRowFor(sum);
+  if (!sum || !row || row.dataset.alias === dragAlias) return;
+  ev.preventDefault();
+  ev.dataTransfer.dropEffect = "move";
+  const panel = $("instances-panel");
+  const dragged = panel.querySelector(`details[data-alias="${CSS.escape(dragAlias)}"]`);
+  if (!dragged) return;
+  const before = rowDropSide(sum, ev) === "drop-above";
+  document.querySelectorAll(".instance-row.drop-above, .instance-row.drop-below").forEach(r => r.classList.remove("drop-above", "drop-below"));
+  row.classList.add(before ? "drop-above" : "drop-below");
+  if (before) panel.insertBefore(dragged, row);
+  else panel.insertBefore(dragged, row.nextElementSibling);
+});
+document.addEventListener("drop", function (ev) {
+  if (dragAlias) ev.preventDefault();
+});
+// persistInstanceOrder saves the visible list order as instance priorities.
+async function persistInstanceOrder() {
+  const panel = $("instances-panel");
+  if (!panel) return;
+  const aliases = [...panel.querySelectorAll("details.instance-row")].map(d => d.dataset.alias);
+  try {
+    await api("/api/instances/order", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ aliases }) });
+    await loadProviders();
+  } catch (e) { alert(e.message); }
+}
+// fetchModels loads the provider model list into fetchedModels / fetchedMeta,
+// falling back to the instance's configured models when the fetch is
+// unavailable. It never throws so callers can rely on a list.
+async function fetchModels(alias, refresh) {
+  let data;
+  try {
+    data = await api("/api/instances/" + encodeURIComponent(alias) + "/models" + (refresh ? "?refresh=1" : ""));
+  } catch (e) {
+    const inst = instances.find(x => x.alias === alias);
+    data = { models: inst ? inst.models : [], source: "config", error: e.message };
+  }
+  fetchedModels[alias] = data.models || [];
+  fetchedMeta[alias] = { source: data.source || "config", fetched_at: data.fetched_at || "", error: data.error || "" };
+}
+// modelOptions builds the <option> set for an instance's model datalist.
+function modelOptions(alias) {
+  return (fetchedModels[alias] || []).map(m => `<option value="${esc(m)}">`).join("");
+}
+// humanTime renders an ISO timestamp as a short relative time ("just now",
+// "3 min ago", "5 h ago") or a plain date for older values.
+function humanTime(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  const diff = Date.now() - d.getTime();
+  if (diff < 60_000) return "just now";
+  if (diff < 3600_000) return Math.round(diff / 60_000) + " min ago";
+  if (diff < 86_400_000) return Math.round(diff / 3600_000) + " h ago";
+  return d.toLocaleDateString();
+}
+// aliasesStatus is the muted source/freshness line shown next to an instance.
+function aliasesStatus(alias) {
+  const meta = fetchedMeta[alias];
+  if (!meta) return "";
+  const src = meta.source === "provider" ? "fetched from provider" : "configured models";
+  let html = esc(src);
+  if (meta.fetched_at) html += " · " + esc(humanTime(meta.fetched_at));
+  if (meta.error) html += ` <span class="badge warn">${esc(meta.error)}</span>`;
+  return html;
+}
+// reasoningOptionsFor returns the reasoning effort values the instance's
+// template advertises for a row's model, or null when unknown so callers fall
+// back to the generic list.
+const GENERIC_REASONING = ["low", "medium", "high", "max"];
+function reasoningOptionsFor(inst, model) {
+  const t = (templates || []).find(x => x.name === (inst && inst.template));
+  const opts = t && t.model_reasoning_options && t.model_reasoning_options[model];
+  return Array.isArray(opts) && opts.length ? opts : null;
+}
+// aliasRowHtml renders one editable row. Keys/values come from gateway.toml
+// (user-controlled) and model ids from the provider, so all are esc()'d; the
+// model input doubles as free-typed custom model entry via the datalist.
+function aliasRowHtml(alias, key, val, reasoning, i, opts) {
+  const r = reasoning || "";
+  const levels = ((opts && opts.length ? opts : GENERIC_REASONING).slice());
+  if (r && !levels.includes(r)) levels.push(r); // keep a saved value selectable
+  const levelOptions = levels.map(l =>
+    `<option value="${esc(l)}" ${r === l ? "selected" : ""}>${esc(l.charAt(0).toUpperCase() + l.slice(1))}</option>`
+  ).join("");
+  return `<tr>
+    <td><input class="aliases-key" value="${esc(key)}" placeholder="e.g. small"></td>
+    <td><input class="aliases-model" list="dl-models-${domId(alias)}" value="${esc(val)}" placeholder="choose a model or type one"></td>
+    <td>
+      <select class="aliases-reasoning">
+        <option value="" ${r === "" ? "selected" : ""}>Default</option>
+        <option value="none" ${r === "none" ? "selected" : ""}>None</option>
+        ${levelOptions}
+      </select>
+    </td>
+    <td>
+      <button class="ghost btn-sm" data-action="aliases-remove" data-alias="${esc(alias)}" data-row="${i}">Remove</button>
+    </td>
+  </tr>`;
+}
+// emptyAliasesRowHtml is the dashed placeholder row shown while a provider has
+// no alias rows; its embedded button stages a first row in place.
+function emptyAliasesRowHtml(alias) {
+  return `<tr class="no-aliases aliases-empty"><td colspan="4">No aliases configured yet — map a model to a name.
+    <button class="outline btn-sm" data-action="aliases-add" data-alias="${esc(alias)}">+ Add your first alias</button></td></tr>`;
+}
+function renderAliasRows(inst) {
+  const rows = Object.entries(inst.model_aliases || {});
+  if (!rows.length) return emptyAliasesRowHtml(inst.alias);
+  return rows.map(([key, val], i) => {
+    const reasoning = (inst.model_reasoning && inst.model_reasoning[key]) || "";
+    return aliasRowHtml(inst.alias, key, val, reasoning, i, reasoningOptionsFor(inst, val));
+  }).join("");
+}
+function addAliasRow(alias) {
+  const tbody = $("aliases-body-" + domId(alias));
+  if (!tbody) return;
+  const placeholder = tbody.querySelector("tr.no-aliases");
+  if (placeholder) placeholder.remove();
+  tbody.insertAdjacentHTML("beforeend", aliasRowHtml(alias, "", "", "", tbody.children.length));
+}
+// removeAliasRow drops the row client-side (unsaved until Save). It uses the
+// clicked row's DOM position rather than the data-row index so it stays
+// correct after rows are removed and reordered without a re-render.
+function removeAliasRow(el) {
+  const row = el.closest("tr");
+  if (row) row.remove();
+  const tbody = $("aliases-body-" + domId(el.dataset.alias));
+  if (tbody && !tbody.querySelector("tr:not(.no-aliases)")) {
+    tbody.innerHTML = emptyAliasesRowHtml(el.dataset.alias);
+  }
+}
+async function refreshModels(alias) {
+  try {
+    await fetchModels(alias, true);
+    const dl = $("dl-models-" + domId(alias));
+    if (dl) dl.innerHTML = modelOptions(alias);
+    const status = $("models-status-" + domId(alias));
+    if (status) status.innerHTML = aliasesStatus(alias);
+  } catch (e) { alert(e.message); }
+}
+// saveInstance is the single Save for a provider entry: it PATCHes the staged
+// model_aliases / model_reasoning maps (replace semantics; rows with an empty
+// alias name are dropped) together with the staged plugin list when it
+// differs from what the instance already runs.
+async function saveInstance(alias) {
+  const map = {};
+  const reasoningMap = {};
+  const tbody = $("aliases-body-" + domId(alias));
+  if (tbody) tbody.querySelectorAll("tr").forEach(tr => {
+    const key = tr.querySelector(".aliases-key");
+    const model = tr.querySelector(".aliases-model");
+    const reasoning = tr.querySelector(".aliases-reasoning");
+    if (!key || !model) return;
+    const name = key.value.trim();
+    if (name) {
+      map[name] = model.value.trim();
+      if (reasoning && reasoning.value) {
+        reasoningMap[name] = reasoning.value;
+      }
+    }
+  });
+  const body = { model_aliases: map, model_reasoning: reasoningMap };
+  const inst = instances.find(x => x.alias === alias);
+  if (inst) {
+    const plugins = pluginsPatchValue(inst, stagedPluginNames(alias));
+    if (plugins !== undefined) body.plugins = plugins;
+  }
+  try {
+    await api("/api/instances/" + encodeURIComponent(alias), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    await loadProviders();
+  } catch (e) { alert(e.message); }
+}
+// cancelInstanceEdits discards staged alias/plugin edits by rebuilding the
+// provider's expanded card from in-memory instance state — nothing was
+// persisted, so no server round-trip is needed.
+function cancelInstanceEdits(alias) {
+  const row = document.querySelector(`details.instance-row[data-alias="${CSS.escape(alias)}"]`);
+  const inst = instances.find(x => x.alias === alias);
+  if (!row || !inst) return;
+  const tpl = document.createElement("template");
+  tpl.innerHTML = instanceBlockHtml(inst).trim();
+  row.replaceWith(tpl.content.firstElementChild);
+}
+
+/* ================= settings slide-over ================= */
+let lastFocus = null;
+
+function openSettings() {
+  lastFocus = document.activeElement;
+  $("settings").classList.add("open");
+  $("settings-overlay").classList.add("open");
+  const c = $("settings-close");
+  if (c) c.focus();
+}
+
+function closeSettings() {
+  $("settings").classList.remove("open");
+  $("settings-overlay").classList.remove("open");
+  if (lastFocus && lastFocus.focus) lastFocus.focus();
+}
+
+function settingsOpen() {
+  return $("settings").classList.contains("open");
+}
+
+// setGlobalPlugin flips a plugin's global-default state and re-renders the
+// Providers panel so the "global defaults" chips reflect it.
+function setGlobalPlugin(name, enabled) {
+  const add = (list) => (list.includes(name) ? list : list.concat([name]));
+  const drop = (list) => list.filter(n => n !== name);
+  MOCK.plugins.request_plugins = enabled ? add(MOCK.plugins.request_plugins) : drop(MOCK.plugins.request_plugins);
+  MOCK.plugins.response_plugins = enabled ? add(MOCK.plugins.response_plugins) : drop(MOCK.plugins.response_plugins);
+  if (!$("providers-view").classList.contains("hidden")) loadProviders();
+}
+
+function trapFocus(panel) {
+  panel.addEventListener("keydown", e => {
+    if (e.key !== "Tab") return;
+    const f = panel.querySelectorAll('button, [href], select, input, [tabindex]:not([tabindex="-1"])');
+    if (!f.length) return;
+    const first = f[0], last = f[f.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  });
+}
+
+/* ================= column resizers (optional nicety) ================= */
+function clamp(v, a, b) { return Math.min(b, Math.max(a, v)); }
+
+function initResizers() {
+  const desk = $("desk");
+  document.querySelectorAll(".resizer").forEach(rz => {
+    const side = rz.dataset.side; // "left" | "right"
+    const prop = side === "left" ? "--left-w" : "--right-w";
+    const limits = side === "left" ? [200, 380] : [240, 420];
+    rz.addEventListener("pointerdown", e => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      const startX = e.clientX;
+      const startW = parseFloat(getComputedStyle(desk).getPropertyValue(prop)) || 260;
+      rz.setPointerCapture(e.pointerId);
+      document.body.classList.add("dragging");
+      const move = ev => {
+        const dx = ev.clientX - startX;
+        const w = side === "left" ? clamp(startW + dx, limits[0], limits[1])
+                                  : clamp(startW - dx, limits[0], limits[1]);
+        desk.style.setProperty(prop, w + "px");
+      };
+      const up = () => {
+        document.body.classList.remove("dragging");
+        rz.removeEventListener("pointermove", move);
+        rz.removeEventListener("pointerup", up);
+      };
+      rz.addEventListener("pointermove", move);
+      rz.addEventListener("pointerup", up);
+    });
+    rz.addEventListener("keydown", e => {
+      const step = e.key === "ArrowLeft" ? -16 : e.key === "ArrowRight" ? 16 : 0;
+      if (!step) return;
+      e.preventDefault();
+      const cur = parseFloat(getComputedStyle(desk).getPropertyValue(prop)) || 260;
+      const w = side === "left" ? clamp(cur + step, limits[0], limits[1])
+                                : clamp(cur - step, limits[0], limits[1]);
+      desk.style.setProperty(prop, w + "px");
+    });
+  });
+}
+
+/* ================= event delegation (same pattern as web/index.html) ================= */
+document.addEventListener("click", function (ev) {
+  const el = ev.target.closest("[data-action]");
+  if (!el) return;
+  // Row buttons (Edit/Enable/Disable/Delete) live inside the draggable
+  // summary; without this the click would also toggle the aliases list.
+  if (el.closest("summary")) ev.preventDefault();
+  switch (el.dataset.action) {
+    case "nav": setNav(el.dataset.nav); break;
+    case "toggle-theme": toggleTheme(); break;
+    case "open-settings": openSettings(); break;
+    case "close-settings": closeSettings(); break;
+    case "open-session": openChat(Number(el.dataset.sid)); break;
+    case "close-chat": closeChat(); break;
+    case "range": range = el.dataset.range; renderUsage(); break;
+    case "add-instance": addInstance(); break;
+    case "toggle-add": toggleAddForm(); break;
+    case "edit-instance": editInstance(el.dataset.alias); break;
+    case "toggle-instance": toggleInstance(el.dataset.alias); break;
+    case "delete-instance": deleteInstance(el.dataset.alias); break;
+    case "models-refresh": refreshModels(el.dataset.alias); break;
+    case "quota-refresh": refreshQuota(); break;
+    case "aliases-add": addAliasRow(el.dataset.alias); break;
+    case "aliases-remove": removeAliasRow(el); break;
+    case "instance-save": saveInstance(el.dataset.alias); break;
+    case "instance-cancel": cancelInstanceEdits(el.dataset.alias); break;
+    case "plugins-menu": togglePluginMenu(el); break;
+    case "plugins-pick": pickPlugin(el); break;
+    case "plugins-remove": removePluginChip(el); break;
+    case "switch": {
+      const on = el.getAttribute("aria-checked") === "true";
+      el.setAttribute("aria-checked", String(!on));
+      if (el.dataset.plugin) setGlobalPlugin(el.dataset.plugin, !on);
+      break;
+    }
+  }
+});
+
+// Clicks outside an open "Add plugin" popup close it (the delegation handler
+// above has already handled the click when the target was inside).
+document.addEventListener("click", function (ev) {
+  document.querySelectorAll(".plugin-menu").forEach(m => {
+    if (!m.classList.contains("hidden") && !m.parentElement.contains(ev.target)) m.classList.add("hidden");
+  });
+});
+
+/* Escape closes settings first, then the chat. */
+document.addEventListener("keydown", e => {
+  if (e.key !== "Escape") return;
+  if (settingsOpen()) closeSettings();
+  else if (chatOpen()) closeChat();
+});
+
+$("settings-overlay").addEventListener("click", closeSettings);
+
+/* ================= init ================= */
+initTheme();
+renderSessions();
+renderUsage();
+initResizers();
+trapFocus($("settings"));
+loadProviders();
+</script>
+</body>
+</html>

@@ -12,13 +12,14 @@ import (
 
 // sessionSummaryView is the §6.2 GET /api/sessions item.
 type sessionSummaryView struct {
-	ID            string `json:"id"`
-	CreatedAt     string `json:"created_at"`
-	FirstAlias    string `json:"first_alias"`
-	FirstModel    string `json:"first_model"`
-	RequestCount  int    `json:"request_count"`
-	ToolCallCount int    `json:"tool_call_count"`
-	FailureCount  int    `json:"failure_count"`
+	ID               string `json:"id"`
+	CreatedAt        string `json:"created_at"`
+	FirstAlias       string `json:"first_alias"`
+	FirstModel       string `json:"first_model"`
+	FirstUserMessage string `json:"first_user_message,omitempty"`
+	RequestCount     int    `json:"request_count"`
+	ToolCallCount    int    `json:"tool_call_count"`
+	FailureCount     int    `json:"failure_count"`
 	// Expired is true once retention removed the session's payloads; the
 	// usage metadata (counts, costs) is retained.
 	Expired bool `json:"expired"`
@@ -26,14 +27,15 @@ type sessionSummaryView struct {
 
 func sessionSummaryViewOf(s *store.SessionSummary) sessionSummaryView {
 	return sessionSummaryView{
-		ID:            s.ID,
-		CreatedAt:     s.CreatedAt,
-		FirstAlias:    s.FirstAlias,
-		FirstModel:    s.FirstModel,
-		RequestCount:  s.RequestCount,
-		ToolCallCount: s.ToolCallCount,
-		FailureCount:  s.FailureCount,
-		Expired:       s.Expired,
+		ID:               s.ID,
+		CreatedAt:        s.CreatedAt,
+		FirstAlias:       s.FirstAlias,
+		FirstModel:       s.FirstModel,
+		FirstUserMessage: s.FirstUserMessage,
+		RequestCount:     s.RequestCount,
+		ToolCallCount:    s.ToolCallCount,
+		FailureCount:     s.FailureCount,
+		Expired:          s.Expired,
 	}
 }
 
@@ -168,15 +170,16 @@ func (a *API) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 		calls = append(calls, toolCallViewOf(tc))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id":            sess.ID,
-		"created_at":    sess.CreatedAt,
-		"first_alias":   sess.FirstAlias,
-		"first_model":   sess.FirstModel,
-		"request_count": sess.RequestCount,
-		"failure_count": sess.FailureCount,
-		"expired":       sess.Expired,
-		"requests":      reqs,
-		"tool_calls":    calls,
+		"id":                 sess.ID,
+		"created_at":         sess.CreatedAt,
+		"first_alias":        sess.FirstAlias,
+		"first_model":        sess.FirstModel,
+		"first_user_message": sess.FirstUserMessage,
+		"request_count":      sess.RequestCount,
+		"failure_count":      sess.FailureCount,
+		"expired":            sess.Expired,
+		"requests":           reqs,
+		"tool_calls":         calls,
 	})
 }
 
