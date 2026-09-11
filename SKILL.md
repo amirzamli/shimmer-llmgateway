@@ -7,8 +7,8 @@ embedded UI (single HTML file) manages providers/instances/traces, and a separat
 server (`inspect-mcp`) exposes captured traffic to agents. **It never answers prompts
 itself — it records what passes through it.**
 
-Authoritative references: `README.md` (usage), `docs/gateway-spec.md` (full protocol
-spec, cited as "spec §N" throughout code), `web/index.html` (UI), the `justfile`.
+Authoritative references: `README.md` (usage), `web/index.html` (UI), the
+implementation and tests, and the `justfile`.
 
 ## Core concepts (read before touching anything)
 
@@ -58,7 +58,7 @@ internal/netutil/   bindable-host policy, logging
 web/index.html      the entire UI, no build step (embedded at build; served live from
                     the working dir when present)
 scripts/run-test.sh per-worktree isolated test gateway; scripts/mockprovider = fake upstream
-docs/gateway-spec.md protocol spec (§ numbers referenced in code comments)
+docs/                 current documentation and dashboard screenshots
 ```
 
 ## Getting going (agent quick start)
@@ -136,6 +136,6 @@ streamable-http (POST /mcp) with no CORS instead of stdio.
 - The gateway serves `web/index.html` from the working directory when present — that is
   intentional for live UI editing, not a bug.
 - Code comments cite spec sections (`§4.2`, `§7.1`…) — when behavior is unclear, read
-  `docs/gateway-spec.md` first.
+  the relevant implementation and tests first.
 - Retention: payloads older than `retention_days` get purged (catch-up at startup, then
   daily); metadata rows stay, expired sessions flagged `expired`.
