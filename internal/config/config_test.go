@@ -360,11 +360,51 @@ func TestBuiltinTemplatesPresent(t *testing.T) {
 	if got := cfg.Templates["opencode_go"].SessionHeader; got != "x-opencode-session" {
 		t.Errorf("opencode_go session_header = %q, want x-opencode-session", got)
 	}
-	// OpenCode Go speaks the Responses API upstream; the built-in template
-	// declares the responses style (streaming and non-streaming both translate
-	// to/from the chat.completion shape at the upstream boundary).
-	if got := cfg.Templates["opencode_go"].Style; got != StyleResponses {
-		t.Errorf("opencode_go style = %q, want %q", got, StyleResponses)
+	// OpenCode Go serves three protocols on one base URL: the template default
+	// is the openai chat style (/chat/completions), and model_styles overrides
+	// the 12 models that speak /responses or /messages upstream.
+	if got := cfg.Templates["opencode_go"].Style; got != "" {
+		t.Errorf("opencode_go style = %q, want the empty openai default", got)
+	}
+	ms := cfg.Templates["opencode_go"].ModelStyles
+	if len(ms) != 12 {
+		t.Errorf("opencode_go model_styles = %d entries, want 12", len(ms))
+	}
+	for model, want := range map[string]string{
+		"grok-4.6":                   StyleResponses,
+		"muse-spark-1.3-contributor": StyleResponses,
+		"muse-spark-1.2-contributor": StyleResponses,
+		"minimax-m3":                 StyleAnthropic,
+		"qwen3.6-plus":               StyleAnthropic,
+	} {
+		if got := ms[model]; got != want {
+			t.Errorf("opencode_go model_styles[%q] = %q, want %q", model, got, want)
+		}
+	}
+	// deepseek-v4-flash is not in the map: it resolves to the template's
+	// openai chat default.
+	if _, ok := ms["deepseek-v4-flash"]; ok {
+		t.Errorf("opencode_go model_styles should not list deepseek-v4-flash (chat default), got %q", ms["deepseek-v4-flash"])
+	}
+	// The built-in models list carries the full Console Go catalog so every
+	// model is routable out of the box. The catalog is order-sensitive (it is
+	// the authoritative upstream list), so pin the length and spot-check both
+	// ends plus a model that only exists in this refresh.
+	models := cfg.Templates["opencode_go"].Models
+	if len(models) != 28 {
+		t.Errorf("opencode_go models = %d entries, want 28: %v", len(models), models)
+	}
+	present := map[string]bool{}
+	for _, m := range models {
+		present[m] = true
+	}
+	for _, m := range []string{"deepseek-flash", "deepseek-v4-flash-vision-exp", "hy3", "muse-spark-1.2-contributor"} {
+		if !present[m] {
+			t.Errorf("opencode_go models missing %q", m)
+		}
+	}
+	if present["omen-alpha"] {
+		t.Errorf("opencode_go models must not list omen-alpha (not in the current catalog)")
 	}
 	// OpenCode Go also expects coding-agent identity headers on every call;
 	// the built-in template declares the same values the real opencode client
@@ -543,6 +583,50 @@ func TestValidationIdentityHeaders(t *testing.T) {
 	// A clean declaration still parses.
 	if _, err := Parse([]byte("[providers.opencode_go]\nbase_url = \"https://opencode.ai/zen/go/v1\"\nmodels = [\"m\"]\nidentity_headers = { \"X-Opencode-Client\" = \"cli\" }\n")); err != nil {
 		t.Errorf("clean identity_headers rejected: %v", err)
+	}
+}
+
+func TestValidationModelStyles(t *testing.T) {
+	// model_styles values reuse the style whitelist; an empty key, an empty
+	// value, or an unknown value fails at load with a message naming the
+	// template and the offending model.
+	bad := []struct {
+		name string
+		toml string
+	}{
+		{"bad value", "[providers.x]\nbase_url = \"https://x\"\nmodels = [\"m\"]\nmodel_styles = { m = \"grpc\" }\n"},
+		{"empty key", "[providers.x]\nbase_url = \"https://x\"\nmodels = [\"m\"]\nmodel_styles = { \"\" = \"openai\" }\n"},
+		{"empty value", "[providers.x]\nbase_url = \"https://x\"\nmodels = [\"m\"]\nmodel_styles = { m = \"\" }\n"},
+	}
+	for _, tc := range bad {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse([]byte(tc.toml))
+			if err == nil || !IsValidationError(err) {
+				t.Fatalf("%s: err = %v, want ValidationError", tc.name, err)
+			}
+			if !strings.Contains(err.Error(), "model_styles") {
+				t.Errorf("error %q does not mention model_styles", err)
+			}
+		})
+	}
+	// A clean map parses and survives the write-back round trip.
+	cfg := mustParse(t, "[providers.x]\nbase_url = \"https://x\"\nmodels = [\"m\", \"n\"]\nmodel_styles = { m = \"responses\", n = \"anthropic\" }\n")
+	if got := cfg.Templates["x"].ModelStyles["m"]; got != StyleResponses {
+		t.Errorf("model_styles[m] = %q, want responses", got)
+	}
+	if got := cfg.Templates["x"].ModelStyles["n"]; got != StyleAnthropic {
+		t.Errorf("model_styles[n] = %q, want anthropic", got)
+	}
+	out, err := Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	re, err := Parse(out)
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	if got := re.Templates["x"].ModelStyles["m"]; got != StyleResponses {
+		t.Errorf("round-tripped model_styles[m] = %q, want responses", got)
 	}
 }
 

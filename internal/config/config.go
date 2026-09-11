@@ -144,7 +144,15 @@ type Template struct {
 	// (case-insensitive), the client's value wins so a faithful client
 	// identity is forwarded as-is.
 	IdentityHeaders map[string]string `toml:"identity_headers,omitempty"`
-	Docs            string            `toml:"docs,omitempty"`
+	// ModelStyles overrides the template-level Style per concrete model id
+	// (§4.2): each key is a concrete model id and its value is one of the
+	// valid style values ("openai", "anthropic", "responses"). A model
+	// listed here routes to the override protocol instead of the template
+	// default, so one provider (e.g. opencode_go) can serve several protocols
+	// on one base URL. The template-level Style remains the default for models
+	// not listed.
+	ModelStyles map[string]string `toml:"model_styles,omitempty"`
+	Docs        string            `toml:"docs,omitempty"`
 }
 
 // Instance is a concrete account of a template: alias, template, api_key_env,
@@ -253,6 +261,12 @@ func (c *Config) Clone() *Config {
 			tc.IdentityHeaders = make(map[string]string, len(t.IdentityHeaders))
 			for k, v := range t.IdentityHeaders {
 				tc.IdentityHeaders[k] = v
+			}
+		}
+		if t.ModelStyles != nil {
+			tc.ModelStyles = make(map[string]string, len(t.ModelStyles))
+			for k, v := range t.ModelStyles {
+				tc.ModelStyles[k] = v
 			}
 		}
 		out.Templates[name] = &tc
@@ -646,16 +660,45 @@ func builtinTemplates() map[string]Template {
 			Docs:      "https://opencode.ai/docs/zen/",
 		},
 		"opencode_go": {
-			BaseURL:       "https://opencode.ai/zen/go/v1",
-			APIKeyEnv:     "OPENCODE_API_KEY",
-			Style:         StyleResponses,
-			Models:        []string{"deepseek-v4-flash", "deepseek-v4-pro"},
+			BaseURL:   "https://opencode.ai/zen/go/v1",
+			APIKeyEnv: "OPENCODE_API_KEY",
+			Models: []string{
+				"grok-4.6", "gpt-5.6-luna",
+				"glm-5.3-flash", "glm-5.3", "glm-5.2", "glm-5.1",
+				"kimi-k3", "kimi-k2.7-code", "kimi-k2.6", "longcat-2.0",
+				"deepseek-flash", "deepseek-v4-pro", "deepseek-v4-flash",
+				"deepseek-v4-flash-vision-exp",
+				"mimo-v2.5", "mimo-v2.5-pro",
+				"minimax-m3", "minimax-m2.7", "minimax-m2.5",
+				"muse-spark-1.3-contributor", "muse-spark-1.2-contributor",
+				"qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus",
+				"hy4-preview", "hy3",
+			},
 			SessionHeader: "x-opencode-session",
 			// The upstream expects coding-agent identity headers on every
 			// call; these mirror what the real opencode client sends.
 			IdentityHeaders: map[string]string{
 				"X-Opencode-Client":  "cli",
 				"X-Opencode-Project": "global",
+			},
+			// The opencode.go endpoint serves three protocols on one base URL:
+			// /chat/completions (the openai default) for most models,
+			// /responses for the muse contributor models, and /messages for
+			// the anthropic-style models. The template default is openai; the
+			// per-model overrides below route each model to its protocol.
+			ModelStyles: map[string]string{
+				"grok-4.6":                   "responses",
+				"gpt-5.6-luna":               "responses",
+				"muse-spark-1.3-contributor": "responses",
+				"muse-spark-1.2-contributor": "responses",
+				"minimax-m3":                 "anthropic",
+				"minimax-m2.7":               "anthropic",
+				"minimax-m2.5":               "anthropic",
+				"qwen3.8-max":                "anthropic",
+				"qwen3.8-flash":              "anthropic",
+				"qwen3.7-max":                "anthropic",
+				"qwen3.7-plus":               "anthropic",
+				"qwen3.6-plus":               "anthropic",
 			},
 			Docs: "https://opencode.ai/docs/go/",
 		},
@@ -842,6 +885,18 @@ func Validate(c *Config) error {
 		}
 		if t.Style != "" && t.Style != StyleOpenAI && t.Style != StyleAnthropic && t.Style != StyleResponses {
 			problems = append(problems, fmt.Sprintf("template %q: style must be %q, %q, %q, or empty", name, StyleOpenAI, StyleAnthropic, StyleResponses))
+		}
+		// model_styles keys are concrete model ids and values are the same
+		// style vocabulary as Style; an empty key or an empty/invalid value
+		// would be a silent routing misconfiguration, so both fail at load.
+		for model, style := range t.ModelStyles {
+			if model == "" {
+				problems = append(problems, fmt.Sprintf("template %q: model_styles contains an empty model key", name))
+				continue
+			}
+			if style == "" || (style != StyleOpenAI && style != StyleAnthropic && style != StyleResponses) {
+				problems = append(problems, fmt.Sprintf("template %q: model_styles for model %q must be %q, %q, or %q", name, model, StyleOpenAI, StyleAnthropic, StyleResponses))
+			}
 		}
 		// The custom placeholders are endpoint-less by design; their endpoint
 		// is supplied (and validated) when an instance is created.

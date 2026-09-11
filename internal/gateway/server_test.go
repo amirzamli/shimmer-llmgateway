@@ -25,6 +25,7 @@ import (
 
 type providerRequest struct {
 	Authorization    string
+	XAPIKey          string
 	XOpencode        string
 	UserAgent        string
 	XOpencodeClient  string
@@ -62,6 +63,7 @@ func (fp *fakeProvider) handle(w http.ResponseWriter, r *http.Request) {
 	fp.mu.Lock()
 	fp.seen = append(fp.seen, providerRequest{
 		Authorization:    r.Header.Get("Authorization"),
+		XAPIKey:          r.Header.Get("x-api-key"),
 		XOpencode:        r.Header.Get("x-opencode-session"),
 		UserAgent:        r.Header.Get("User-Agent"),
 		XOpencodeClient:  r.Header.Get("X-Opencode-Client"),
@@ -1200,6 +1202,134 @@ api_key_env = "TEST_KEY_1"
 	}
 	if got := seen[2]; got.XOpencodeClient != "" || got.XOpencodeProject != "" {
 		t.Errorf("request 2 (openai) identity headers = (%q, %q), want none", got.XOpencodeClient, got.XOpencodeProject)
+	}
+}
+
+// ---- per-model style routing (model_styles) ----
+
+// Model_styles routes each resolved model of one template to the protocol the
+// upstream expects: the template default (empty = openai chat) serves
+// /chat/completions, a "responses" override serves /responses, and an
+// "anthropic" override serves /messages with x-api-key auth. The Phase 1
+// session/identity/UA headers ride every branch.
+func TestModelStylesPerModelRouting(t *testing.T) {
+	var mu sync.Mutex
+	var paths []string
+	provider := newFakeProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/responses"):
+			w.Write([]byte(`{"id":"resp_1","object":"response","status":"completed","model":"muse-spark-1.3-contributor","output":[{"type":"message","id":"msg_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"resp-hi","annotations":[]}]}],"usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}}`))
+		case strings.HasSuffix(r.URL.Path, "/messages"):
+			w.Write([]byte(`{"id":"msg_1","model":"minimax-m3","content":[{"type":"text","text":"ant-hi"}],"stop_reason":"end_turn","usage":{"input_tokens":4,"output_tokens":2}}`))
+		default:
+			w.Write([]byte(`{"id":"chatcmpl-x","object":"chat.completion","created":1722600000,"model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"chat-hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`))
+		}
+	})
+	toml := fmt.Sprintf(`
+[settings]
+default_alias = "ocg"
+
+[providers.opencode_go]
+base_url = %q
+api_key_env = "TEST_KEY_1"
+models = ["deepseek-v4-flash", "muse-spark-1.3-contributor", "minimax-m3"]
+session_header = "x-opencode-session"
+identity_headers = { "X-Opencode-Client" = "cli", "X-Opencode-Project" = "global" }
+model_styles = { "muse-spark-1.3-contributor" = "responses", "minimax-m3" = "anthropic" }
+
+[[instances]]
+alias = "ocg"
+template = "opencode_go"
+`, provider.url()+"/v1")
+	gs, st := newGatewayTest(t, provider, toml, defaultEnv)
+
+	for _, tc := range []struct {
+		model       string
+		wantPath    string
+		wantAuth    string // "bearer" or "x-api-key"
+		wantContent string
+	}{
+		{"deepseek-v4-flash", "/v1/chat/completions", "bearer", "chat-hi"},
+		{"muse-spark-1.3-contributor", "/v1/responses", "bearer", "resp-hi"},
+		{"minimax-m3", "/v1/messages", "x-api-key", "ant-hi"},
+	} {
+		resp := postChat(t, gs, `{"model":"ocg/`+tc.model+`","messages":[{"role":"user","content":"hi"}]}`, map[string]string{
+			"X-Session-Id":      "sess-style-" + tc.model,
+			"User-Agent":        "style-client/1.0",
+			"X-Opencode-Client": "cli-custom",
+		})
+		body := drainClose(t, resp)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s status = %d, want 200 (%s)", tc.model, resp.StatusCode, body)
+		}
+		if !strings.Contains(string(body), tc.wantContent) {
+			t.Errorf("%s client body missing %q: %q", tc.model, tc.wantContent, body)
+		}
+	}
+
+	seen := provider.requests()
+	if len(seen) != 3 {
+		t.Fatalf("provider saw %d requests, want 3", len(seen))
+	}
+	for i, tc := range []struct {
+		model       string
+		wantPath    string
+		wantAuth    string
+		wantContent string
+	}{
+		{"deepseek-v4-flash", "/v1/chat/completions", "bearer", "chat-hi"},
+		{"muse-spark-1.3-contributor", "/v1/responses", "bearer", "resp-hi"},
+		{"minimax-m3", "/v1/messages", "x-api-key", "ant-hi"},
+	} {
+		mu.Lock()
+		gotPath := paths[i]
+		mu.Unlock()
+		if !strings.HasSuffix(gotPath, tc.wantPath) {
+			t.Errorf("request %d (%s) upstream path = %q, want %q suffix", i, tc.model, gotPath, tc.wantPath)
+		}
+		pr := seen[i]
+		if tc.wantAuth == "x-api-key" {
+			if pr.XAPIKey != "sk-account-1" {
+				t.Errorf("request %d (%s) x-api-key = %q, want sk-account-1", i, tc.model, pr.XAPIKey)
+			}
+			if pr.Authorization != "" {
+				t.Errorf("request %d (%s) Authorization = %q, want none on the anthropic branch", i, tc.model, pr.Authorization)
+			}
+		} else {
+			if pr.Authorization != "Bearer sk-account-1" {
+				t.Errorf("request %d (%s) Authorization = %q, want Bearer sk-account-1", i, tc.model, pr.Authorization)
+			}
+			if pr.XAPIKey != "" {
+				t.Errorf("request %d (%s) x-api-key = %q, want none on the chat/responses branch", i, tc.model, pr.XAPIKey)
+			}
+		}
+		// Phase 1 headers ride every protocol branch.
+		if pr.XOpencode != "sess-style-"+tc.model {
+			t.Errorf("request %d (%s) x-opencode-session = %q, want sess-style-%s", i, tc.model, pr.XOpencode, tc.model)
+		}
+		if pr.UserAgent != "style-client/1.0" {
+			t.Errorf("request %d (%s) User-Agent = %q, want style-client/1.0", i, tc.model, pr.UserAgent)
+		}
+		// A client-supplied identity header value wins over the declared default.
+		if pr.XOpencodeClient != "cli-custom" || pr.XOpencodeProject != "global" {
+			t.Errorf("request %d (%s) identity headers = %q/%q, want cli-custom/global", i, tc.model, pr.XOpencodeClient, pr.XOpencodeProject)
+		}
+	}
+
+	// Capture stays chat-shaped on every branch (translation happens at the
+	// upstream boundary only).
+	for _, model := range []string{"deepseek-v4-flash", "muse-spark-1.3-contributor", "minimax-m3"} {
+		req := waitForRequest(t, st, "sess-style-"+model, 5*time.Second)
+		if !strings.Contains(string(req.ResponseJSON), `"chat.completion"`) {
+			t.Errorf("%s response_json should stay chat-shaped: %q", model, req.ResponseJSON)
+		}
+		if req.FinishReason != "stop" || req.Error != nil {
+			t.Errorf("%s finish/error = %q/%+v, want stop/nil", model, req.FinishReason, req.Error)
+		}
 	}
 }
 

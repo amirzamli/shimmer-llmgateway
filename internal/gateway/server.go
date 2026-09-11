@@ -612,6 +612,16 @@ func (s *Server) handleResponsesGet(w http.ResponseWriter, r *http.Request) {
 	s.writeResponsesError(w, http.StatusNotFound, "invalid_request_error", "", "response retrieval is not supported: this gateway is stateless")
 }
 
+// effectiveStyle resolves the upstream protocol for one resolved model: a
+// per-model model_styles override wins when set, otherwise the template-level
+// Style applies ("" → the openai chat default).
+func effectiveStyle(tmpl *config.Template, model string) string {
+	if s, ok := tmpl.ModelStyles[model]; ok {
+		return s
+	}
+	return tmpl.Style
+}
+
 // buildUpstream builds the provider request: Authorization injected from the
 // resolved instance's api_key_env (never from the client — keys are not
 // stored or logged), body forwarded verbatim except the model field rewritten
@@ -628,11 +638,11 @@ func (s *Server) handleResponsesGet(w http.ResponseWriter, r *http.Request) {
 // returned sentBody is the exact bytes forwarded to the provider (post-model
 // rewrite), used as request_filtered_json when request plugins ran.
 //
-// Anthropic-style templates talk the Messages API instead: the OpenAI body is
+// Anthropic-style models talk the Messages API instead: the OpenAI body is
 // translated (translateOpenAIToAnthropic), the endpoint is <base_url>/messages,
 // the key rides the x-api-key header, and the anthropic-version header is set
 // (plus the extended-thinking beta header when the request enables thinking).
-// Responses-style templates talk the Responses API instead: the OpenAI body is
+// Responses-style models talk the Responses API instead: the OpenAI body is
 // translated (translateChatToResponses), the endpoint is <base_url>/responses,
 // and the key rides the Authorization header like the openai style.
 func (s *Server) buildUpstream(ctx context.Context, cfg *config.Config, rt *route, body []byte, sessionID string, inbound *http.Request) (*http.Request, []byte, error) {
@@ -646,8 +656,9 @@ func (s *Server) buildUpstream(ctx context.Context, cfg *config.Config, rt *rout
 		upstreamBody = rewritten
 	}
 
-	anthropic := rt.template.Style == config.StyleAnthropic
-	responses := rt.template.Style == config.StyleResponses
+	style := effectiveStyle(rt.template, rt.model)
+	anthropic := style == config.StyleAnthropic
+	responses := style == config.StyleResponses
 	if anthropic {
 		translated, err := translateOpenAIToAnthropic(upstreamBody, s.logger)
 		if err != nil {
@@ -853,7 +864,7 @@ func (s *Server) handleNonStream(w http.ResponseWriter, r *http.Request, cfg *co
 	}
 	// Anthropic responses are translated to the OpenAI shape before plugins
 	// and capture, so the whole pipeline (and the client) sees one schema.
-	respBody = translateUpstreamBody(rt.template.Style, rsp.StatusCode, respBody)
+	respBody = translateUpstreamBody(effectiveStyle(rt.template, rt.model), rsp.StatusCode, respBody)
 
 	rec := &store.CaptureRecord{
 		ID:              requestID,
@@ -948,7 +959,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *confi
 		if err != nil {
 			respBody = nil
 		}
-		respBody = translateUpstreamBody(rt.template.Style, resp.StatusCode, respBody)
+		respBody = translateUpstreamBody(effectiveStyle(rt.template, rt.model), resp.StatusCode, respBody)
 		rec := &store.CaptureRecord{
 			ID:              requestID,
 			SessionID:       sessionID,
@@ -1002,9 +1013,10 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *confi
 	emitter := newEmitter(w, source, filter)
 
 	var out streamOutcome
-	if rt.template.Style == config.StyleAnthropic {
+	style := effectiveStyle(rt.template, rt.model)
+	if style == config.StyleAnthropic {
 		out = readAnthropicStream(ctx, resp, asm, emitter.Write)
-	} else if rt.template.Style == config.StyleResponses {
+	} else if style == config.StyleResponses {
 		out = readResponsesStream(ctx, resp, asm, emitter.Write)
 	} else {
 		out = readStream(ctx, resp, asm, emitter.Write)

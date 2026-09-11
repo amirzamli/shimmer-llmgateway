@@ -142,6 +142,17 @@ Two-level model — this is what makes multi-account work:
   translated into `chat.completion.chunk` lines **before** reassembly, so the
   assembler, plugins, and capture only ever see OpenAI-shaped data.
 
+  `model_styles` is a **per-model override** of `style`: each key is a
+  concrete model id and its value is one of the same style values
+  (`"openai"`, `"anthropic"`, `"responses"`). A model listed there routes to
+  the override protocol instead of the template default, so one provider can
+  serve several protocols on one base URL — the built-in `opencode_go`
+  template defaults to `openai` (`/chat/completions`) and declares
+  `model_styles` for the muse contributor models (`"responses"`) and the
+  anthropic-style minimax/qwen models (`"anthropic"`). The template-level
+  `style` remains the default for models not listed. Validation rejects empty
+  model keys and empty or unknown style values at load.
+
   `model_reasoning_options` advertises the valid reasoning-effort levels per
   model (data only: it gates instance `model_reasoning` values and drives
   the UI dropdown; models without metadata accept the generic
@@ -223,13 +234,37 @@ base_url = "http://localhost:11434/v1"
 api_key_env = ""
 models = ["llama3.1"]
 
-[providers.opencode_go]          # speaks the Responses API upstream: style =
-base_url = "https://opencode.ai/zen/go/v1"   # "responses" + session_header / identity
-api_key_env = "OPENCODE_API_KEY"
-models = ["deepseek-v4-flash", "deepseek-v4-pro"]
-style = "responses"
+[providers.opencode_go]          # default style is openai (/chat/completions);
+base_url = "https://opencode.ai/zen/go/v1"   # model_styles overrides the 12
+api_key_env = "OPENCODE_API_KEY" # models that speak /responses or /messages
+models = [
+  "grok-4.6", "gpt-5.6-luna",
+  "glm-5.3-flash", "glm-5.3", "glm-5.2", "glm-5.1",
+  "kimi-k3", "kimi-k2.7-code", "kimi-k2.6", "longcat-2.0",
+  "deepseek-flash", "deepseek-v4-pro", "deepseek-v4-flash",
+  "deepseek-v4-flash-vision-exp",
+  "mimo-v2.5", "mimo-v2.5-pro",
+  "minimax-m3", "minimax-m2.7", "minimax-m2.5",
+  "muse-spark-1.3-contributor", "muse-spark-1.2-contributor",
+  "qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus",
+  "hy4-preview", "hy3",
+]
 session_header = "x-opencode-session"
 identity_headers = { "X-Opencode-Client" = "cli", "X-Opencode-Project" = "global" }
+model_styles = {                 # per-model protocol override (see §4.2)
+  "grok-4.6" = "responses",
+  "gpt-5.6-luna" = "responses",
+  "muse-spark-1.3-contributor" = "responses",
+  "muse-spark-1.2-contributor" = "responses",
+  "minimax-m3" = "anthropic",
+  "minimax-m2.7" = "anthropic",
+  "minimax-m2.5" = "anthropic",
+  "qwen3.8-max" = "anthropic",
+  "qwen3.8-flash" = "anthropic",
+  "qwen3.7-max" = "anthropic",
+  "qwen3.7-plus" = "anthropic",
+  "qwen3.6-plus" = "anthropic",
+}
 # plugins = ["redact"]          # template-level materialization seed only
 
 [[instances]]                    # INSTANCE 1 of openai — alias defaults to "openai"
@@ -592,4 +627,3 @@ retention purge (§4.3).
 5. **MCP smoke**: scripted JSON-RPC drive of every inspection tool over stdio.
 6. **Dogfood**: point opencode / LibreChat at the gateway, run a real agent
    task, then replay + validate it through the UI and the inspection server.
-
