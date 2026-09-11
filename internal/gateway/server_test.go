@@ -1475,7 +1475,7 @@ func TestUIAndAPIUnderGateway(t *testing.T) {
 	if uresp.StatusCode != http.StatusOK {
 		t.Fatalf("GET / status = %d, want 200", uresp.StatusCode)
 	}
-	if !strings.Contains(string(ubody), "Shimmer Gateway") || !strings.Contains(string(ubody), "Traces") {
+	if !strings.Contains(string(ubody), "Shimmer Gateway") || !strings.Contains(string(ubody), "Usage rail") {
 		t.Errorf("GET / does not serve the UI page: %q", snippet(string(ubody), 200))
 	}
 
