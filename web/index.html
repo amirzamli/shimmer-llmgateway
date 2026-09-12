@@ -193,11 +193,15 @@
     display: flex;
     flex: 0 0 auto;
     min-height: 0;
+    min-width: 0;
     flex-direction: column;
     background: var(--panel);
+    overflow: hidden;
+    transition: width 160ms ease-out, flex-basis 160ms ease-out, opacity 160ms ease-out, border-color 160ms ease-out;
   }
-  .rail.left { width: var(--left-w); border-right: 1px solid var(--border); }
-  .rail.right { width: var(--right-w); border-left: 1px solid var(--border); }
+  .rail.left { width: var(--left-w); flex-basis: var(--left-w); border-right: 1px solid var(--border); }
+  .rail.right { width: var(--right-w); flex-basis: var(--right-w); border-left: 1px solid var(--border); }
+  .rail.collapsed { width: 0; flex-basis: 0; opacity: 0; border-color: transparent; pointer-events: none; }
   .rail-head {
     display: flex;
     align-items: center;
@@ -214,8 +218,44 @@
     text-transform: uppercase;
   }
   .rail-scroll { flex: 1; min-height: 0; overflow: auto; }
-  .resizer { width: 5px; flex: 0 0 5px; cursor: col-resize; background: transparent; touch-action: none; }
+  .resizer {
+    position: relative;
+    z-index: 30;
+    display: flex;
+    width: 5px;
+    flex: 0 0 5px;
+    align-items: center;
+    justify-content: center;
+    cursor: col-resize;
+    background: transparent;
+    touch-action: none;
+    transition: width 160ms ease-out, flex-basis 160ms ease-out, background 160ms ease-out;
+  }
+  .resizer.collapsed { width: 22px; flex-basis: 22px; cursor: default; }
   .resizer:hover, body.dragging .resizer { background: var(--accent); }
+  .rail-toggle-edge {
+    position: absolute;
+    top: 50%;
+    z-index: 1;
+    display: inline-flex;
+    width: 22px;
+    min-height: 34px;
+    align-items: center;
+    justify-content: center;
+    padding: 0 3px;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    background: var(--elevated);
+    color: var(--muted);
+    font-size: 15px;
+    line-height: 1;
+    opacity: .82;
+    transform: translateY(-50%);
+    transition: opacity 120ms ease-out, background 120ms ease-out, color 120ms ease-out;
+  }
+  .resizer[data-side="left"] .rail-toggle-edge { left: 50%; transform: translate(-50%, -50%); }
+  .resizer[data-side="right"] .rail-toggle-edge { right: 50%; transform: translate(50%, -50%); }
+  .rail-toggle-edge:hover, .rail-toggle-edge:focus-visible { background: var(--hover); color: var(--text); opacity: 1; }
   body.dragging { user-select: none; cursor: col-resize; }
 
   .session-tools { padding: 8px; border-bottom: 1px solid var(--border); }
@@ -269,7 +309,8 @@
   .empty-state, .session-empty { padding: 22px 14px; color: var(--muted); text-align: center; font-size: 12px; }
 
   .center { display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; background: var(--bg); }
-  #providers-col { container: provider-workspace / inline-size; display: flex; flex: 1; min-width: 0; min-height: 0; flex-direction: column; gap: 18px; overflow: auto; padding: 20px; }
+  #providers-col { container: provider-workspace / inline-size; display: flex; flex: 1; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; }
+  #providers-scroll { display: flex; flex: 1; min-width: 0; min-height: 0; flex-direction: column; gap: 18px; overflow: auto; padding: 20px; }
   #providers-panel { flex: 0 0 auto; }
   #chat-view { display: flex; flex: 0 0 47%; min-width: 380px; max-width: 620px; flex-direction: column; overflow: hidden; background: var(--panel); border-right: 1px solid var(--border); }
   #chat-view.hidden { display: none; }
@@ -436,7 +477,13 @@
   .setup-steps { margin: 0 0 10px; padding-left: 20px; color: var(--text2); font-size: 11px; }
   .setup-steps li { margin: 3px 0; }
   .setup-config { margin: 0 0 8px; max-height: 180px; overflow: auto; padding: 9px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--elevated); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 10px; }
-  .mcp-guide { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
+  .setup-collapse + .setup-collapse { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+  .setup-collapse > summary { display: flex; min-height: 28px; align-items: center; gap: 8px; cursor: pointer; list-style: none; }
+  .setup-collapse > summary::-webkit-details-marker { display: none; }
+  .setup-collapse > summary::after { margin-left: auto; color: var(--muted); content: "▾"; font-size: 13px; }
+  .setup-collapse[open] > summary::after { content: "▴"; }
+  .setup-collapse > summary:hover h2 { color: var(--accent); }
+  .setup-collapse-body { padding-top: 12px; }
   .mcp-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; margin-top: 8px; }
   .mcp-card { min-width: 0; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--elevated); }
   .mcp-card h3 { margin: 0 0 4px; font-size: 12px; }
@@ -446,14 +493,13 @@
   .mcp-card .mcp-copy-row { clear: both; justify-content: flex-end; margin-top: 0; margin-bottom: 8px; }
   .mcp-card .setup-row + .mcp-copy-row { margin-top: 6px; }
   .setup-note { margin-top: 8px; color: var(--dim); font-size: 10px; line-height: 1.4; }
-  #providers-panel > .panel, #gateway-setup, #listener-panel { margin: 0; }
+  #providers-panel > .panel, #gateway-setup { margin: 0; }
   #gateway-setup { border-left: 2px solid var(--accent); border-radius: 8px; padding: 16px; font-family: system-ui, sans-serif; font-size: 16px; line-height: normal; }
-  #gateway-setup h2 { margin: 0 0 12px; font-size: 15px; }
+  #gateway-setup h2 { margin: 0; font-size: 15px; }
   #gateway-setup .muted { font-family: system-ui, sans-serif; font-size: 12px; }
   #gateway-setup code, #gateway-setup pre { font-family: ui-monospace, monospace; font-size: 12px; }
   #gateway-setup code { word-break: break-all; }
   #gateway-setup .section-title { margin: 14px 0 8px; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; }
-  #gateway-setup .mcp-guide > .section-title { color: var(--text); font-size: 15px; font-weight: 700; letter-spacing: normal; text-transform: none; }
   #gateway-setup .setup-steps { font-size: 13px; }
   #gateway-setup .setup-config { max-height: 400px; padding: 8px; border-radius: 6px; background: var(--bg); font-size: 12px; }
   #add-instance-toggle { box-shadow: 0 0 10px rgba(59,130,246,.45), 0 0 2px rgba(59,130,246,.65); }
@@ -506,14 +552,17 @@
     .instance-template { display: none; }
   }
   @media (max-width: 900px) {
-    .rail.right, .resizer[data-side="right"] { display: none; }
+    .desk { position: relative; }
+    .rail.right { position: absolute; z-index: 20; top: 0; right: 0; bottom: 0; height: 100%; }
+    .resizer[data-side="right"] { position: absolute; top: 0; right: var(--right-w); bottom: 0; height: 100%; transition: right 160ms ease-out, width 160ms ease-out, background 160ms ease-out; }
+    .resizer[data-side="right"].collapsed { right: 0; }
     #chat-view { min-width: 330px; }
   }
   @media (max-width: 680px) {
     header { gap: 8px; padding: 0 10px; }
     header > a { display: none; }
     .desk { --left-w: 218px; }
-    #providers-col { padding: 12px; }
+    #providers-scroll { padding: 12px; }
     #chat-view { min-width: 0; flex-basis: 100%; max-width: none; }
     .center.chat-open #providers-col { display: none; }
     .form-grid, .settings-row { grid-template-columns: 1fr; gap: 5px; }
@@ -543,9 +592,9 @@
 </header>
 
 <div class="desk" id="desk">
-  <aside class="rail left" aria-label="Recorded sessions">
+  <aside id="session-rail" class="rail left collapsed" aria-label="Chat sessions" aria-hidden="true">
     <div class="rail-head">
-      <h2>Recorded sessions</h2><span class="spacer"></span><span id="session-count" class="badge disabled">—</span>
+      <h2>Chat sessions</h2><span class="spacer"></span><span id="session-count" class="badge disabled">—</span>
     </div>
     <div class="session-tools">
       <button class="ghost btn-sm" type="button" data-action="toggle-session-filters" aria-expanded="false" aria-controls="session-filters">Filter sessions</button>
@@ -559,10 +608,12 @@
       <label>Text<input id="f-q" placeholder="search captured text" autocomplete="off"></label>
       <div class="session-filter-actions"><button class="btn-sm" type="button" data-action="search-sessions">Search</button><button class="ghost btn-sm" type="button" data-action="clear-session-filters">Clear</button></div>
     </div>
-    <div class="rail-scroll" id="session-list"><div class="session-empty">Loading sessions…</div></div>
+    <div class="rail-scroll" id="session-list"><div class="session-empty">Loading chat sessions…</div></div>
   </aside>
 
-  <div class="resizer" data-side="left" role="separator" aria-orientation="vertical" aria-label="Resize sessions rail" tabindex="0"></div>
+  <div id="session-resizer" class="resizer collapsed" data-side="left" role="separator" aria-orientation="vertical" aria-label="Resize chat sessions rail" tabindex="0">
+    <button class="rail-toggle-edge ghost" type="button" data-action="toggle-rail" data-rail="sessions" aria-controls="session-rail" aria-expanded="false" aria-label="Show Chat sessions panel" title="Show Chat sessions panel"><span class="rail-toggle-arrow" aria-hidden="true">›</span></button>
+  </div>
 
   <main class="center" id="center">
     <section id="chat-view" class="hidden" aria-label="Recorded trace">
@@ -580,17 +631,20 @@
     </section>
 
     <div id="providers-col">
-      <section id="providers-panel" aria-label="Provider instances"></section>
-      <section id="gateway-setup" class="panel" aria-labelledby="setup-title"></section>
-      <section id="listener-panel" class="panel" aria-label="Listener configuration"></section>
+      <div id="providers-scroll">
+        <section id="providers-panel" aria-label="Provider instances"></section>
+        <section id="gateway-setup" class="panel" aria-labelledby="setup-title"></section>
+      </div>
     </div>
   </main>
 
-  <div class="resizer" data-side="right" role="separator" aria-orientation="vertical" aria-label="Resize usage rail" tabindex="0"></div>
+  <div id="usage-resizer" class="resizer collapsed" data-side="right" role="separator" aria-orientation="vertical" aria-label="Resize usage rail" tabindex="0">
+    <button class="rail-toggle-edge ghost" type="button" data-action="toggle-rail" data-rail="usage" aria-controls="usage-rail" aria-expanded="false" aria-label="Show Usage panel" title="Show Usage panel"><span class="rail-toggle-arrow" aria-hidden="true">‹</span></button>
+  </div>
 
-  <aside class="rail right" aria-label="Usage analytics">
+  <aside id="usage-rail" class="rail right collapsed" aria-label="Usage" aria-hidden="true">
     <div class="rail-head">
-      <h2>Usage rail</h2><span class="spacer"></span>
+      <h2>Usage</h2><span class="spacer"></span>
       <button class="ghost btn-sm" type="button" data-action="refresh-all" title="Refresh usage, quotas, providers and sessions">↻</button>
     </div>
     <div class="chip-row" role="group" aria-label="Usage time range">
@@ -636,6 +690,7 @@ const $ = id => document.getElementById(id);
 const state = {
   templates: [], instances: [], quota: [], plugins: { plugins: [], request_plugins: [], response_plugins: [], instances: [] },
   sessions: [], sessionId: null, settings: null, status: null, usageRange: "30d", activeDetail: 0,
+  railPrefs: { sessions: null, usage: null }, sessionRailData: "loading", usageRailData: "loading",
   models: Object.create(null), modelMeta: Object.create(null), searchTimer: null, loadToken: 0, previewToken: 0
 };
 
@@ -742,6 +797,62 @@ async function setTheme(mode) {
 }
 
 /* Status + layout */
+const railDefinitions = {
+  sessions: { label: "Chat sessions", rail: "session-rail", resizer: "session-resizer", openArrow: "‹", closedArrow: "›" },
+  usage: { label: "Usage", rail: "usage-rail", resizer: "usage-resizer", openArrow: "›", closedArrow: "‹" }
+};
+function readRailPreferences() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("shimmer.railPrefs"));
+    return {
+      sessions: saved && typeof saved.sessions === "boolean" ? saved.sessions : null,
+      usage: saved && typeof saved.usage === "boolean" ? saved.usage : null
+    };
+  } catch { return { sessions: null, usage: null }; }
+}
+function saveRailPreferences() {
+  try { localStorage.setItem("shimmer.railPrefs", JSON.stringify(state.railPrefs)); } catch {}
+}
+function railAutoVisible(rail) {
+  const status = rail === "sessions" ? state.sessionRailData : state.usageRailData;
+  return status === "data" || status === "error";
+}
+function railIsVisible(rail) {
+  const preference = state.railPrefs[rail];
+  return typeof preference === "boolean" ? preference : railAutoVisible(rail);
+}
+function applyRailVisibility() {
+  Object.entries(railDefinitions).forEach(([name, definition]) => {
+    const visible = railIsVisible(name), rail = $(definition.rail), resizer = $(definition.resizer);
+    if (rail) {
+      rail.classList.remove("hidden");
+      rail.classList.toggle("collapsed", !visible);
+      rail.setAttribute("aria-hidden", String(!visible));
+    }
+    if (resizer) {
+      resizer.classList.remove("hidden");
+      resizer.classList.toggle("collapsed", !visible);
+    }
+    document.querySelectorAll(`[data-action="toggle-rail"][data-rail="${name}"]`).forEach(button => {
+      const action = visible ? "Hide" : "Show";
+      button.setAttribute("aria-expanded", String(visible));
+      button.setAttribute("aria-label", `${action} ${definition.label} panel`);
+      button.title = `${action} ${definition.label} panel`;
+      const arrow = button.querySelector(".rail-toggle-arrow");
+      if (arrow) arrow.textContent = visible ? definition.openArrow : definition.closedArrow;
+    });
+  });
+}
+function toggleRail(rail) {
+  if (!railDefinitions[rail]) return;
+  const wasVisible = railIsVisible(rail);
+  state.railPrefs[rail] = !wasVisible;
+  saveRailPreferences();
+  applyRailVisibility();
+  if (wasVisible) return;
+  if (rail === "sessions") void loadSessions(false);
+  if (rail === "usage") void loadUsage();
+}
 function setupAddresses() {
   const status = state.status || {}, settings = state.settings || {};
   return status.listen_addrs || settings.listen_addrs || [];
@@ -773,6 +884,20 @@ function setupStorePath() {
   const settings = state.settings || {}, status = state.status || {};
   return settings.store || status.store_path || "gateway.db";
 }
+function setupSectionPreferences() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("shimmer.setupSections"));
+    return saved && typeof saved === "object" ? saved : {};
+  } catch { return {}; }
+}
+function setupSectionIsOpen(section) {
+  return setupSectionPreferences()[section] === true;
+}
+function rememberSetupSection(section, open) {
+  const saved = setupSectionPreferences();
+  saved[section] = !!open;
+  try { localStorage.setItem("shimmer.setupSections", JSON.stringify(saved)); } catch {}
+}
 function renderGatewaySetup() {
   const element = $("gateway-setup");
   if (!element) return;
@@ -790,28 +915,43 @@ function renderGatewaySetup() {
   const processConfig = JSON.stringify({ mcp: { "shimmer-inspect": { type: "local", command: ["/abs/path/to/bin/inspect-mcp", "--db", store] } } }, null, 2);
   const httpCommand = `./bin/inspect-mcp -db ${shellQuote(store)} -http ${shellQuote(mcpHost() + ":9876")}`;
   const httpEndpoint = mcpURL();
-  element.innerHTML = `<h2 id="setup-title">Connect to this gateway</h2>
-    <div class="muted" style="margin-bottom:12px">Use this gateway from any OpenAI-compatible client. Provider credentials stay inside the gateway and are never sent by the client.</div>
-    <div class="section-title">Listen addresses</div>
-    <table class="setup-table"><tbody>${rows}</tbody></table>
-    <div class="section-title">Endpoint (base URL)</div>
-    <div class="setup-row"><code id="setup-endpoint">${esc(endpoint)}</code><button class="ghost btn-sm" type="button" data-action="copy-setup" data-copy="endpoint">Copy</button></div>
-    <div class="muted">Available surfaces: <code>POST /v1/chat/completions</code>, <code>POST /v1/responses</code>, and <code>GET /v1/models</code>.</div>
-    <div class="section-title">Client authentication</div>
-    <div class="muted">No client API key is required. The gateway injects the configured provider credentials; use the provider alias as the model name.</div>
-    <div class="section-title">Install as a provider</div>
-    <ol class="setup-steps"><li>Set your client's <code>base_url</code> to the endpoint above.</li><li>Leave client authentication empty when supported (a dummy key is ignored if required by the client).</li><li>Choose a configured alias such as <code>${esc(defaultModel)}</code> as the model name.</li></ol>
-    <div class="section-title">Config snippet</div>
-    <pre class="setup-config" id="setup-config">${esc(config)}</pre>
-    <div class="setup-row"><span class="muted">OpenAI-compatible JSON; add <code>api_key</code> only if your client requires one.</span><span class="spacer"></span><button class="ghost btn-sm" type="button" data-action="copy-setup" data-copy="config">Copy config</button></div>
-    <div class="mcp-guide"><div class="section-title">Inspect captured traffic with Shimmer Inspect MCP</div>
-      <div class="muted" style="margin-top:6px">The inspector reads the same store as the gateway and gives agents tools for sessions, conversations, tool-call validation, failure classification, and exports.</div>
+  const connectionOpen = setupSectionIsOpen("connection"), mcpOpen = setupSectionIsOpen("mcp");
+  element.innerHTML = `<details id="gateway-connection" class="setup-collapse" data-setup-section="connection" aria-labelledby="setup-title"${connectionOpen ? " open" : ""}>
+    <summary aria-controls="gateway-connection-body" aria-expanded="${connectionOpen}"><h2 id="setup-title">How to connect to this gateway</h2></summary>
+    <div id="gateway-connection-body" class="setup-collapse-body">
+      <div class="muted" style="margin-bottom:12px">Use this gateway from any OpenAI-compatible client. Provider credentials stay inside the gateway and are never sent by the client.</div>
+      <div class="section-title">Listen addresses</div>
+      <table class="setup-table"><tbody>${rows}</tbody></table>
+      <div class="section-title">Endpoint (base URL)</div>
+      <div class="setup-row"><code id="setup-endpoint">${esc(endpoint)}</code><button class="ghost btn-sm" type="button" data-action="copy-setup" data-copy="endpoint">Copy</button></div>
+      <div class="muted">Available surfaces: <code>POST /v1/chat/completions</code>, <code>POST /v1/responses</code>, and <code>GET /v1/models</code>.</div>
+      <div class="section-title">Client authentication</div>
+      <div class="muted">No client API key is required. The gateway injects the configured provider credentials; use the provider alias as the model name.</div>
+      <div class="section-title">Install as a provider</div>
+      <ol class="setup-steps"><li>Set your client's <code>base_url</code> to the endpoint above.</li><li>Leave client authentication empty when supported (a dummy key is ignored if required by the client).</li><li>Choose a configured alias such as <code>${esc(defaultModel)}</code> as the model name.</li></ol>
+      <div class="section-title">Config snippet</div>
+      <pre class="setup-config" id="setup-config">${esc(config)}</pre>
+      <div class="setup-row"><span class="muted">OpenAI-compatible JSON; add <code>api_key</code> only if your client requires one.</span><span class="spacer"></span><button class="ghost btn-sm" type="button" data-action="copy-setup" data-copy="config">Copy config</button></div>
+    </div>
+  </details>
+  <details id="gateway-mcp" class="setup-collapse" data-setup-section="mcp" aria-labelledby="mcp-setup-title"${mcpOpen ? " open" : ""}>
+    <summary aria-controls="gateway-mcp-body" aria-expanded="${mcpOpen}"><h2 id="mcp-setup-title">How to install and use Shimmer Inspect MCP to Inspect captured traffic</h2></summary>
+    <div id="gateway-mcp-body" class="setup-collapse-body">
+      <div class="muted">The inspector reads the same store as the gateway and gives agents tools for sessions, conversations, tool-call validation, failure classification, and exports.</div>
       <div class="mcp-grid">
         <div class="mcp-card"><h3>Via process (stdio)</h3><p>Best for a local agent. Start one inspector process per MCP client; it reads the store directly and does not need the gateway HTTP port.</p><pre id="mcp-process-command">${esc(processCommand)}</pre><div class="setup-row mcp-copy-row"><button class="ghost btn-sm" type="button" data-action="copy-setup" data-copy="mcp-process">Copy command</button></div><pre id="mcp-process-config">${esc(processConfig)}</pre><div class="setup-row mcp-copy-row"><button class="ghost btn-sm" type="button" data-action="copy-setup" data-copy="mcp-process-config">Copy config</button></div></div>
         <div class="mcp-card"><h3>Via IP (streamable HTTP)</h3><p>Start the inspector on a trusted loopback or tailnet IP, then give the MCP client the HTTP endpoint.</p><pre id="mcp-http-command">${esc(httpCommand)}</pre><div class="setup-row mcp-copy-row"><button class="ghost btn-sm" type="button" data-action="copy-setup" data-copy="mcp-http-command">Copy command</button></div><div class="setup-row"><code id="mcp-http-endpoint">${esc(httpEndpoint)}</code></div><div class="setup-row mcp-copy-row"><button class="ghost btn-sm" type="button" data-action="copy-setup" data-copy="mcp-http-endpoint">Copy URL</button></div></div>
       </div>
       <div class="setup-note">The HTTP inspector uses a separate port (9876 by default), has no browser CORS support, and has no gateway authentication layer. Keep it on localhost or a trusted private network.</div>
-    </div>`;
+    </div>
+  </details>`;
+  element.querySelectorAll("details[data-setup-section]").forEach(details => {
+    const summary = details.querySelector("summary");
+    details.addEventListener("toggle", () => {
+      rememberSetupSection(details.dataset.setupSection, details.open);
+      if (summary) summary.setAttribute("aria-expanded", String(details.open));
+    });
+  });
 }
 function setupCopyText(kind) {
   const ids = { endpoint: "setup-endpoint", config: "setup-config", "mcp-process": "mcp-process-command", "mcp-process-config": "mcp-process-config", "mcp-http-command": "mcp-http-command", "mcp-http-endpoint": "mcp-http-endpoint" };
@@ -836,20 +976,6 @@ async function copyText(value, button) {
     setTimeout(() => { button.textContent = previous; }, 1200);
   }
 }
-function renderListener() {
-  const settings = state.settings || {}, status = state.status || {};
-  const addresses = status.listen_addrs || settings.listen_addrs || [];
-  const rows = addresses.length ? addresses.map((address, index) => `<tr><td>${index ? "Listener " + (index + 1) : "Gateway"}</td><td><code>${esc(address)}</code></td></tr>`).join("") : `<tr><td>Gateway</td><td class="muted">Unavailable</td></tr>`;
-  const endpoint = (location.origin || "http://127.0.0.1:8787") + "/v1";
-  $("listener-panel").innerHTML = `<div class="panel-head"><h2>Listener config</h2><span class="spacer"></span><span class="badge ${state.status ? "ok" : "disabled"}">${state.status ? "live" : "waiting"}</span></div>
-    <table><tbody>${rows}</tbody></table>
-    <dl class="connection-grid" style="margin-top:12px">
-      <dt>Base URL</dt><dd><code>${esc(endpoint)}</code></dd>
-      <dt>Store</dt><dd>${esc(settings.store || status.store_path || "—")}</dd>
-      <dt>Retention</dt><dd>${settings.retention_days == null ? "—" : esc(settings.retention_days + " days")}</dd>
-    </dl>`;
-  renderGatewaySetup();
-}
 async function loadStatus() {
   try {
     await api("/healthz");
@@ -860,7 +986,7 @@ async function loadStatus() {
     $("health-label").textContent = "Gateway unavailable";
   }
   try { state.status = await api("/api/status"); } catch { state.status = null; }
-  renderListener();
+  renderGatewaySetup();
 }
 
 function routingCompare(a, b) {
@@ -1193,7 +1319,7 @@ async function hydrateSessionPreviews(token) {
 }
 function renderSessions() {
   const list = $("session-list");
-  if (!state.sessions.length) { list.innerHTML = `<div class="session-empty">No recorded sessions match this filter.</div>`; return; }
+  if (!state.sessions.length) { list.innerHTML = `<div class="session-empty">No chat sessions match this filter.</div>`; return; }
   list.innerHTML = state.sessions.map(session => {
     const recent = Date.now() - new Date(session.created_at).getTime() < 10 * 60 * 1000;
     const failure = Number(session.failure_count || 0);
@@ -1215,14 +1341,18 @@ async function loadSessions(openFirst) {
     const response = await api("/api/sessions?" + params.toString());
     state.sessions = response.sessions || [];
     state.sessions.forEach(session => { session.preview_loading = !session.first_user_message && !session.expired; });
+    state.sessionRailData = state.sessions.length ? "data" : "empty";
     $("session-count").textContent = String(state.sessions.length);
     const previewToken = ++state.previewToken;
+    applyRailVisibility();
     renderSessions();
     void hydrateSessionPreviews(previewToken);
     if (openFirst && !state.sessionId && state.sessions[0]) await openSession(state.sessions[0].id);
   } catch (error) {
+    state.sessionRailData = "error";
     $("session-count").textContent = "—";
     $("session-list").innerHTML = `<div class="session-empty"><span class="badge err">Unable to load sessions</span><p>${esc(error.message)}</p></div>`;
+    applyRailVisibility();
   }
 }
 function sameMessage(left, right) {
@@ -1370,8 +1500,16 @@ function usageProviders(buckets, overall) {
   const totalTokens = Number(overall && overall.prompt_tokens || 0) + Number(overall && overall.completion_tokens || 0);
   return `<div class="provider-list">${rows.map(([name, value]) => { const percent = totalTokens ? Math.round(value.tokens / totalTokens * 100) : 0; return `<div class="provider-row"><span class="provider-name" title="${esc(name)}">${esc(name)}</span><span class="spacer"></span><span class="muted">${fmtNumber(value.requests)} req,</span><span class="usage-percent">${percent}%</span></div>`; }).join("")}</div>`;
 }
+function usageHasData(data) {
+  const totals = data && data.totals || {};
+  return Number(totals.request_count || 0) > 0 || !!(data && Array.isArray(data.buckets) && data.buckets.length);
+}
 function renderUsage(data, groupedModels, groupedProviders) {
   const totals = data && data.totals || {};
+  if (!usageHasData(data)) {
+    $("usage-body").innerHTML = `<div class="empty-state">No usage recorded in this range.</div>`;
+    return;
+  }
   $("usage-body").innerHTML = `<div class="stat-grid"><div class="stat"><div class="stat-label">Est. cost</div><div class="stat-value">${esc(fmtMoney(totals.cost_total))}</div></div><div class="stat"><div class="stat-label">Requests</div><div class="stat-value">${fmtNumber(totals.request_count)}</div></div><div class="stat"><div class="stat-label">Tokens in / out</div><div class="stat-value" style="font-size:11px">${fmtNumber(totals.prompt_tokens)} / ${fmtNumber(totals.completion_tokens)}</div></div><div class="stat"><div class="stat-label">Unpriced</div><div class="stat-value">${fmtNumber(totals.unpriced_requests)}</div></div></div><div class="rail-section-title">Requests per day</div>${usageBars(data && data.buckets)}<div class="rail-section-title">Cost split</div>${usageDonut(totals)}<div class="rail-section-title">Model breakdown</div>${usageModels(groupedModels && groupedModels.buckets, groupedModels && groupedModels.totals || totals)}<div class="rail-section-title">Provider breakdown</div>${usageProviders(groupedProviders && groupedProviders.buckets, groupedProviders && groupedProviders.totals || totals)}<div class="rail-note">Costs are estimates from the gateway pricing table. Unpriced requests count as $0 and are shown above.</div>`;
 }
 async function loadUsage() {
@@ -1379,8 +1517,14 @@ async function loadUsage() {
   $("usage-body").innerHTML = `<div class="empty-state">Loading usage…</div>`;
   try {
     const [data, groupedModels, groupedProviders] = await Promise.all([api("/api/usage?" + usageParams("").toString()), api("/api/usage?" + usageParams("model").toString()), api("/api/usage?" + usageParams("provider").toString())]);
+    state.usageRailData = usageHasData(data) ? "data" : "empty";
     renderUsage(data, groupedModels, groupedProviders);
-  } catch (error) { $("usage-body").innerHTML = `<div class="empty-state"><span class="badge err">Unable to load usage</span><p>${esc(error.message)}</p></div>`; }
+    applyRailVisibility();
+  } catch (error) {
+    state.usageRailData = "error";
+    $("usage-body").innerHTML = `<div class="empty-state"><span class="badge err">Unable to load usage</span><p>${esc(error.message)}</p></div>`;
+    applyRailVisibility();
+  }
 }
 
 /* Settings */
@@ -1401,7 +1545,7 @@ function closeSettings() { if ($("settings-dialog").open) $("settings-dialog").c
 async function saveSettings() {
   const retention = Number.parseInt($("setting-retention").value, 10);
   const body = { default_alias: $("setting-default-alias").value, retention_days: Number.isNaN(retention) ? 0 : Math.max(0, retention), log_payloads: $("setting-log-payloads").checked };
-  try { state.settings = await api("/api/settings", requestOptions("PATCH", body)); $("settings-status").textContent = "Saved"; renderListener(); toast("Settings saved", "success"); setTimeout(() => { if ($("settings-dialog").open) closeSettings(); }, 450); }
+  try { state.settings = await api("/api/settings", requestOptions("PATCH", body)); $("settings-status").textContent = "Saved"; renderGatewaySetup(); toast("Settings saved", "success"); setTimeout(() => { if ($("settings-dialog").open) closeSettings(); }, 450); }
   catch (error) { $("settings-status").textContent = error.message; toast(error.message, "error"); }
 }
 async function toggleGlobalPlugin(name, enabled) {
@@ -1423,6 +1567,7 @@ document.addEventListener("click", event => {
   if (!target) return;
   switch (target.dataset.action) {
     case "theme": setTheme(target.dataset.val); break;
+    case "toggle-rail": toggleRail(target.dataset.rail); break;
     case "open-settings": openSettings(); break;
     case "close-settings": closeSettings(); break;
     case "close-edit": closeEdit(); break;
@@ -1471,7 +1616,8 @@ document.addEventListener("change", event => {
   if (["f-status", "f-since", "f-until"].includes(event.target.id)) loadSessions(false);
 });
 document.addEventListener("toggle", event => {
-  if (event.target instanceof HTMLDetailsElement && event.target.classList.contains("aliases-instance") && document.contains(event.target)) rememberOpen(event.target.dataset.alias, event.target.open);
+  if (!(event.target instanceof HTMLDetailsElement) || !document.contains(event.target)) return;
+  if (event.target.classList.contains("aliases-instance")) rememberOpen(event.target.dataset.alias, event.target.open);
 });
 
 function togglePluginMenu(button) {
@@ -1535,13 +1681,13 @@ function initResizers() {
   const desk = $("desk");
   document.querySelectorAll(".resizer").forEach(resizer => {
     const side = resizer.dataset.side, property = side === "left" ? "--left-w" : "--right-w", limits = side === "left" ? [200, 380] : [280, 460];
-    resizer.addEventListener("pointerdown", event => { if (event.button !== 0) return; event.preventDefault(); const startX = event.clientX, startW = Number.parseFloat(getComputedStyle(desk).getPropertyValue(property)) || limits[0]; resizer.setPointerCapture(event.pointerId); document.body.classList.add("dragging"); const move = next => { const delta = next.clientX - startX, width = side === "left" ? clamp(startW + delta, limits[0], limits[1]) : clamp(startW - delta, limits[0], limits[1]); desk.style.setProperty(property, width + "px"); }; const stop = () => { document.body.classList.remove("dragging"); resizer.removeEventListener("pointermove", move); resizer.removeEventListener("pointerup", stop); }; resizer.addEventListener("pointermove", move); resizer.addEventListener("pointerup", stop); });
+    resizer.addEventListener("pointerdown", event => { if (event.button !== 0 || event.target.closest("button")) return; event.preventDefault(); const startX = event.clientX, startW = Number.parseFloat(getComputedStyle(desk).getPropertyValue(property)) || limits[0]; resizer.setPointerCapture(event.pointerId); document.body.classList.add("dragging"); const move = next => { const delta = next.clientX - startX, width = side === "left" ? clamp(startW + delta, limits[0], limits[1]) : clamp(startW - delta, limits[0], limits[1]); desk.style.setProperty(property, width + "px"); }; const stop = () => { document.body.classList.remove("dragging"); resizer.removeEventListener("pointermove", move); resizer.removeEventListener("pointerup", stop); }; resizer.addEventListener("pointermove", move); resizer.addEventListener("pointerup", stop); });
     resizer.addEventListener("keydown", event => { const direction = event.key === "ArrowLeft" ? -16 : event.key === "ArrowRight" ? 16 : 0; if (!direction) return; event.preventDefault(); const current = Number.parseFloat(getComputedStyle(desk).getPropertyValue(property)) || limits[0], width = side === "left" ? clamp(current + direction, limits[0], limits[1]) : clamp(current - direction, limits[0], limits[1]); desk.style.setProperty(property, width + "px"); });
   });
 }
 
 async function loadAll(openFirst) {
-  const results = await Promise.allSettled([loadProviders(), loadSessions(openFirst), loadUsage(), loadStatus(), api("/api/settings").then(settings => { state.settings = settings; renderListener(); })]);
+  const results = await Promise.allSettled([loadProviders(), loadSessions(openFirst), loadUsage(), loadStatus(), api("/api/settings").then(settings => { state.settings = settings; renderGatewaySetup(); })]);
   const failed = results.find(result => result.status === "rejected");
   if (failed) toast("Some gateway data could not be loaded", "error");
 }
@@ -1550,9 +1696,11 @@ async function loadAll(openFirst) {
 (function initTheme() {
   let stored = "dark"; try { stored = localStorage.getItem("shimmer.theme") || "dark"; } catch {}
   applyTheme(stored);
-  api("/api/settings").then(settings => { state.settings = settings; applyTheme(settings.ui_theme || stored); renderListener(); }).catch(() => {});
+  api("/api/settings").then(settings => { state.settings = settings; applyTheme(settings.ui_theme || stored); renderGatewaySetup(); }).catch(() => {});
 })();
 initResizers();
+state.railPrefs = readRailPreferences();
+applyRailVisibility();
 loadAll(false);
 setInterval(loadStatus, 15000);
 window.addEventListener("resize", () => {});

@@ -124,7 +124,9 @@ init:
 run:
     #!/usr/bin/env bash
     set -a
-    source .env
+    if [[ -f .env ]]; then
+        source .env
+    fi
     set +a
     go run ./cmd/gateway -config {{config}}
 
