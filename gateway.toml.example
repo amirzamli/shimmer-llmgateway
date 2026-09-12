@@ -1,112 +1,41 @@
-# Shimmer LLM Gateway configuration.
-#
-# Copy this file to gateway.toml and edit it. API keys never live here — they
-# come from the api_key_env environment variable or the UI-managed secrets file
-# (<store>.secrets.json, encrypted at rest).
+# Copy this file to gateway.toml and edit as needed.
+# Provider keys can be set as environment variables or added from the dashboard.
 
-# Each address is bound to its own socket, so the gateway can serve localhost
-# and a Tailscale address side by side. Allowed hosts: loopback (127.0.0.0/8,
-# ::1, localhost), CGNAT (100.64.0.0/10 — the Tailscale default range), and
-# ULA (fc00::/7). A wildcard (0.0.0.0) is refused; a plain RFC 1918 LAN
-# address (192.168.x.x) is refused too — it would expose the unauthenticated
-# API to every host on the local network. `listen` (a single address) is still
-# accepted for backwards compatibility; set one or the other, not both.
-listen_addrs = ["127.0.0.1:8787", "100.64.0.1:8787"]
-store  = "gateway.db"
-# Payload retention: after this many days a session's chat payloads are
-# removed and only usage statistics remain. Default when unset is 7;
-# <= 0 disables purging entirely.
+# Built-in providers and their API-key environment variables:
+# openai       = OPENAI_API_KEY
+# anthropic    = ANTHROPIC_API_KEY
+# ollama       = (none)
+# groq         = GROQ_API_KEY
+# vllm         = VLLM_API_KEY
+# lite_llm     = LITELLM_API_KEY
+# openrouter   = OPENROUTER_API_KEY
+# deepseek     = DEEPSEEK_API_KEY
+# gemini       = GEMINI_API_KEY
+# mistral      = MISTRAL_API_KEY
+# kimi         = MOONSHOT_API_KEY
+# zai          = ZAI_API_KEY
+# opencode_*   = OPENCODE_API_KEY
+# commandcode  = COMMANDCODE_API_KEY
+
+# The gateway only listens on addresses listed in listen_addrs.
+listen_addrs = ["127.0.0.1:8787"]
+store = "gateway.db"
+# Remove chat payloads after 7 days; keep usage statistics.
 retention_days = 7
 
 [settings]
-default_alias = "openai"        # used when a client sends no alias prefix
-request_plugins = []            # global defaults, overridable per instance
+default_alias = "mistral"
+request_plugins = []
 response_plugins = []
-log_payloads = false            # opt-in: log redacted payloads to the console
-# Dashboard color scheme remembered by the header theme toggle ("dark"/"light");
-# written back when you toggle. Unset = dark.
-# ui_theme = "dark"
+log_payloads = false
 
-[providers.openai]              # TEMPLATE: the dropdown entry
-base_url = "https://api.openai.com/v1"
-api_key_env = "OPENAI_API_KEY"  # default for the first instance
-models = ["gpt-4o", "gpt-4o-mini"]
-# Optional per-model advertised reasoning levels (model_reasoning_options):
-# gates instance `model_reasoning` values and drives the UI dropdown. Built-ins
-# seed this where known (e.g. deepseek-v4-flash: low/high/max); models without
-# metadata accept default/none/minimal/low/medium/high/xhigh/max.
-# model_reasoning_options = { "gpt-4o" = ["low", "medium", "high"] }
+[providers.mistral]
+base_url = "https://api.mistral.ai/v1"
+api_key_env = "MISTRAL_API_KEY"
+models = ["mistral-large-latest", "mistral-small-latest"]
 
-[providers.ollama]              # keyless local provider
-base_url = "http://localhost:11434/v1"
-api_key_env = ""
-models = ["llama3.1"]
-
-# Template-level `plugins` (optional) is a materialization seed only: when an
-# instance of this template has no `plugins` of its own, a write-back records
-# a copy of this list as the instance's `plugins` line, so the file states the
-# default explicitly. It is never consulted at runtime — an instance with no
-# `plugins` line resolves from the global settings (empty by default = OFF).
-[providers.openrouter]           # OpenRouter reasoning models (e.g. stealth/ox-alpha)
-base_url = "https://openrouter.ai/api/v1"
-api_key_env = "OPENROUTER_API_KEY"
-models = ["openrouter/auto"]
-
-# [providers.opencode_go] mirrors the built-in template: Console Go's full
-# model catalog, plus the session_header the upstream requires — the gateway
-# synthesises the request's session id into x-opencode-session on every call
-# (without it Console Go answers HTTP 400 MissingSessionID). identity_headers
-# are the coding-agent identity headers the upstream expects on every call;
-# the gateway sends these values (a client-supplied value for the same header
-# wins). Every outbound request also carries an explicit User-Agent — the
-# client's UA when present, else "shimmer-gateway/1.0". The default style is
-# openai (POST <base>/chat/completions); model_styles overrides the models
-# that speak the Responses API (POST <base>/responses — muse contributor
-# models 500 on /chat/completions but work on /responses) or the Anthropic
-# Messages API (POST <base>/messages — minimax/qwen models).
-[providers.opencode_go]
-base_url = "https://opencode.ai/zen/go/v1"
-api_key_env = "OPENCODE_API_KEY"
-models = [
-  "grok-4.6", "gpt-5.6-luna",
-  "glm-5.3-flash", "glm-5.3", "glm-5.2", "glm-5.1",
-  "kimi-k3", "kimi-k2.7-code", "kimi-k2.6", "longcat-2.0",
-  "deepseek-flash", "deepseek-v4-pro", "deepseek-v4-flash",
-  "deepseek-v4-flash-vision-exp",
-  "mimo-v2.5", "mimo-v2.5-pro",
-  "minimax-m3", "minimax-m2.7", "minimax-m2.5",
-  "muse-spark-1.3-contributor", "muse-spark-1.2-contributor",
-  "qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus",
-  "hy4-preview", "hy3",
-]
-session_header = "x-opencode-session"
-identity_headers = { "X-Opencode-Client" = "cli", "X-Opencode-Project" = "global" }
-model_styles = {
-  "grok-4.6" = "responses",
-  "gpt-5.6-luna" = "responses",
-  "muse-spark-1.3-contributor" = "responses",
-  "muse-spark-1.2-contributor" = "responses",
-  "minimax-m3" = "anthropic",
-  "minimax-m2.7" = "anthropic",
-  "minimax-m2.5" = "anthropic",
-  "qwen3.8-max" = "anthropic",
-  "qwen3.8-flash" = "anthropic",
-  "qwen3.7-max" = "anthropic",
-  "qwen3.7-plus" = "anthropic",
-  "qwen3.6-plus" = "anthropic",
-}
-# fill_reasoning_content (request-side) prevents Console Go's thinking-mode
-# 400: "The `reasoning_content` in the thinking mode must be passed back to
-# the API." deepseek thinking models on this endpoint require every assistant
-# message with tool_calls to carry reasoning_content once the conversation has
-# reasoned; agent clients occasionally replay a pure tool-call turn without
-# it, and the upstream rejects the request. The plugin backfills an empty
-# reasoning_content on assistant messages that lack it (empty is accepted).
-plugins = ["fill_reasoning_content"]
-
-[[instances]]                   # INSTANCE 1 of openai — alias defaults to "openai"
-alias = "openai"
-template = "openai"
-api_key_env = "OPENAI_API_KEY"
-# priority = 1                  # lower = higher routing priority for unprefixed
-                                # model names (e.g. "small"); unset = file order
+# Provider templates are built in. Define a [providers.<name>] section only
+# when you want to override a provider's defaults.
+[[instances]]
+alias = "mistral"
+template = "mistral"
