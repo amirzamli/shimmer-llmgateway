@@ -20,7 +20,6 @@ Cost estimates are approximate and may vary between providers.
 ## Setup
 [![Go 1.26](https://img.shields.io/badge/go-1.26-00ADD8?logo=go&logoColor=white)](https://go.dev) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Utilizing the justfile is optional, but my personal preference for collecting the useful commands in one place.
 
 Clone the repository:
 
@@ -51,6 +50,7 @@ on first run; set and keep the displayed key if you want UI-managed keys to
 survive restarts.
 
 ### Without `just`
+Utilizing the justfile is optional, it's my personal preference for collecting useful commands in one place.
 
 ```bash
 cp gateway.toml.example gateway.toml
