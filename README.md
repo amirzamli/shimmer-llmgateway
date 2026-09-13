@@ -18,7 +18,7 @@ Shimmer includes a few tools to make this easier:
 Cost estimates are approximate and may vary between providers.
 
 ## Setup
-[![Go 1.26](https://img.shields.io/badge/go-1.26-00ADD8?logo=go&logoColor=white)](https://go.dev) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/amirzamli/shimmer-llmgateway/ci.yml?branch=main&label=CI)](https://github.com/amirzamli/shimmer-llmgateway/actions/workflows/ci.yml)  [![Go 1.26](https://img.shields.io/badge/go-1.26-00ADD8?logo=go&logoColor=white)](https://go.dev) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 
 Clone the repository:
