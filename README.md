@@ -49,15 +49,15 @@ export SHIMMER_MASTER_KEY="$(openssl rand -base64 32)"
 on first run; set and keep the displayed key if you want UI-managed keys to
 survive restarts.
 
-### Without `just`
-Utilizing the justfile is optional, it's my personal preference for collecting useful commands in one place.
+### Running the gateway (without `just`)
 
 ```bash
 cp gateway.toml.example gateway.toml
 go run ./cmd/gateway -config gateway.toml
 ```
 
-### With `just`
+### Running the gateway with `just`
+Utilizing the justfile is optional, it's my personal preference for collecting useful commands in one place.
 
 ```bash
 just init
