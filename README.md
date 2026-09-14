@@ -91,58 +91,29 @@ Configure providers and instances in `gateway.toml` or from the dashboard.
 [`gateway.toml.example`](gateway.toml.example) contains a minimal configuration
 you can use as a starting point.
 
-## ChatGPT Plus sign-in (OAuth)
+## LLM API providers
 
-The built-in `chatgpt` template routes to a ChatGPT Plus/Pro account through the
-same device-code sign-in flow the OpenCode agent uses. No API key is involved,
-and the credential never leaves the gateway. Adding an instance of this
-template from the dashboard lets you approve access from any browser and
-stores the resulting credential encrypted next to your API keys.
+Built-in templates are available for `openai`, `anthropic`, `ollama`, `groq`,
+`vllm`, `lite_llm`, `openrouter`, `deepseek`, `gemini`, `mistral`, `kimi`,
+`zai`, `opencode_zen`, `opencode_go`, and `commandcode`.
 
-Prerequisites:
+For your own endpoint, use `custom_openai` for an OpenAI-compatible Chat
+Completions API or `custom_anthropic` for an Anthropic Messages API.
 
-- The gateway must have outbound HTTPS access to the OpenAI device endpoints.
-- The dashboard browser must be able to open `https://auth.openai.com/codex/device`.
-- OAuth lifecycle requests are limited to loopback or explicitly configured
-  listener addresses, just like the other admin routes.
+## ChatGPT Plus/Pro OAuth
 
-Flow:
+The `chatgpt` template connects a ChatGPT Plus/Pro account with device-code
+OAuth. Add an instance from the dashboard and choose **Sign in with code**; no
+API key is required. Credentials are stored encrypted and refreshed
+automatically. Available models depend on the account and provider rollout.
 
-1. Dashboard → **+ Add instance** → template **chatgpt** → **Add instance**.
-2. Expand the instance → **Sign in with code**. The dashboard opens the
-   OpenAI device page in a new tab and displays a short code.
-3. Enter the code at the device page, log in with your ChatGPT Plus/Pro account,
-   and approve the access request.
-4. The gateway polls the provider and completes the token exchange server-side.
-5. The instance shows **connected** with the masked account id and the
-   access-token expiry. The alias editor uses the built-in Codex model list,
-   while availability still depends on the account and rollout. Route a
-   currently supported model as `chatgpt/<model-id>`.
+## API compatibility
 
-What happens afterwards:
-
-- **Refresh**: access tokens are refreshed automatically with an expiry skew;
-  rotated tokens are persisted in the same encrypted secrets file as API keys
-  (`<store>.secrets.json`, mode 0600). A failed refresh surfaces as a
-  sanitized authentication error — token material never appears in URLs, JSON,
-  logs, or the dashboard.
-- **Disconnect**: the dashboard's **Disconnect** button (or deleting the
-  instance) drops the stored credential and retires any in-flight sign-in;
-  the instance itself stays configured and can be reconnected anytime. There
-  is no separate provider-side revocation call.
-- **API keys**: OAuth instances never take an API key — the key field is
-  hidden for the `chatgpt` template, and the ordinary API-key providers keep
-  their existing forms and behavior unchanged.
-
-Routes used by the flow (behind the admin host/origin guard; lifecycle routes
-also require a loopback TCP source or an explicitly configured listener):
-
-| Method | Route | Purpose |
-| --- | --- | --- |
-| POST | `/api/instances/{alias}/oauth/device/start` | start device-code sign-in and return the OpenAI device URL plus user code |
-| GET | `/api/instances/{alias}/oauth/device/status` | poll device-code approval and complete the server-side token exchange |
-| GET | `/api/instances/{alias}/oauth/status` | connection state: masked account id and token expiry, or `connected: false` |
-| DELETE | `/api/instances/{alias}/oauth` | disconnect (idempotent; credential only, the instance stays) |
+Clients use Shimmer's OpenAI-compatible `/v1` interface. Provider templates can
+target OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages APIs;
+Shimmer translates between these formats where needed. Add instances from the
+dashboard or configure them in `gateway.toml`; see
+[`gateway.toml.example`](gateway.toml.example) for the configuration shape.
 
 ## MCP inspector (optional)
 
