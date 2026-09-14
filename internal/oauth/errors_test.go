@@ -37,7 +37,7 @@ func TestRedact(t *testing.T) {
 	if Redact(nil) != nil {
 		t.Error("Redact(nil) != nil")
 	}
-	safe := errf("state.consume", ErrStateUsed, "state was already consumed")
+	safe := errf("token.refresh", ErrTokenEndpoint, "token endpoint request failed")
 	if Redact(safe) != safe {
 		t.Error("Redact returned a different error for an already-safe *Error")
 	}

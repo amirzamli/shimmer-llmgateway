@@ -59,22 +59,13 @@ type providerError struct {
 	Code string `json:"error"`
 }
 
-// Exchange performs the authorization-code exchange at the token endpoint
-// (grant_type=authorization_code) using the verified OpenCode v1.18.30
-// request shape: form-encoded code, redirect_uri, client_id, and the PKCE
-// code_verifier. client may be nil to use http.DefaultClient.
+// Exchange performs the device authorization-code exchange at the token
+// endpoint (grant_type=authorization_code) using the verified OpenCode
+// request shape: form-encoded code, the device redirect URI, client_id, and
+// the PKCE code_verifier. client may be nil to use http.DefaultClient.
 func (c Config) Exchange(ctx context.Context, client *http.Client, code, verifier string) (*Token, error) {
 	c = c.WithDefaults()
-	return c.exchange(ctx, client, code, verifier, c.RedirectURI)
-}
-
-// ExchangeWithRedirect performs the same authorization-code exchange as
-// Exchange but uses an explicit redirect URI. OpenCode's device flow returns
-// an authorization code bound to auth.openai.com's device callback rather than
-// the browser flow's localhost callback.
-func (c Config) ExchangeWithRedirect(ctx context.Context, client *http.Client, code, verifier, redirectURI string) (*Token, error) {
-	c = c.WithDefaults()
-	return c.exchange(ctx, client, code, verifier, redirectURI)
+	return c.exchange(ctx, client, code, verifier, c.DeviceRedirectURI())
 }
 
 func (c Config) exchange(ctx context.Context, client *http.Client, code, verifier, redirectURI string) (*Token, error) {

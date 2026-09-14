@@ -25,7 +25,6 @@ import (
 	"github.com/amirzamli/shimmer-llmgateway/internal/api"
 	"github.com/amirzamli/shimmer-llmgateway/internal/config"
 	"github.com/amirzamli/shimmer-llmgateway/internal/logging"
-	"github.com/amirzamli/shimmer-llmgateway/internal/netutil"
 	"github.com/amirzamli/shimmer-llmgateway/internal/oauth"
 	"github.com/amirzamli/shimmer-llmgateway/internal/plugins"
 	"github.com/amirzamli/shimmer-llmgateway/internal/pricing"
@@ -33,14 +32,6 @@ import (
 	"github.com/amirzamli/shimmer-llmgateway/internal/store"
 	"github.com/amirzamli/shimmer-llmgateway/web"
 )
-
-// OAuthCallbackAddr is the fixed loopback listen address for the ChatGPT
-// OAuth callback. The verified OpenCode contract redirects the browser to
-// http://localhost:1455/auth/callback, so the gateway binds this address (in
-// addition to the configured listeners) whenever it is started; the sign-in
-// flow cannot complete without it. main treats a bind failure here like any
-// other listen failure.
-const OAuthCallbackAddr = "localhost:1455"
 
 // endpoint is the gateway-facing capture surface path recorded on every row.
 const endpoint = "/v1/chat/completions"
@@ -83,7 +74,7 @@ type Server struct {
 	// key resolution is env-var-then-file.
 	secrets *secrets.Store
 	// oauth resolves and refreshes the encrypted OAuth credentials used by
-	// OAuth-marked templates (the ChatGPT Plus browser flow).
+	// OAuth-marked templates (the ChatGPT Plus device flow).
 	oauth *OAuthResolver
 	// api is the §6.2 REST handler set mounted at /api/.
 	api *api.API
@@ -147,7 +138,7 @@ func New(cfg *config.ConfigManager, st *store.Store, logger *logging.Logger, con
 		// The OAuth resolver shares the outbound client (redirect policy
 		// included) and persists rotated tokens through the secrets store.
 		oauth: NewOAuthResolver(sec, client, oauth.Config{}, life),
-		// The API uses the same no-redirect client for the sign-in code
+		// The API uses the same no-redirect client for the device sign-in code
 		// exchange (a redirecting token endpoint must not bounce the code
 		// and PKCE verifier elsewhere).
 		api:            apiHandler,
@@ -188,43 +179,6 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/", s.guard(s.api.Handler()))
 	mux.Handle("GET /{$}", s.guard(http.HandlerFunc(s.handleUI)))
 	return s.accessLog(mux)
-}
-
-// OAuthCallbackHandler returns the handler for the dedicated localhost:1455
-// listener. It is intentionally separate from Handler so configured remote or
-// dashboard listeners never expose the credential-bearing callback endpoint.
-func (s *Server) OAuthCallbackHandler() http.Handler {
-	mux := http.NewServeMux()
-	mux.Handle("GET /auth/callback", s.oauthCallbackGuard(http.HandlerFunc(s.api.HandleOAuthCallback)))
-	return s.accessLog(mux)
-}
-
-// oauthCallbackGuard requires both a loopback Host and a loopback TCP source.
-// The listener is already bound to localhost in production, but checking both
-// properties here protects alternate listener wiring and makes proxying a
-// callback from a remote interface impossible.
-func (s *Server) oauthCallbackGuard(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host := hostOnly(r.Host)
-		if host == "" || !netutil.IsLoopbackHost(host) {
-			s.writeError(w, http.StatusForbidden, "FORBIDDEN", "oauth callback requires a loopback Host")
-			return
-		}
-		if !loopbackRemoteAddr(r.RemoteAddr) {
-			s.writeError(w, http.StatusForbidden, "FORBIDDEN", "oauth callback requires a loopback source")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-func loopbackRemoteAddr(remote string) bool {
-	host, _, err := net.SplitHostPort(strings.TrimSpace(remote))
-	if err != nil {
-		return false
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }
 
 // statusRecorder wraps an http.ResponseWriter to capture the response status

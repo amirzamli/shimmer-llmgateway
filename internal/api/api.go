@@ -62,15 +62,13 @@ type API struct {
 	// quota fetches per-provider account quota/balance for the UI with its
 	// own getter-based TTL cache (internal/quota; invalidated on PATCH/DELETE).
 	quota *quota.Fetcher
-	// oauthCfg pins the ChatGPT OAuth protocol (endpoints, client id, and the
-	// browser/device callback contracts); the zero value uses the verified
-	// OpenCode defaults. oauthClient is the outbound client used by the
-	// authorization-code and device exchanges (the gateway's no-redirect
-	// client; nil falls back to http.DefaultClient). oauthStates and
-	// oauthDevices hold short-lived, server-side, instance-bound transactions.
+	// oauthCfg pins the ChatGPT OAuth device protocol (endpoints and client id);
+	// the zero value uses the verified OpenCode defaults. oauthClient is the
+	// outbound client used by the device and token exchanges (the gateway's
+	// no-redirect client; nil falls back to http.DefaultClient). oauthDevices
+	// holds short-lived, server-side, instance-bound transactions.
 	oauthCfg     oauth.Config
 	oauthClient  *http.Client
-	oauthStates  *oauth.StateStore
 	oauthDevices *oauth.DeviceStore
 	oauthLife    *oauth.Lifecycle
 	// oauthDevicePollMu serializes device-token polls so two dashboard tabs
@@ -92,7 +90,6 @@ func New(mgr *config.ConfigManager, configPath string, st *store.Store, sec *sec
 		quota:        quota.New(mgr.Get, sec),
 		oauthCfg:     oauth.Config{},
 		oauthClient:  oauthClient,
-		oauthStates:  oauth.NewStateStore(),
 		oauthDevices: oauth.NewDeviceStore(),
 		oauthLife:    oauth.NewLifecycle(),
 	}
@@ -132,11 +129,8 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/instances/{alias}", a.handleInstancePatch)
 	mux.HandleFunc("DELETE /api/instances/{alias}", a.handleInstanceDelete)
 	mux.HandleFunc("GET /api/instances/{alias}/models", a.handleInstanceModels)
-	// ChatGPT OAuth account surface: start either the browser redirect or the
-	// device-code sign-in, inspect the connection state (masked), and
-	// disconnect. The browser callback is served only by the gateway's
-	// dedicated loopback listener, not by this router.
-	mux.HandleFunc("POST /api/instances/{alias}/oauth/start", a.handleOAuthStart)
+	// ChatGPT OAuth account surface: start device-code sign-in, inspect the
+	// connection state (masked), and disconnect.
 	mux.HandleFunc("POST /api/instances/{alias}/oauth/device/start", a.handleOAuthDeviceStart)
 	mux.HandleFunc("GET /api/instances/{alias}/oauth/device/status", a.handleOAuthDeviceStatus)
 	mux.HandleFunc("GET /api/instances/{alias}/oauth/status", a.handleOAuthStatus)

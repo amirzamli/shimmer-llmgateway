@@ -9,16 +9,6 @@ import (
 // codes, verifiers, state values, or response bodies. Use errors.Is against
 // these when branching on failure kind.
 var (
-	// ErrInvalidState reports a missing, unknown, or structurally invalid
-	// authorization state (or a nil/empty state argument).
-	ErrInvalidState = errors.New("invalid oauth state")
-	// ErrStateExpired reports a state consumed after its expiry.
-	ErrStateExpired = errors.New("oauth state expired")
-	// ErrStateUsed reports a replayed (already consumed) state.
-	ErrStateUsed = errors.New("oauth state already used")
-	// ErrStateInstanceMismatch reports a state consumed for a different
-	// gateway instance than it was generated for.
-	ErrStateInstanceMismatch = errors.New("oauth state bound to a different instance")
 	// ErrInvalidVerifier reports a PKCE verifier outside the RFC 7636
 	// alphabet or length range.
 	ErrInvalidVerifier = errors.New("invalid PKCE verifier")

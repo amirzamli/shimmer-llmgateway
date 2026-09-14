@@ -69,7 +69,7 @@ func NewOAuthResolver(sec *secrets.Store, client *http.Client, cfg oauth.Config,
 	}
 }
 
-// SetLifecycle shares lifecycle fencing with the API callback path. It must be
+// SetLifecycle shares lifecycle fencing with the API device path. It must be
 // called before the resolver is used.
 func (r *OAuthResolver) SetLifecycle(life *oauth.Lifecycle) {
 	if life != nil {

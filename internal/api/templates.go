@@ -17,7 +17,7 @@ type templateView struct {
 	Style     string   `json:"style"`
 	APIKeyEnv string   `json:"api_key_env"`
 	Models    []string `json:"models"`
-	// OAuth marks the template as authenticated by the browser sign-in flow
+	// OAuth marks the template as authenticated by the device sign-in flow
 	// (the built-in chatgpt template) instead of an API key. The dashboard
 	// uses it to offer the ChatGPT account surface and hide the key field;
 	// ordinary API-key templates leave it unset.

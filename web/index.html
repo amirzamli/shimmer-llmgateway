@@ -438,19 +438,6 @@
   code, pre { font-family: inherit; }
   .instance-footer { display: flex; align-items: center; gap: 7px; margin-top: 15px; padding-top: 11px; border-top: 1px solid var(--border); }
   .oauth-status { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 11px; line-height: 1.5; color: var(--text2); }
-  .oauth-remote-setup { margin-bottom: 11px; padding: 10px; border: 1px solid rgba(245,158,11,.35); border-left: 3px solid var(--warn); background: rgba(245,158,11,.07); }
-  .oauth-remote-head { display: flex; align-items: center; gap: 7px; margin-bottom: 6px; }
-  .oauth-remote-head strong { font-size: 11px; }
-  .oauth-remote-setup p { margin: 0 0 8px; color: var(--text2); font-size: 11px; line-height: 1.45; }
-  .oauth-tunnel-input { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
-  .oauth-tunnel-input label { color: var(--muted); font-size: 10px; white-space: nowrap; }
-  .oauth-tunnel-input input { width: min(240px, 100%); min-width: 160px; min-height: 26px; padding: 4px 7px; }
-  .oauth-tunnel-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
-  .oauth-tunnel-card { min-width: 0; padding: 8px; border: 1px solid var(--border); background: var(--elevated); }
-  .oauth-tunnel-card h4 { margin: 0 0 5px; color: var(--muted); font-size: 10px; font-weight: 700; }
-  .oauth-tunnel-card pre { margin: 0 0 6px; padding: 6px; overflow: auto; border: 1px solid var(--border); background: var(--bg); color: var(--text2); font-size: 10px; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
-  .oauth-tunnel-card .setup-row { justify-content: flex-end; margin-bottom: 0; }
-  .oauth-remote-note { margin: 8px 0 0 !important; color: var(--dim) !important; font-size: 10px !important; }
   .oauth-device-panel { margin-bottom: 10px; padding: 10px; border: 1px solid rgba(59,130,246,.35); border-left: 3px solid var(--accent); background: rgba(59,130,246,.07); }
   .oauth-device-head { display: flex; align-items: center; gap: 7px; margin-bottom: 7px; }
   .oauth-device-head strong { font-size: 11px; }
@@ -596,7 +583,6 @@
     .instance-summary { flex-wrap: wrap; }
     .instance-actions { margin-left: 0; }
     .mcp-grid { grid-template-columns: 1fr; }
-    .oauth-tunnel-grid { grid-template-columns: 1fr; }
     .connection-grid.compact { grid-template-columns: max-content minmax(0,1fr); }
   }
 </style>
@@ -719,7 +705,7 @@ const state = {
   sessions: [], sessionId: null, settings: null, status: null, usageRange: "30d", activeDetail: 0,
   railPrefs: { sessions: null, usage: null }, sessionRailData: "loading", usageRailData: "loading",
   models: Object.create(null), modelMeta: Object.create(null), searchTimer: null, loadToken: 0, previewToken: 0,
-  oauthPollers: Object.create(null), oauthDevicePollers: Object.create(null)
+  oauthDevicePollers: Object.create(null)
 };
 
 async function api(path, options) {
@@ -895,40 +881,6 @@ function isLoopbackHost(host) {
   const value = String(host || "").replace(/^\[|\]$/g, "").toLowerCase();
   return value === "localhost" || value === "::1" || value === "0:0:0:0:0:0:0:1" || value === "127.0.0.1" || value.startsWith("127.");
 }
-function oauthTunnelHost() {
-  const host = String(location.hostname || "").replace(/^\[|\]$/g, "");
-  return host || "gateway-host";
-}
-function oauthTunnelUser(alias) {
-  const input = $("oauth-ssh-user-" + domId(alias));
-  if (input) return input.value.trim();
-  try { return localStorage.getItem("shimmer.oauthSshUser") || ""; } catch { return ""; }
-}
-function oauthTunnelCommand(alias, windows) {
-  const host = oauthTunnelHost();
-  const targetHost = host.includes(":") ? "[" + host + "]" : host;
-  const user = oauthTunnelUser(alias) || "YOUR_SSH_USER";
-  return `${windows ? "ssh.exe" : "ssh"} -N -L 1455:127.0.0.1:1455 ${user}@${targetHost}`;
-}
-function refreshOauthTunnelCommands(alias) {
-  const id = domId(alias), ready = !!oauthTunnelUser(alias);
-  ["linux", "macos", "windows"].forEach(platform => {
-    const node = $("oauth-tunnel-command-" + id + "-" + platform);
-    if (node) node.textContent = oauthTunnelCommand(alias, platform === "windows");
-    const button = $("oauth-tunnel-copy-" + id + "-" + platform);
-    if (button) button.disabled = !ready;
-  });
-}
-function oauthRemoteSetupHtml(alias) {
-  if (isLoopbackHost(location.hostname)) return "";
-  const id = domId(alias), host = oauthTunnelHost();
-  let user = "";
-  try { user = localStorage.getItem("shimmer.oauthSshUser") || ""; } catch {}
-  const ready = !!user;
-  const command = platform => oauthTunnelCommand(alias, platform === "windows");
-  const card = (platform, label) => `<div class="oauth-tunnel-card"><h4>${label}</h4><pre id="oauth-tunnel-command-${id}-${platform}" data-oauth-tunnel-command data-alias="${esc(alias)}" data-platform="${platform}">${esc(command(platform))}</pre><div class="setup-row"><button id="oauth-tunnel-copy-${id}-${platform}" class="ghost btn-sm" type="button" data-action="copy-oauth-tunnel" data-alias="${esc(alias)}" data-platform="${platform}"${ready ? "" : " disabled"}>Copy command</button></div></div>`;
-  return `<div id="oauth-remote-setup-${id}" class="oauth-remote-setup"><div class="oauth-remote-head"><span class="badge warn">Browser sign-in</span><strong>Remote callback prerequisite</strong></div><p>This dashboard is open from <code>${esc(host)}</code>. The browser redirect method needs a tunnel from the gateway to this browser:</p><div class="oauth-tunnel-input"><label for="oauth-ssh-user-${id}">Gateway SSH username</label><input id="oauth-ssh-user-${id}" data-oauth-tunnel-user data-alias="${esc(alias)}" value="${esc(user)}" placeholder="e.g. alice" autocomplete="username"></div><div class="oauth-tunnel-grid">${card("linux", "Linux")}${card("macos", "macOS")}${card("windows", "Windows PowerShell")}</div><p class="oauth-remote-note">Keep the tunnel terminal open for browser sign-in. Device-code sign-in below does not require this tunnel.</p></div>`;
-}
 function mcpHost() {
   const addresses = setupAddresses();
   const selected = addresses.find(address => !isLoopbackHost(addressHost(address))) || addresses[0];
@@ -1038,20 +990,6 @@ async function copyText(value, button) {
     setTimeout(() => { button.textContent = previous; }, 1200);
   }
 }
-document.addEventListener("input", event => {
-  const input = event.target.closest("[data-oauth-tunnel-user]");
-  if (!input) return;
-  const user = input.value.trim();
-  try {
-    if (user) localStorage.setItem("shimmer.oauthSshUser", user);
-    else localStorage.removeItem("shimmer.oauthSshUser");
-  } catch {}
-  document.querySelectorAll("[data-oauth-tunnel-user]").forEach(other => {
-    if (other !== input) other.value = user;
-    refreshOauthTunnelCommands(other.dataset.alias);
-  });
-  refreshOauthTunnelCommands(input.dataset.alias);
-});
 async function loadStatus() {
   try {
     await api("/healthz");
@@ -1187,13 +1125,13 @@ function isOAuthInstance(instance) {
 // oauthAccountHtml renders the ChatGPT account section of an OAuth instance:
 // connection state, masked account id, and token expiry come from
 // GET /api/instances/{alias}/oauth/status and are filled in asynchronously by
-// oauthStatus; the browser/device sign-in and disconnect actions call the
-// existing OAuth routes.
+// oauthStatus; device-code sign-in and disconnect call the existing OAuth
+// routes.
 // Token material never reaches this surface — only the masked id and expiry.
 function oauthAccountHtml(instance) {
   if (!isOAuthInstance(instance)) return "";
   const id = domId(instance.alias);
-  return `<div class="instance-section">${oauthRemoteSetupHtml(instance.alias)}<div class="instance-section-head"><span class="section-title">ChatGPT account</span><span class="spacer"></span><button class="ghost btn-sm" type="button" data-action="oauth-refresh" data-alias="${esc(instance.alias)}">Refresh</button><button id="oauth-start-${id}" class="outline btn-sm" type="button" data-action="oauth-start" data-alias="${esc(instance.alias)}">Browser sign-in</button><button id="oauth-device-start-${id}" class="outline btn-sm" type="button" data-action="oauth-device-start" data-alias="${esc(instance.alias)}">Sign in with code</button><button class="danger-ghost btn-sm" type="button" data-action="oauth-disconnect" data-alias="${esc(instance.alias)}">Disconnect</button></div><div id="oauth-device-${id}" class="oauth-device-panel hidden" aria-live="polite"></div><div id="oauth-status-${id}" class="oauth-status">Checking connection…</div></div>`;
+  return `<div class="instance-section"><div class="instance-section-head"><span class="section-title">ChatGPT account</span><span class="spacer"></span><button class="ghost btn-sm" type="button" data-action="oauth-refresh" data-alias="${esc(instance.alias)}">Refresh</button><button id="oauth-device-start-${id}" class="outline btn-sm" type="button" data-action="oauth-device-start" data-alias="${esc(instance.alias)}">Sign in with code</button><button class="danger-ghost btn-sm" type="button" data-action="oauth-disconnect" data-alias="${esc(instance.alias)}">Disconnect</button></div><div id="oauth-device-${id}" class="oauth-device-panel hidden" aria-live="polite"></div><div id="oauth-status-${id}" class="oauth-status">Checking connection…</div></div>`;
 }
 function oauthStatusNode(alias) { return $("oauth-status-" + domId(alias)); }
 function fmtExpiry(value) {
@@ -1207,13 +1145,11 @@ function fmtExpiry(value) {
   return "access token expires in " + hours + " h" + (minutes ? " " + minutes + " min" : "");
 }
 function setOauthConnectedUI(alias, connected) {
-  const id = domId(alias), setup = $("oauth-remote-setup-" + id), start = $("oauth-start-" + id), deviceStart = $("oauth-device-start-" + id), device = $("oauth-device-" + id);
-  if (setup) setup.classList.toggle("hidden", connected);
-  [start, deviceStart].forEach(button => {
-    if (!button) return;
-    button.classList.toggle("hidden", connected);
-    button.setAttribute("aria-hidden", String(connected));
-  });
+  const id = domId(alias), deviceStart = $("oauth-device-start-" + id), device = $("oauth-device-" + id);
+  if (deviceStart) {
+    deviceStart.classList.toggle("hidden", connected);
+    deviceStart.setAttribute("aria-hidden", String(connected));
+  }
   if (device) device.classList.add("hidden");
   if (connected) oauthDevicePollCancel(alias);
 }
@@ -1240,48 +1176,6 @@ async function oauthStatus(alias) {
     return null;
   }
 }
-function oauthPollCancel(alias) {
-  const timer = state.oauthPollers[alias];
-  if (timer) { clearTimeout(timer); delete state.oauthPollers[alias]; }
-}
-// oauthStart calls the guarded POST /api/instances/{alias}/oauth/start, opens
-// the returned authorization URL in a new tab, and polls the status route
-// until the browser flow completes (or the transaction expires) so the row
-// flips to connected without a reload.
-async function oauthStart(alias) {
-  oauthPollCancel(alias);
-  oauthDevicePollCancel(alias);
-  const device = oauthDeviceNode(alias);
-  if (device) device.classList.add("hidden");
-  // Open synchronously from the click handler so browsers do not classify the
-  // eventual navigation as a blocked popup after the start request resolves.
-  // Do not pass noopener/noreferrer here: browsers may return null for those
-  // features even when the blank tab was opened. Detach the opener explicitly
-  // while the new tab is still about:blank, before navigating it.
-  const popup = window.open("about:blank", "_blank");
-  if (popup) popup.opener = null;
-  try {
-    const data = await api("/api/instances/" + encodeURIComponent(alias) + "/oauth/start", { method: "POST" });
-    if (!data || !data.authorization_url) throw new Error("the gateway did not return an authorization URL");
-    if (popup && !popup.closed) {
-      popup.location.href = data.authorization_url;
-    } else {
-      throw new Error("the sign-in popup was blocked; allow popups for this dashboard and try again");
-    }
-    toast("ChatGPT sign-in opened in a new tab. Sign in there, then close that tab.", "success");
-    const until = Date.now() + Math.max(60, Number(data.expires_in || 600)) * 1000;
-    const poll = () => {
-      oauthStatus(alias).then(status => {
-        if (status && status.connected) { toast(alias + " is connected", "success"); return; }
-        if (Date.now() < until) state.oauthPollers[alias] = setTimeout(poll, 3000);
-      });
-    };
-    state.oauthPollers[alias] = setTimeout(poll, 3000);
-  } catch (error) {
-    if (popup && !popup.closed) popup.close();
-    toast(error.message, "error");
-  }
-}
 function oauthDeviceNode(alias) { return $("oauth-device-" + domId(alias)); }
 function oauthDevicePollCancel(alias) {
   const timer = state.oauthDevicePollers[alias];
@@ -1292,7 +1186,7 @@ function renderOauthDevicePending(alias, data) {
   if (!node) return;
   node.classList.remove("hidden");
   const wait = Math.max(1, Number(data.interval || 5));
-  node.innerHTML = `<div class="oauth-device-head"><span class="badge warn">Device code</span><strong>Enter this code at OpenAI</strong></div><p>Open the device page, enter the code below, and approve access. This method does not use the localhost callback tunnel.</p><div class="oauth-device-code-row"><code class="oauth-device-code">${esc(data.user_code)}</code><button class="ghost btn-sm" type="button" data-action="copy-oauth-code" data-code="${esc(data.user_code)}">Copy code</button></div><div class="oauth-device-actions"><a class="oauth-device-link" href="${esc(data.authorization_url)}" target="_blank" rel="noopener noreferrer">Open OpenAI device page</a><span class="oauth-device-waiting">Waiting for approval; checking every ${wait}s.</span></div>`;
+  node.innerHTML = `<div class="oauth-device-head"><span class="badge warn">Device code</span><strong>Enter this code at OpenAI</strong></div><p>Open the device page, enter the code below, and approve access. The gateway will finish sign-in automatically.</p><div class="oauth-device-code-row"><code class="oauth-device-code">${esc(data.user_code)}</code><button class="ghost btn-sm" type="button" data-action="copy-oauth-code" data-code="${esc(data.user_code)}">Copy code</button></div><div class="oauth-device-actions"><a class="oauth-device-link" href="${esc(data.authorization_url)}" target="_blank" rel="noopener noreferrer">Open OpenAI device page</a><span class="oauth-device-waiting">Waiting for approval; checking every ${wait}s.</span></div>`;
 }
 function renderOauthDeviceMessage(alias, kind, message) {
   const node = oauthDeviceNode(alias);
@@ -1301,7 +1195,6 @@ function renderOauthDeviceMessage(alias, kind, message) {
   node.innerHTML = `<span class="badge ${kind === "ok" ? "ok" : "warn"}">${kind === "ok" ? "connected" : "device sign-in"}</span> <span class="muted">${esc(message)}</span>`;
 }
 async function oauthDeviceStart(alias) {
-  oauthPollCancel(alias);
   oauthDevicePollCancel(alias);
   const device = oauthDeviceNode(alias);
   if (device) device.classList.add("hidden");
@@ -1345,7 +1238,6 @@ async function oauthDeviceStart(alias) {
 // instance stays configured, and any pending sign-in poll is retired.
 async function oauthDisconnect(alias) {
   if (!window.confirm("Disconnect the ChatGPT account from " + alias + "? The instance stays configured; you can sign in again anytime.")) return;
-  oauthPollCancel(alias);
   oauthDevicePollCancel(alias);
   try {
     await api("/api/instances/" + encodeURIComponent(alias) + "/oauth", { method: "DELETE" });
@@ -1391,13 +1283,13 @@ function updateAddTemplate() {
   $("add-endpoint").value = template.base_url || "";
   $("add-key-hint").textContent = template.api_key_env ? "env: " + template.api_key_env : "";
   const custom = template.name === "custom_openai" || template.name === "custom_anthropic";
-  // OAuth templates (the chatgpt browser sign-in) take no API key and have a
+  // OAuth templates (the chatgpt device sign-in) take no API key and have a
   // fixed endpoint: an override would mint a plain custom template that loses
   // the OAuth marker, so the fields are hidden/disabled instead.
   const oauth = !!template.oauth;
   $("add-endpoint").required = custom && !oauth;
   $("add-endpoint").disabled = oauth;
-  $("add-endpoint-hint").textContent = oauth ? "fixed for the browser sign-in" : (custom ? "required" : "optional override");
+  $("add-endpoint-hint").textContent = oauth ? "fixed for device sign-in" : (custom ? "required" : "optional override");
   $("add-key-field").classList.toggle("hidden", oauth);
   if (oauth) { $("add-key").value = ""; $("add-key-hint").textContent = "sign in with ChatGPT after adding the instance"; }
   $("add-alias").placeholder = custom ? "names the custom provider" : "auto: " + suggestAlias(template.name);
@@ -1841,7 +1733,6 @@ document.addEventListener("click", event => {
     case "close-edit": closeEdit(); break;
     case "save-edit": saveEdit(); break;
     case "copy-setup": { const value = setupCopyText(target.dataset.copy); if (value) copyText(value, target); break; }
-    case "copy-oauth-tunnel": copyText(oauthTunnelCommand(target.dataset.alias, target.dataset.platform === "windows"), target); break;
     case "copy-oauth-code": copyText(target.dataset.code, target); break;
     case "toggle-session-filters": { const filters = $("session-filters"), hidden = filters.classList.toggle("hidden"); target.setAttribute("aria-expanded", String(!hidden)); break; }
     case "search-sessions": loadSessions(false); break;
@@ -1863,7 +1754,6 @@ document.addEventListener("click", event => {
     case "alias-add": addAlias(target.dataset.alias); break;
     case "alias-remove": { const row = target.closest("tr"); if (row) row.remove(); break; }
     case "models-refresh": refreshModels(target.dataset.alias); break;
-    case "oauth-start": oauthStart(target.dataset.alias); break;
     case "oauth-device-start": oauthDeviceStart(target.dataset.alias); break;
     case "oauth-refresh": oauthStatus(target.dataset.alias); break;
     case "oauth-disconnect": oauthDisconnect(target.dataset.alias); break;

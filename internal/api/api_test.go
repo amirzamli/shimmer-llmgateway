@@ -196,7 +196,7 @@ func TestTemplatesListAndCreate(t *testing.T) {
 
 // TestTemplatesListExposesOAuthMarker asserts the dashboard-facing template
 // list carries the oauth marker: the built-in chatgpt template is flagged so
-// the UI can offer the browser sign-in surface and hide the key field, while
+// the UI can offer the device sign-in surface and hide the key field, while
 // ordinary templates stay unmarked.
 func TestTemplatesListExposesOAuthMarker(t *testing.T) {
 	gs, _, _, _ := newAPITest(t, apiTestTOML, testMasterKey)

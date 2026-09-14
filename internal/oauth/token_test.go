@@ -72,7 +72,7 @@ func TestExchangeSuccess(t *testing.T) {
 	wantForm := map[string]string{
 		"grant_type":    "authorization_code",
 		"code":          "the-auth-code",
-		"redirect_uri":  RedirectURI,
+		"redirect_uri":  srv.URL + DeviceRedirectPath,
 		"client_id":     ClientID,
 		"code_verifier": verifier,
 	}
@@ -92,29 +92,6 @@ func TestExchangeSuccess(t *testing.T) {
 	}
 	if !tok.Expired(time.Now().Add(20*time.Minute), 0) {
 		t.Error("token does not report expiry after expires_in")
-	}
-}
-
-func TestExchangeWithRedirectUsesExplicitRedirect(t *testing.T) {
-	var gotForm url.Values
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := r.ParseForm(); err != nil {
-			t.Fatal(err)
-		}
-		gotForm = r.Form
-		w.Write([]byte(tokenBody(nil)))
-	}))
-	defer srv.Close()
-
-	verifier, err := GenerateVerifier()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := (Config{Issuer: srv.URL}).ExchangeWithRedirect(context.Background(), srv.Client(), "device-auth-code", verifier, "https://auth.openai.com/deviceauth/callback"); err != nil {
-		t.Fatalf("ExchangeWithRedirect: %v", err)
-	}
-	if got := gotForm.Get("redirect_uri"); got != "https://auth.openai.com/deviceauth/callback" {
-		t.Errorf("redirect_uri = %q", got)
 	}
 }
 

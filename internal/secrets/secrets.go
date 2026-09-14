@@ -47,7 +47,7 @@ const (
 )
 
 // OAuthCredential is the persisted OAuth credential for one gateway instance
-// (the ChatGPT Plus browser flow). It is stored encrypted inside the secrets
+// (the ChatGPT Plus device flow). It is stored encrypted inside the secrets
 // envelope; the type intentionally does not implement fmt.Stringer so an
 // accidental %v/%+v cannot render token material.
 type OAuthCredential struct {

@@ -1,10 +1,8 @@
-// Package oauth implements the ChatGPT Plus OAuth protocol used by OpenCode
-// (the "add ChatGPT Plus account" browser flow) as an isolated protocol
-// component: typed authorization state with S256 PKCE, authorization URL
-// construction, authorization-code exchange and refresh requests, token
-// response parsing with expiry, ChatGPT account-ID extraction from the
-// OpenAI/Codex JWT claims, and redacted errors that never render tokens,
-// codes, verifiers, or state values.
+// Package oauth implements the ChatGPT Plus device OAuth protocol used by
+// OpenCode as an isolated protocol component: PKCE verifier validation,
+// authorization-code exchange and refresh requests, token response parsing
+// with expiry, ChatGPT account-ID extraction from the OpenAI/Codex JWT claims,
+// and redacted errors that never render token material.
 //
 // The protocol constants below are pinned to the installed OpenCode v1.18.30
 // implementation (packages/core/src/plugin/provider/openai.ts). The package
@@ -18,9 +16,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
-	"net/url"
 	"strings"
-	"time"
 )
 
 // Verified OpenCode v1.18.30 ChatGPT Plus OAuth constants
@@ -30,21 +26,13 @@ const (
 	Issuer = "https://auth.openai.com"
 	// ClientID is the public client identifier registered by OpenCode.
 	ClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
-	// RedirectURI is the loopback callback the browser flow redirects to.
-	RedirectURI = "http://localhost:1455/auth/callback"
-	// Scope is the space-separated scope set requested in the flow.
-	Scope = "openid profile email offline_access"
-	// AuthorizePath is the issuer-relative authorization endpoint.
-	AuthorizePath = "/oauth/authorize"
 	// TokenPath is the issuer-relative token endpoint.
 	TokenPath = "/oauth/token"
-	// CodeChallengeMethod is the PKCE transform used by the flow.
-	CodeChallengeMethod = "S256"
 	// DefaultExpiresIn is the token lifetime in seconds assumed when the
 	// token response omits expires_in (matches OpenCode's ?? 3600).
 	DefaultExpiresIn = 3600
-	// originator is sent in the authorize request exactly as OpenCode sends
-	// it; the value is part of the verified request contract.
+	// Originator is the fixed upstream identity header used by the codex
+	// endpoint.
 	Originator = "opencode"
 )
 
@@ -59,10 +47,8 @@ const (
 // zero value is usable: every field falls back to the verified OpenCode
 // constant via WithDefaults.
 type Config struct {
-	Issuer      string // default: Issuer
-	ClientID    string // default: ClientID
-	RedirectURI string // default: RedirectURI
-	Scope       string // default: Scope
+	Issuer   string // default: Issuer
+	ClientID string // default: ClientID
 	// UserAgent is sent as the User-Agent header on token requests. OpenCode
 	// sends "opencode/<version>"; this gateway sends its own identifier
 	// instead of impersonating OpenCode.
@@ -78,76 +64,10 @@ func (c Config) WithDefaults() Config {
 	if c.ClientID == "" {
 		c.ClientID = ClientID
 	}
-	if c.RedirectURI == "" {
-		c.RedirectURI = RedirectURI
-	}
-	if c.Scope == "" {
-		c.Scope = Scope
-	}
 	if c.UserAgent == "" {
 		c.UserAgent = "shimmer-llmgateway/oauth"
 	}
 	return c
-}
-
-// State is a typed authorization transaction: the opaque state value sent to
-// the provider, the PKCE verifier kept server-side, and the derived S256
-// challenge. It binds the transaction to a gateway instance and is
-// short-lived and single-use by design (enforced by StateStore).
-type State struct {
-	// Value is the random opaque state parameter sent to the provider.
-	Value string
-	// Verifier is the PKCE code verifier; it must never leave the server.
-	Verifier string
-	// Challenge is the S256 code challenge derived from Verifier, sent in
-	// the authorization URL.
-	Challenge string
-	// InstanceID is the gateway instance this transaction is bound to.
-	InstanceID string
-	// Generation is the lifecycle generation active when the state was minted.
-	// It is server-side metadata and is never sent to the provider.
-	Generation uint64
-	CreatedAt  time.Time
-	ExpiresAt  time.Time
-	// Used marks a consumed single-use state.
-	Used bool
-}
-
-// NewState generates a fresh state (random value and PKCE verifier/challenge)
-// valid for ttl. ttl must be positive.
-func NewState(instanceID string, ttl time.Duration) (*State, error) {
-	return newStateAt(instanceID, ttl, time.Now())
-}
-
-func newStateAt(instanceID string, ttl time.Duration, now time.Time) (*State, error) {
-	if ttl <= 0 {
-		return nil, errf("state.generate", ErrInvalidState, "state ttl must be positive")
-	}
-	value, err := randomBase64URL(32)
-	if err != nil {
-		return nil, errf("state.generate", ErrInvalidState, "failed to generate state value")
-	}
-	verifier, err := GenerateVerifier()
-	if err != nil {
-		return nil, errf("state.generate", ErrInvalidState, "failed to generate PKCE verifier")
-	}
-	challenge, err := S256Challenge(verifier)
-	if err != nil {
-		return nil, errf("state.generate", ErrInvalidState, "failed to derive PKCE challenge")
-	}
-	return &State{
-		Value:      value,
-		Verifier:   verifier,
-		Challenge:  challenge,
-		InstanceID: instanceID,
-		CreatedAt:  now,
-		ExpiresAt:  now.Add(ttl),
-	}, nil
-}
-
-// Expired reports whether the state has expired at now.
-func (s *State) Expired(now time.Time) bool {
-	return !s.ExpiresAt.IsZero() && now.After(s.ExpiresAt)
 }
 
 // GenerateVerifier returns a cryptographically random RFC 7636 code verifier:
@@ -226,40 +146,4 @@ func randomAlphabet(out []byte, alphabet string) error {
 			return nil
 		}
 	}
-}
-
-// randomBase64URL returns n cryptographically random bytes as an unpadded
-// base64url string.
-func randomBase64URL(n int) (string, error) {
-	buf := make([]byte, n)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(buf), nil
-}
-
-// AuthorizeURL builds the provider authorization URL for state, replicating
-// the verified OpenCode v1.18.30 request parameter for parameter
-// (id_token_add_organizations, codex_cli_simplified_flow, and originator are
-// part of the verified contract). state must be non-nil with Value and
-// Challenge set.
-func (c Config) AuthorizeURL(state *State) (string, error) {
-	c = c.WithDefaults()
-	if state == nil || state.Value == "" || state.Challenge == "" {
-		return "", errf("authorize", ErrInvalidState, "state value and challenge are required")
-	}
-	// url.Values.Encode percent-encodes every value, matching OpenCode's
-	// URLSearchParams serialization (notably the redirect URI).
-	q := url.Values{}
-	q.Set("response_type", "code")
-	q.Set("client_id", c.ClientID)
-	q.Set("redirect_uri", c.RedirectURI)
-	q.Set("scope", c.Scope)
-	q.Set("code_challenge", state.Challenge)
-	q.Set("code_challenge_method", CodeChallengeMethod)
-	q.Set("id_token_add_organizations", "true")
-	q.Set("codex_cli_simplified_flow", "true")
-	q.Set("state", state.Value)
-	q.Set("originator", Originator)
-	return c.Issuer + AuthorizePath + "?" + q.Encode(), nil
 }

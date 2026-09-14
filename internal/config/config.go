@@ -112,7 +112,7 @@ type Template struct {
 	// format and the OpenAI Responses API (§4.2).
 	Style string `toml:"style,omitempty"`
 	// OAuth marks the template as authenticated by a stored OAuth credential
-	// (the ChatGPT Plus browser flow) instead of an API key. For such
+	// (the ChatGPT Plus device flow) instead of an API key. For such
 	// templates the forward path resolves the instance's encrypted OAuth
 	// record (refreshing it when expired) and injects the credential identity
 	// upstream; api_key_env and the API-key secrets path are not consulted.
