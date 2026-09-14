@@ -6,7 +6,7 @@ import (
 )
 
 // Sentinel errors. All are safe to expose: they contain no token material,
-// codes, verifiers, state values, or response bodies. Use errors.Is against
+// codes, verifiers, or response bodies. Use errors.Is against
 // these when branching on failure kind.
 var (
 	// ErrInvalidVerifier reports a PKCE verifier outside the RFC 7636
@@ -27,8 +27,8 @@ var (
 )
 
 // Error is a redacted OAuth error. Error() renders only Op and Msg — fixed,
-// pre-sanitized strings that never contain tokens, codes, verifiers, state
-// values, or provider response bodies. The wrapped cause (Err) is never
+// pre-sanitized strings that never contain tokens, codes, verifiers, or
+// provider response bodies. The wrapped cause (Err) is never
 // rendered; it exists so errors.Is and errors.As can still classify the
 // failure for logging and branching.
 type Error struct {

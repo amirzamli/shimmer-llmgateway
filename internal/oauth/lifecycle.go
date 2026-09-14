@@ -10,7 +10,7 @@ import (
 var ErrOperationStale = errors.New("oauth operation was superseded")
 
 // Lifecycle tracks the current operation generation for each instance. It is
-// shared by the API callback path and the gateway refresh resolver so neither
+// shared by the API device path and the gateway refresh resolver so neither
 // can persist credentials after the instance has moved to a newer lifecycle.
 type Lifecycle struct {
 	mu          sync.Mutex
@@ -46,8 +46,8 @@ func (l *Lifecycle) beginLocked(instanceID string) uint64 {
 // readers and writers for the affected instances. fn reports whether the
 // config change committed; when it did, all ids advance to a new generation
 // after fn returns. A failed config change therefore leaves pending OAuth work
-// valid, while a committed change fences callbacks before they can persist.
-// fn must not call methods on l because the lifecycle lock is held.
+// valid, while a committed change fences device operations before they can
+// persist. fn must not call methods on l because the lifecycle lock is held.
 func (l *Lifecycle) WithTransition(instanceIDs []string, fn func() (committed bool, err error)) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()

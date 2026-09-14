@@ -56,7 +56,7 @@ func (t DeviceTransaction) Expired(now time.Time) bool {
 }
 
 // DeviceStore keeps pending device transactions in memory. A gateway restart
-// discards them, matching the browser state store's restart behavior.
+// discards them, so in-flight sign-ins must be restarted after a restart.
 type DeviceStore struct {
 	mu     sync.Mutex
 	values map[string]DeviceTransaction
