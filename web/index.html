@@ -451,6 +451,16 @@
   .oauth-tunnel-card pre { margin: 0 0 6px; padding: 6px; overflow: auto; border: 1px solid var(--border); background: var(--bg); color: var(--text2); font-size: 10px; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
   .oauth-tunnel-card .setup-row { justify-content: flex-end; margin-bottom: 0; }
   .oauth-remote-note { margin: 8px 0 0 !important; color: var(--dim) !important; font-size: 10px !important; }
+  .oauth-device-panel { margin-bottom: 10px; padding: 10px; border: 1px solid rgba(59,130,246,.35); border-left: 3px solid var(--accent); background: rgba(59,130,246,.07); }
+  .oauth-device-head { display: flex; align-items: center; gap: 7px; margin-bottom: 7px; }
+  .oauth-device-head strong { font-size: 11px; }
+  .oauth-device-panel p { margin: 0 0 8px; color: var(--text2); font-size: 11px; line-height: 1.45; }
+  .oauth-device-code-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+  .oauth-device-code { padding: 6px 9px; border: 1px solid var(--border-strong); background: var(--bg); color: var(--text); font-size: 17px; font-weight: 700; letter-spacing: .08em; }
+  .oauth-device-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+  .oauth-device-link { display: inline-flex; min-height: 24px; align-items: center; padding: 3px 8px; border: 1px solid var(--accent); border-radius: var(--radius); background: transparent; color: var(--accent); font-size: 11px; text-decoration: none; }
+  .oauth-device-link:hover { background: rgba(59,130,246,.12); }
+  .oauth-device-waiting { color: var(--muted); font-size: 10px; }
 
   .chip-row { display: flex; gap: 4px; padding: 8px 11px; border-bottom: 1px solid var(--border); background: var(--bg); }
   button.chip { min-height: 24px; padding: 2px 9px; border-color: var(--border); border-radius: 999px; background: transparent; color: var(--muted); font-size: 10px; }
@@ -709,7 +719,7 @@ const state = {
   sessions: [], sessionId: null, settings: null, status: null, usageRange: "30d", activeDetail: 0,
   railPrefs: { sessions: null, usage: null }, sessionRailData: "loading", usageRailData: "loading",
   models: Object.create(null), modelMeta: Object.create(null), searchTimer: null, loadToken: 0, previewToken: 0,
-  oauthPollers: Object.create(null)
+  oauthPollers: Object.create(null), oauthDevicePollers: Object.create(null)
 };
 
 async function api(path, options) {
@@ -917,7 +927,7 @@ function oauthRemoteSetupHtml(alias) {
   const ready = !!user;
   const command = platform => oauthTunnelCommand(alias, platform === "windows");
   const card = (platform, label) => `<div class="oauth-tunnel-card"><h4>${label}</h4><pre id="oauth-tunnel-command-${id}-${platform}" data-oauth-tunnel-command data-alias="${esc(alias)}" data-platform="${platform}">${esc(command(platform))}</pre><div class="setup-row"><button id="oauth-tunnel-copy-${id}-${platform}" class="ghost btn-sm" type="button" data-action="copy-oauth-tunnel" data-alias="${esc(alias)}" data-platform="${platform}"${ready ? "" : " disabled"}>Copy command</button></div></div>`;
-  return `<div id="oauth-remote-setup-${id}" class="oauth-remote-setup"><div class="oauth-remote-head"><span class="badge warn">Remote dashboard</span><strong>OAuth callback prerequisite</strong></div><p>This dashboard is open from <code>${esc(host)}</code>. Before signing in, forward the callback port from the gateway to this browser with SSH:</p><div class="oauth-tunnel-input"><label for="oauth-ssh-user-${id}">Gateway SSH username</label><input id="oauth-ssh-user-${id}" data-oauth-tunnel-user data-alias="${esc(alias)}" value="${esc(user)}" placeholder="e.g. alice" autocomplete="username"></div><div class="oauth-tunnel-grid">${card("linux", "Linux")}${card("macos", "macOS")}${card("windows", "Windows PowerShell")}</div><p class="oauth-remote-note">Keep the tunnel terminal open while signing in. Enter the gateway SSH username above to enable the copy buttons.</p></div>`;
+  return `<div id="oauth-remote-setup-${id}" class="oauth-remote-setup"><div class="oauth-remote-head"><span class="badge warn">Browser sign-in</span><strong>Remote callback prerequisite</strong></div><p>This dashboard is open from <code>${esc(host)}</code>. The browser redirect method needs a tunnel from the gateway to this browser:</p><div class="oauth-tunnel-input"><label for="oauth-ssh-user-${id}">Gateway SSH username</label><input id="oauth-ssh-user-${id}" data-oauth-tunnel-user data-alias="${esc(alias)}" value="${esc(user)}" placeholder="e.g. alice" autocomplete="username"></div><div class="oauth-tunnel-grid">${card("linux", "Linux")}${card("macos", "macOS")}${card("windows", "Windows PowerShell")}</div><p class="oauth-remote-note">Keep the tunnel terminal open for browser sign-in. Device-code sign-in below does not require this tunnel.</p></div>`;
 }
 function mcpHost() {
   const addresses = setupAddresses();
@@ -1159,16 +1169,16 @@ function aliasesHtml(instance) {
 }
 function connectionHtml(instance) {
   const template = templateFor(instance);
-  // OAuth templates hold no API key: the credential row names the browser
+  // OAuth templates hold no API key: the credential row names the ChatGPT
   // sign-in instead of the key/env display used by ordinary instances.
   const oauth = !!(template && template.oauth);
-  const key = oauth ? `<span class="muted">ChatGPT account (browser sign-in, no API key)</span>` : instance.key_masked ? `<code>${esc(instance.key_masked)}</code>` : instance.api_key_env ? `<code>env: ${esc(instance.api_key_env)}</code>` : `<span class="muted">none</span>`;
+  const key = oauth ? `<span class="muted">ChatGPT account (OAuth sign-in, no API key)</span>` : instance.key_masked ? `<code>${esc(instance.key_masked)}</code>` : instance.api_key_env ? `<code>env: ${esc(instance.api_key_env)}</code>` : `<span class="muted">none</span>`;
   const modelStyles = template && template.model_styles ? [...new Set(Object.values(template.model_styles))] : [];
   const protocol = modelStyles.length ? "mixed by model" : (instance.style || "openai");
   return `<div class="instance-section"><div class="instance-section-head"><span class="section-title">Connection parameters</span></div><dl class="connection-grid compact"><dt>Protocol</dt><dd>${esc(protocol)}</dd><dt>Base URL</dt><dd><code>${esc(instance.base_url || "—")}</code></dd><dt>Credential</dt><dd>${key}</dd><dt>Priority rank</dt><dd>${instance.priority ? esc(String(instance.priority)) + " <span class=\"muted\">(1 = highest)</span>" : `<span class="muted">unset — list order</span>`}</dd>${template && template.docs ? `<dt>Provider docs</dt><dd><a href="${esc(template.docs)}" target="_blank" rel="noreferrer">${esc(template.docs)}</a></dd>` : ""}</dl></div>`;
 }
 // isOAuthInstance reports whether an instance is served by an OAuth-marked
-// template (the built-in chatgpt browser sign-in), per the marker the
+// template (the built-in ChatGPT OAuth sign-in), per the marker the
 // templates API exposes.
 function isOAuthInstance(instance) {
   const template = templateFor(instance);
@@ -1177,12 +1187,13 @@ function isOAuthInstance(instance) {
 // oauthAccountHtml renders the ChatGPT account section of an OAuth instance:
 // connection state, masked account id, and token expiry come from
 // GET /api/instances/{alias}/oauth/status and are filled in asynchronously by
-// oauthStatus; the sign-in/disconnect actions call the existing OAuth routes.
+// oauthStatus; the browser/device sign-in and disconnect actions call the
+// existing OAuth routes.
 // Token material never reaches this surface — only the masked id and expiry.
 function oauthAccountHtml(instance) {
   if (!isOAuthInstance(instance)) return "";
   const id = domId(instance.alias);
-  return `<div class="instance-section">${oauthRemoteSetupHtml(instance.alias)}<div class="instance-section-head"><span class="section-title">ChatGPT account</span><span class="spacer"></span><button class="ghost btn-sm" type="button" data-action="oauth-refresh" data-alias="${esc(instance.alias)}">Refresh</button><button id="oauth-start-${id}" class="outline btn-sm" type="button" data-action="oauth-start" data-alias="${esc(instance.alias)}">Sign in with ChatGPT</button><button class="danger-ghost btn-sm" type="button" data-action="oauth-disconnect" data-alias="${esc(instance.alias)}">Disconnect</button></div><div id="oauth-status-${id}" class="oauth-status">Checking connection…</div></div>`;
+  return `<div class="instance-section">${oauthRemoteSetupHtml(instance.alias)}<div class="instance-section-head"><span class="section-title">ChatGPT account</span><span class="spacer"></span><button class="ghost btn-sm" type="button" data-action="oauth-refresh" data-alias="${esc(instance.alias)}">Refresh</button><button id="oauth-start-${id}" class="outline btn-sm" type="button" data-action="oauth-start" data-alias="${esc(instance.alias)}">Browser sign-in</button><button id="oauth-device-start-${id}" class="outline btn-sm" type="button" data-action="oauth-device-start" data-alias="${esc(instance.alias)}">Sign in with code</button><button class="danger-ghost btn-sm" type="button" data-action="oauth-disconnect" data-alias="${esc(instance.alias)}">Disconnect</button></div><div id="oauth-device-${id}" class="oauth-device-panel hidden" aria-live="polite"></div><div id="oauth-status-${id}" class="oauth-status">Checking connection…</div></div>`;
 }
 function oauthStatusNode(alias) { return $("oauth-status-" + domId(alias)); }
 function fmtExpiry(value) {
@@ -1196,12 +1207,15 @@ function fmtExpiry(value) {
   return "access token expires in " + hours + " h" + (minutes ? " " + minutes + " min" : "");
 }
 function setOauthConnectedUI(alias, connected) {
-  const id = domId(alias), setup = $("oauth-remote-setup-" + id), start = $("oauth-start-" + id);
+  const id = domId(alias), setup = $("oauth-remote-setup-" + id), start = $("oauth-start-" + id), deviceStart = $("oauth-device-start-" + id), device = $("oauth-device-" + id);
   if (setup) setup.classList.toggle("hidden", connected);
-  if (start) {
-    start.classList.toggle("hidden", connected);
-    start.setAttribute("aria-hidden", String(connected));
-  }
+  [start, deviceStart].forEach(button => {
+    if (!button) return;
+    button.classList.toggle("hidden", connected);
+    button.setAttribute("aria-hidden", String(connected));
+  });
+  if (device) device.classList.add("hidden");
+  if (connected) oauthDevicePollCancel(alias);
 }
 function renderOauthStatus(node, data, alias) {
   const connected = !!(data && data.connected);
@@ -1236,21 +1250,24 @@ function oauthPollCancel(alias) {
 // flips to connected without a reload.
 async function oauthStart(alias) {
   oauthPollCancel(alias);
-	// Open synchronously from the click handler so browsers do not classify the
-	// eventual navigation as a blocked popup after the start request resolves.
-	// Do not pass noopener/noreferrer here: browsers may return null for those
-	// features even when the blank tab was opened. Detach the opener explicitly
-	// while the new tab is still about:blank, before navigating it.
-	const popup = window.open("about:blank", "_blank");
-	if (popup) popup.opener = null;
+  oauthDevicePollCancel(alias);
+  const device = oauthDeviceNode(alias);
+  if (device) device.classList.add("hidden");
+  // Open synchronously from the click handler so browsers do not classify the
+  // eventual navigation as a blocked popup after the start request resolves.
+  // Do not pass noopener/noreferrer here: browsers may return null for those
+  // features even when the blank tab was opened. Detach the opener explicitly
+  // while the new tab is still about:blank, before navigating it.
+  const popup = window.open("about:blank", "_blank");
+  if (popup) popup.opener = null;
   try {
     const data = await api("/api/instances/" + encodeURIComponent(alias) + "/oauth/start", { method: "POST" });
     if (!data || !data.authorization_url) throw new Error("the gateway did not return an authorization URL");
-	    if (popup && !popup.closed) {
-	      popup.location.href = data.authorization_url;
-	    } else {
-	      throw new Error("the sign-in popup was blocked; allow popups for this dashboard and try again");
-	    }
+    if (popup && !popup.closed) {
+      popup.location.href = data.authorization_url;
+    } else {
+      throw new Error("the sign-in popup was blocked; allow popups for this dashboard and try again");
+    }
     toast("ChatGPT sign-in opened in a new tab. Sign in there, then close that tab.", "success");
     const until = Date.now() + Math.max(60, Number(data.expires_in || 600)) * 1000;
     const poll = () => {
@@ -1260,10 +1277,68 @@ async function oauthStart(alias) {
       });
     };
     state.oauthPollers[alias] = setTimeout(poll, 3000);
-	} catch (error) {
-	  if (popup && !popup.closed) popup.close();
-	  toast(error.message, "error");
-	}
+  } catch (error) {
+    if (popup && !popup.closed) popup.close();
+    toast(error.message, "error");
+  }
+}
+function oauthDeviceNode(alias) { return $("oauth-device-" + domId(alias)); }
+function oauthDevicePollCancel(alias) {
+  const timer = state.oauthDevicePollers[alias];
+  if (timer) { clearTimeout(timer); delete state.oauthDevicePollers[alias]; }
+}
+function renderOauthDevicePending(alias, data) {
+  const node = oauthDeviceNode(alias);
+  if (!node) return;
+  node.classList.remove("hidden");
+  const wait = Math.max(1, Number(data.interval || 5));
+  node.innerHTML = `<div class="oauth-device-head"><span class="badge warn">Device code</span><strong>Enter this code at OpenAI</strong></div><p>Open the device page, enter the code below, and approve access. This method does not use the localhost callback tunnel.</p><div class="oauth-device-code-row"><code class="oauth-device-code">${esc(data.user_code)}</code><button class="ghost btn-sm" type="button" data-action="copy-oauth-code" data-code="${esc(data.user_code)}">Copy code</button></div><div class="oauth-device-actions"><a class="oauth-device-link" href="${esc(data.authorization_url)}" target="_blank" rel="noopener noreferrer">Open OpenAI device page</a><span class="oauth-device-waiting">Waiting for approval; checking every ${wait}s.</span></div>`;
+}
+function renderOauthDeviceMessage(alias, kind, message) {
+  const node = oauthDeviceNode(alias);
+  if (!node) return;
+  node.classList.remove("hidden");
+  node.innerHTML = `<span class="badge ${kind === "ok" ? "ok" : "warn"}">${kind === "ok" ? "connected" : "device sign-in"}</span> <span class="muted">${esc(message)}</span>`;
+}
+async function oauthDeviceStart(alias) {
+  oauthPollCancel(alias);
+  oauthDevicePollCancel(alias);
+  const device = oauthDeviceNode(alias);
+  if (device) device.classList.add("hidden");
+  const popup = window.open("about:blank", "_blank");
+  if (popup) popup.opener = null;
+  try {
+    const data = await api("/api/instances/" + encodeURIComponent(alias) + "/oauth/device/start", { method: "POST" });
+    if (!data || !data.user_code || !data.authorization_url) throw new Error("the gateway did not return a device code");
+    if (popup && !popup.closed) popup.location.href = data.authorization_url;
+    renderOauthDevicePending(alias, data);
+    toast(popup ? "OpenAI device sign-in opened. Enter the code shown in the gateway." : "Enter the displayed code at the OpenAI device page.", "success");
+    const until = Date.now() + Math.max(60, Number(data.expires_in || 600)) * 1000;
+    const interval = Math.max(1, Number(data.interval || 5)) * 1000;
+    const poll = () => {
+      api("/api/instances/" + encodeURIComponent(alias) + "/oauth/device/status").then(status => {
+        if (status && status.connected) {
+          oauthDevicePollCancel(alias);
+          renderOauthStatus(oauthStatusNode(alias), status, alias);
+          toast(alias + " is connected", "success");
+          return;
+        }
+        if (status && status.pending && Date.now() < until) {
+          state.oauthDevicePollers[alias] = setTimeout(poll, interval);
+          return;
+        }
+        oauthDevicePollCancel(alias);
+        renderOauthDeviceMessage(alias, "warn", "The device code expired. Start device sign-in again.");
+      }).catch(error => {
+        oauthDevicePollCancel(alias);
+        renderOauthDeviceMessage(alias, "warn", error.message);
+      });
+    };
+    state.oauthDevicePollers[alias] = setTimeout(poll, interval);
+  } catch (error) {
+    if (popup && !popup.closed) popup.close();
+    toast(error.message, "error");
+  }
 }
 // oauthDisconnect calls the existing idempotent
 // DELETE /api/instances/{alias}/oauth route: the credential is dropped, the
@@ -1271,6 +1346,7 @@ async function oauthStart(alias) {
 async function oauthDisconnect(alias) {
   if (!window.confirm("Disconnect the ChatGPT account from " + alias + "? The instance stays configured; you can sign in again anytime.")) return;
   oauthPollCancel(alias);
+  oauthDevicePollCancel(alias);
   try {
     await api("/api/instances/" + encodeURIComponent(alias) + "/oauth", { method: "DELETE" });
     toast(alias + " disconnected", "success");
@@ -1436,6 +1512,7 @@ async function saveEdit() {
 async function deleteInstance(alias) {
   if (!window.confirm("Delete instance " + alias + "? This cannot be undone from the dashboard.")) return;
   oauthPollCancel(alias);
+  oauthDevicePollCancel(alias);
   try {
     await api("/api/instances/" + encodeURIComponent(alias), { method: "DELETE" });
     toast("Instance deleted", "success");
@@ -1765,6 +1842,7 @@ document.addEventListener("click", event => {
     case "save-edit": saveEdit(); break;
     case "copy-setup": { const value = setupCopyText(target.dataset.copy); if (value) copyText(value, target); break; }
     case "copy-oauth-tunnel": copyText(oauthTunnelCommand(target.dataset.alias, target.dataset.platform === "windows"), target); break;
+    case "copy-oauth-code": copyText(target.dataset.code, target); break;
     case "toggle-session-filters": { const filters = $("session-filters"), hidden = filters.classList.toggle("hidden"); target.setAttribute("aria-expanded", String(!hidden)); break; }
     case "search-sessions": loadSessions(false); break;
     case "clear-session-filters": ["f-alias", "f-model", "f-since", "f-until", "f-q"].forEach(id => { if ($(id)) $(id).value = ""; }); if ($("f-status")) $("f-status").value = ""; loadSessions(false); break;
@@ -1786,6 +1864,7 @@ document.addEventListener("click", event => {
     case "alias-remove": { const row = target.closest("tr"); if (row) row.remove(); break; }
     case "models-refresh": refreshModels(target.dataset.alias); break;
     case "oauth-start": oauthStart(target.dataset.alias); break;
+    case "oauth-device-start": oauthDeviceStart(target.dataset.alias); break;
     case "oauth-refresh": oauthStatus(target.dataset.alias); break;
     case "oauth-disconnect": oauthDisconnect(target.dataset.alias); break;
     case "open-session": if (state.sessionId === String(target.dataset.id)) closeChat(); else openSession(target.dataset.id); break;

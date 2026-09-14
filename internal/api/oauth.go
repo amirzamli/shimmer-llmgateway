@@ -1,13 +1,13 @@
 package api
 
-// ChatGPT OAuth account surface (plan phase 2b): start the browser sign-in,
-// complete it at the fixed loopback callback, inspect the connection state,
-// and disconnect. All OAuth operations require an OAuth-marked template
-// instance; API-key instances keep their unchanged paths. Pending state and
-// the PKCE verifier stay server-side (internal/oauth.StateStore), short-lived,
-// single-use, and bound to the instance that started the flow; the callback
-// can therefore only ever persist the credential under that instance. Token
-// material never appears in responses, logs, or the callback page.
+// ChatGPT OAuth account surface (plan phase 2b): start either the browser
+// redirect or device-code sign-in, inspect the connection state, and
+// disconnect. All OAuth operations require an OAuth-marked template instance;
+// API-key instances keep their unchanged paths. Pending state and PKCE/device
+// values stay server-side, short-lived, and bound to the instance that started
+// the flow; only the browser callback or the device status poll can persist the
+// credential under that instance. Token material never appears in responses,
+// logs, or the callback page.
 
 import (
 	"fmt"
@@ -24,10 +24,11 @@ import (
 // the plan, so an abandoned browser tab cannot complete a stale sign-in
 // later. A gateway restart discards all pending transactions anyway.
 const oauthStateTTL = 10 * time.Minute
+const oauthDeviceTTL = oauthStateTTL
 
 // requireOAuthInstance resolves alias to an instance served by an
-// OAuth-marked template (the ChatGPT browser flow). Unknown instances are a
-// 404; instances whose template is not OAuth-marked are rejected with
+// OAuth-marked template (the ChatGPT browser/device flows). Unknown instances
+// are a 404; instances whose template is not OAuth-marked are rejected with
 // INVALID_ARGUMENT so the OAuth surface can never touch an API-key instance.
 func (a *API) requireOAuthInstance(alias string) (*config.Instance, error) {
 	cfg := a.mgr.Get()
@@ -61,6 +62,7 @@ func (a *API) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 	}
 	generation := a.oauthLife.Begin(alias)
 	a.oauthStates.PurgeInstance(alias)
+	a.oauthDevices.PurgeInstance(alias)
 	st, err := a.oauthStates.GenerateWithGeneration(alias, oauthStateTTL, generation)
 	if err != nil {
 		a.updateMu.Unlock()
@@ -82,6 +84,65 @@ func (a *API) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleOAuthDeviceStart begins OpenCode's headless/device sign-in. The
+// provider user code is returned to the dashboard, while the provider device
+// id remains in the gateway's in-memory transaction store. No localhost
+// callback is involved; the dashboard polls handleOAuthDeviceStatus while the
+// user enters the code at the provider page.
+func (a *API) handleOAuthDeviceStart(w http.ResponseWriter, r *http.Request) {
+	if !a.requireOAuthSourceMessage(w, r, "oauth endpoint requires loopback or a configured listener") {
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	alias := r.PathValue("alias")
+	a.updateMu.Lock()
+	if _, err := a.requireOAuthInstance(alias); err != nil {
+		a.updateMu.Unlock()
+		a.writeUpdateError(w, err)
+		return
+	}
+	generation := a.oauthLife.Begin(alias)
+	a.oauthStates.PurgeInstance(alias)
+	a.oauthDevices.PurgeInstance(alias)
+	a.updateMu.Unlock()
+
+	device, err := a.oauthCfg.RequestDeviceCode(r.Context(), a.oauthClient)
+	if err != nil {
+		a.logger.Warn("oauth_device_start_failed", map[string]any{"alias": alias, "error": oauth.Redact(err).Error()})
+		a.writeError(w, http.StatusBadGateway, "UPSTREAM_ERROR", "the provider could not start device sign-in")
+		return
+	}
+	if device.Interval <= 0 {
+		device.Interval = 5 * time.Second
+	}
+	a.updateMu.Lock()
+	if !a.oauthLife.Current(alias, generation) {
+		a.updateMu.Unlock()
+		a.writeError(w, http.StatusConflict, "CONFLICT", "the sign-in was superseded by a newer account change")
+		return
+	}
+	if _, err := a.requireOAuthInstance(alias); err != nil {
+		a.updateMu.Unlock()
+		a.writeUpdateError(w, err)
+		return
+	}
+	a.oauthDevices.Put(oauth.DeviceTransaction{
+		InstanceID:   alias,
+		Generation:   generation,
+		DeviceAuthID: device.DeviceAuthID,
+		UserCode:     device.UserCode,
+		Interval:     device.Interval,
+		ExpiresAt:    time.Now().Add(oauthDeviceTTL),
+	})
+	a.updateMu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"authorization_url": a.oauthCfg.DeviceURL(),
+		"user_code":         device.UserCode,
+		"interval":          int(device.Interval / time.Second),
+		"expires_in":        int(oauthDeviceTTL / time.Second),
+	})
+}
+
 // handleOAuthStatus reports the connection state of an OAuth instance:
 // whether a credential is stored and, when it is, the masked account
 // identifier and the access-token expiry. Token material is never returned.
@@ -96,23 +157,134 @@ func (a *API) handleOAuthStatus(w http.ResponseWriter, r *http.Request) {
 		a.writeUpdateError(w, err)
 		return
 	}
-	cred, ok, err := a.sec.GetOAuth(alias)
+	a.updateMu.Unlock()
+	payload, err := a.oauthStatusPayload(alias)
 	if err != nil {
-		a.updateMu.Unlock()
 		a.logger.Error("oauth_record_corrupted", map[string]any{"alias": alias, "error": err.Error()})
 		a.writeError(w, http.StatusInternalServerError, "INTERNAL", "the stored sign-in credential is corrupted")
 		return
 	}
-	a.updateMu.Unlock()
-	if !ok {
-		writeJSON(w, http.StatusOK, map[string]any{"connected": false})
+	writeJSON(w, http.StatusOK, payload)
+}
+
+// handleOAuthDeviceStatus advances a pending device transaction by one
+// provider poll and persists the credential when the user has completed the
+// browser step. A dashboard can safely poll this route at the provider's
+// returned interval; pending provider responses never become gateway errors.
+func (a *API) handleOAuthDeviceStatus(w http.ResponseWriter, r *http.Request) {
+	if !a.requireOAuthSourceMessage(w, r, "oauth endpoint requires loopback or a configured listener") {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	w.Header().Set("Cache-Control", "no-store")
+	alias := r.PathValue("alias")
+	a.updateMu.Lock()
+	if _, err := a.requireOAuthInstance(alias); err != nil {
+		a.updateMu.Unlock()
+		a.writeUpdateError(w, err)
+		return
+	}
+	transaction, pending := a.oauthDevices.Get(alias)
+	a.updateMu.Unlock()
+	if !pending || !a.oauthLife.Current(alias, transaction.Generation) {
+		if pending {
+			a.oauthDevices.PurgeInstance(alias)
+		}
+		a.writeOAuthStatus(w, alias)
+		return
+	}
+
+	a.oauthDevicePollMu.Lock()
+	defer a.oauthDevicePollMu.Unlock()
+	authorization, waiting, err := a.oauthCfg.PollDeviceAuthorization(r.Context(), a.oauthClient, oauth.DeviceCode{
+		DeviceAuthID: transaction.DeviceAuthID,
+		UserCode:     transaction.UserCode,
+		Interval:     transaction.Interval,
+	})
+	if err != nil {
+		a.oauthDevices.PurgeInstance(alias)
+		a.logger.Warn("oauth_device_poll_failed", map[string]any{"alias": alias, "error": oauth.Redact(err).Error()})
+		a.writeError(w, http.StatusBadGateway, "UPSTREAM_ERROR", "the provider rejected device sign-in")
+		return
+	}
+	if waiting {
+		seconds := int(time.Until(transaction.ExpiresAt).Seconds())
+		if seconds < 1 {
+			a.oauthDevices.PurgeInstance(alias)
+			a.writeOAuthStatus(w, alias)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"connected": false, "pending": true, "expires_in": seconds})
+		return
+	}
+
+	tok, err := a.oauthCfg.ExchangeWithRedirect(r.Context(), a.oauthClient, authorization.AuthorizationCode, authorization.CodeVerifier, a.oauthCfg.DeviceRedirectURI())
+	a.oauthDevices.PurgeInstance(alias)
+	if err != nil {
+		a.logger.Warn("oauth_device_exchange_failed", map[string]any{"alias": alias, "error": oauth.Redact(err).Error()})
+		a.writeError(w, http.StatusBadGateway, "UPSTREAM_ERROR", "the provider rejected device sign-in")
+		return
+	}
+	if !a.oauthLife.Current(alias, transaction.Generation) {
+		a.logger.Warn("oauth_device_superseded", map[string]any{"alias": alias})
+		a.writeError(w, http.StatusConflict, "CONFLICT", "the sign-in was superseded by a newer account change")
+		return
+	}
+	if tok.AccountID == "" {
+		a.logger.Warn("oauth_device_no_account_id", map[string]any{"alias": alias})
+		a.writeError(w, http.StatusBadGateway, "UPSTREAM_ERROR", "the provider did not return an account identifier")
+		return
+	}
+	cred := secrets.OAuthCredential{
+		AccessToken:  tok.AccessToken,
+		RefreshToken: tok.RefreshToken,
+		ExpiresAt:    tok.ExpiresAt,
+		AccountID:    tok.AccountID,
+	}
+	current, err := a.oauthLife.IfCurrent(alias, transaction.Generation, func() error {
+		return a.sec.SetOAuth(alias, cred)
+	})
+	if err != nil {
+		a.logger.Error("oauth_device_persist_failed", map[string]any{"alias": alias, "error": err.Error()})
+		a.writeError(w, http.StatusInternalServerError, "INTERNAL", "the gateway could not store the sign-in credential")
+		return
+	}
+	if !current {
+		a.logger.Warn("oauth_device_superseded", map[string]any{"alias": alias})
+		a.writeError(w, http.StatusConflict, "CONFLICT", "the sign-in was superseded by a newer account change")
+		return
+	}
+	a.logger.Info("oauth_connected", map[string]any{"alias": alias, "method": "device"})
+	payload := map[string]any{
 		"connected":  true,
 		"account_id": maskAccountID(cred.AccountID),
 		"expires_at": cred.ExpiresAt,
-	})
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func (a *API) oauthStatusPayload(alias string) (map[string]any, error) {
+	cred, ok, err := a.sec.GetOAuth(alias)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return map[string]any{"connected": false}, nil
+	}
+	return map[string]any{
+		"connected":  true,
+		"account_id": maskAccountID(cred.AccountID),
+		"expires_at": cred.ExpiresAt,
+	}, nil
+}
+
+func (a *API) writeOAuthStatus(w http.ResponseWriter, alias string) {
+	payload, err := a.oauthStatusPayload(alias)
+	if err != nil {
+		a.logger.Error("oauth_record_corrupted", map[string]any{"alias": alias, "error": err.Error()})
+		a.writeError(w, http.StatusInternalServerError, "INTERNAL", "the stored sign-in credential is corrupted")
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 // handleOAuthDisconnect removes the stored OAuth credential of an OAuth
@@ -136,6 +308,7 @@ func (a *API) handleOAuthDisconnect(w http.ResponseWriter, r *http.Request) {
 			return false, err
 		}
 		a.oauthStates.PurgeInstance(alias)
+		a.oauthDevices.PurgeInstance(alias)
 		return true, nil
 	})
 	a.updateMu.Unlock()

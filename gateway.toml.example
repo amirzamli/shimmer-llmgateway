@@ -16,11 +16,11 @@
 # zai          = ZAI_API_KEY
 # opencode_*   = OPENCODE_API_KEY
 # commandcode  = COMMANDCODE_API_KEY
-# chatgpt      = (no API key — ChatGPT Plus/Pro browser sign-in, see README)
+# chatgpt      = (no API key — ChatGPT Plus/Pro browser or device sign-in, see README)
 
 # The gateway only listens on addresses listed in listen_addrs.
-# ChatGPT OAuth also requires localhost:1455; startup fails if that callback
-# port is already occupied.
+# Browser ChatGPT OAuth requires localhost:1455; startup fails if that callback
+# port is already occupied. Device-code sign-in does not use this callback.
 listen_addrs = ["127.0.0.1:8787"]
 store = "gateway.db"
 # Remove chat payloads after 7 days; keep usage statistics.

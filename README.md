@@ -143,11 +143,13 @@ What happens afterwards:
   their existing forms and behavior unchanged.
 
 Routes used by the flow (behind the admin host/origin guard; lifecycle routes
-also require a loopback TCP source):
+also require a loopback TCP source or an explicitly configured listener):
 
 | Method | Route | Purpose |
 | --- | --- | --- |
 | POST | `/api/instances/{alias}/oauth/start` | mint a short-lived, single-use sign-in transaction and return the provider authorization URL |
+| POST | `/api/instances/{alias}/oauth/device/start` | start device-code sign-in and return the OpenAI device URL plus user code |
+| GET | `/api/instances/{alias}/oauth/device/status` | poll device-code approval and complete the server-side token exchange |
 | GET | `/api/instances/{alias}/oauth/status` | connection state: masked account id and token expiry, or `connected: false` |
 | DELETE | `/api/instances/{alias}/oauth` | disconnect (idempotent; credential only, the instance stays) |
 | GET | `/auth/callback` | fixed loopback-only callback served only at `http://localhost:1455/auth/callback` |

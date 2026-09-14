@@ -255,6 +255,7 @@ func (a *API) handleInstancesCreate(w http.ResponseWriter, r *http.Request) {
 		return a.sec.Set(createdAlias, req.Key)
 	}, "failed to store the instance credential", func() {
 		a.oauthStates.PurgeInstance(createdAlias)
+		a.oauthDevices.PurgeInstance(createdAlias)
 	})
 	if err != nil {
 		a.updateMu.Unlock()
@@ -390,6 +391,8 @@ func (a *API) handleInstancePatch(w http.ResponseWriter, r *http.Request) {
 		if renamed {
 			a.oauthStates.PurgeInstance(oldAlias)
 			a.oauthStates.PurgeInstance(newAlias)
+			a.oauthDevices.PurgeInstance(oldAlias)
+			a.oauthDevices.PurgeInstance(newAlias)
 		}
 	}
 	if cleanup != nil {
@@ -505,6 +508,7 @@ func (a *API) handleInstanceDelete(w http.ResponseWriter, r *http.Request) {
 		return a.sec.Delete(alias)
 	}, "failed to remove the stored credential", func() {
 		a.oauthStates.PurgeInstance(alias)
+		a.oauthDevices.PurgeInstance(alias)
 	})
 	if err != nil {
 		a.updateMu.Unlock()

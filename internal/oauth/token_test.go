@@ -95,6 +95,29 @@ func TestExchangeSuccess(t *testing.T) {
 	}
 }
 
+func TestExchangeWithRedirectUsesExplicitRedirect(t *testing.T) {
+	var gotForm url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		gotForm = r.Form
+		w.Write([]byte(tokenBody(nil)))
+	}))
+	defer srv.Close()
+
+	verifier, err := GenerateVerifier()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (Config{Issuer: srv.URL}).ExchangeWithRedirect(context.Background(), srv.Client(), "device-auth-code", verifier, "https://auth.openai.com/deviceauth/callback"); err != nil {
+		t.Fatalf("ExchangeWithRedirect: %v", err)
+	}
+	if got := gotForm.Get("redirect_uri"); got != "https://auth.openai.com/deviceauth/callback" {
+		t.Errorf("redirect_uri = %q", got)
+	}
+}
+
 func TestExchangeUsesDefaultClientWhenNil(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(tokenBody(nil)))

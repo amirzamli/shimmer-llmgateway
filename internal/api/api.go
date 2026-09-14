@@ -63,15 +63,19 @@ type API struct {
 	// own getter-based TTL cache (internal/quota; invalidated on PATCH/DELETE).
 	quota *quota.Fetcher
 	// oauthCfg pins the ChatGPT OAuth protocol (endpoints, client id, and the
-	// fixed loopback callback); the zero value uses the verified OpenCode
-	// defaults. oauthClient is the outbound client used for the
-	// authorization-code exchange (the gateway's no-redirect client; nil
-	// falls back to http.DefaultClient). oauthStates holds the server-side,
-	// short-lived, single-use, instance-bound authorization transactions.
-	oauthCfg    oauth.Config
-	oauthClient *http.Client
-	oauthStates *oauth.StateStore
-	oauthLife   *oauth.Lifecycle
+	// browser/device callback contracts); the zero value uses the verified
+	// OpenCode defaults. oauthClient is the outbound client used by the
+	// authorization-code and device exchanges (the gateway's no-redirect
+	// client; nil falls back to http.DefaultClient). oauthStates and
+	// oauthDevices hold short-lived, server-side, instance-bound transactions.
+	oauthCfg     oauth.Config
+	oauthClient  *http.Client
+	oauthStates  *oauth.StateStore
+	oauthDevices *oauth.DeviceStore
+	oauthLife    *oauth.Lifecycle
+	// oauthDevicePollMu serializes device-token polls so two dashboard tabs
+	// cannot consume the same provider response concurrently.
+	oauthDevicePollMu sync.Mutex
 	// oauthListenAddrs are the explicitly configured listener addresses that
 	// may serve OAuth lifecycle requests from a trusted remote network.
 	oauthListenAddrs []string
@@ -85,11 +89,12 @@ func New(mgr *config.ConfigManager, configPath string, st *store.Store, sec *sec
 	return &API{
 		mgr: mgr, path: configPath, store: st, sec: sec, logger: logger,
 		startedAt: time.Now(), modelsCache: map[string]modelsCacheEntry{}, modelsFlight: map[string]*modelsFlightCall{},
-		quota:       quota.New(mgr.Get, sec),
-		oauthCfg:    oauth.Config{},
-		oauthClient: oauthClient,
-		oauthStates: oauth.NewStateStore(),
-		oauthLife:   oauth.NewLifecycle(),
+		quota:        quota.New(mgr.Get, sec),
+		oauthCfg:     oauth.Config{},
+		oauthClient:  oauthClient,
+		oauthStates:  oauth.NewStateStore(),
+		oauthDevices: oauth.NewDeviceStore(),
+		oauthLife:    oauth.NewLifecycle(),
 	}
 }
 
@@ -127,10 +132,13 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/instances/{alias}", a.handleInstancePatch)
 	mux.HandleFunc("DELETE /api/instances/{alias}", a.handleInstanceDelete)
 	mux.HandleFunc("GET /api/instances/{alias}/models", a.handleInstanceModels)
-	// ChatGPT OAuth account surface: start the browser sign-in, inspect the
-	// connection state (masked), and disconnect. The callback is served only by
-	// the gateway's dedicated loopback listener, not by this router.
+	// ChatGPT OAuth account surface: start either the browser redirect or the
+	// device-code sign-in, inspect the connection state (masked), and
+	// disconnect. The browser callback is served only by the gateway's
+	// dedicated loopback listener, not by this router.
 	mux.HandleFunc("POST /api/instances/{alias}/oauth/start", a.handleOAuthStart)
+	mux.HandleFunc("POST /api/instances/{alias}/oauth/device/start", a.handleOAuthDeviceStart)
+	mux.HandleFunc("GET /api/instances/{alias}/oauth/device/status", a.handleOAuthDeviceStatus)
 	mux.HandleFunc("GET /api/instances/{alias}/oauth/status", a.handleOAuthStatus)
 	mux.HandleFunc("DELETE /api/instances/{alias}/oauth", a.handleOAuthDisconnect)
 	mux.HandleFunc("GET /api/quota", a.handleQuota)

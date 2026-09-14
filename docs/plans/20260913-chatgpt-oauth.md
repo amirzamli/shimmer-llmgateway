@@ -2,9 +2,10 @@
 
 ## Goal
 
-Add an OpenAI/ChatGPT account that uses the browser-based ChatGPT Plus OAuth
-flow implemented by OpenCode, while preserving the existing API-key provider
-path and allowing callers to select a currently supported codex model.
+Add an OpenAI/ChatGPT account that supports both ChatGPT Plus OAuth methods
+implemented by OpenCode (browser redirect and headless device code), while
+preserving the existing API-key provider path and allowing callers to select a
+currently supported codex model.
 
 ## Phase 1: Pin The Contract And Credential Model
 
@@ -24,19 +25,23 @@ path and allowing callers to select a currently supported codex model.
 
 ## Phase 2: Browser Login And Dashboard Lifecycle
 
-- Add provider-specific start, callback, status, and disconnect handlers under
-  `internal/api`; wire them through the existing guarded admin surface. Keep
-  pending state and PKCE verifier server-side, short-lived, single-use, and
-  bound to the target instance and callback; require the loopback admin policy
-  for credential-bearing OAuth operations.
-- Start the verified OpenCode authorization URL, validate state and callback
-  errors, exchange the code, validate the token/account response, then persist
-  it through the encrypted secrets store. Return only masked status or a
-  success/failure result; tokens must not occur in URLs, JSON, logs, or HTML.
-- Update `web/index.html` so adding the ChatGPT template opens the browser
-  login, shows connected/disconnected/error state, and supports reconnect and
-  disconnect without displaying secrets. Preserve existing key entry and
-  instance rename/delete behavior, including moving/removing the OAuth record.
+- Add provider-specific browser start/callback, device start/status, status, and
+  disconnect handlers under `internal/api`; wire them through the existing
+  guarded admin surface. Keep pending state, device identifiers, user codes,
+  and PKCE verifiers server-side where possible, short-lived, single-use, and
+  bound to the target instance and lifecycle generation; require the loopback
+  or explicitly configured listener policy for credential-bearing OAuth
+  operations.
+- Start the verified OpenCode browser authorization URL or device-code request,
+  validate state/device responses, exchange the returned code, validate the
+  token/account response, then persist it through the encrypted secrets store.
+  Return only the intended device user code and masked status; tokens must not
+  occur in URLs, JSON, logs, or HTML.
+- Update `web/index.html` so adding the ChatGPT template offers both browser
+  and device-code login, shows connected/disconnected/error state, and
+  supports reconnect and disconnect without displaying secrets. Preserve
+  existing key entry and instance rename/delete behavior, including
+  moving/removing the OAuth record.
 - Cover API tests for invalid state, replayed/expired transactions, callback
   failure, status masking, and lifecycle cleanup.
 

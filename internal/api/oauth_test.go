@@ -232,7 +232,9 @@ func TestOAuthLifecycleRequiresLoopbackSource(t *testing.T) {
 		path   string
 	}{
 		{http.MethodPost, "/api/instances/chatgpt/oauth/start"},
+		{http.MethodPost, "/api/instances/chatgpt/oauth/device/start"},
 		{http.MethodGet, "/api/instances/chatgpt/oauth/status"},
+		{http.MethodGet, "/api/instances/chatgpt/oauth/device/status"},
 		{http.MethodDelete, "/api/instances/chatgpt/oauth"},
 	}
 	for _, remote := range []string{

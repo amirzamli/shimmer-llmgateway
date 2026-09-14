@@ -65,16 +65,32 @@ type providerError struct {
 // code_verifier. client may be nil to use http.DefaultClient.
 func (c Config) Exchange(ctx context.Context, client *http.Client, code, verifier string) (*Token, error) {
 	c = c.WithDefaults()
+	return c.exchange(ctx, client, code, verifier, c.RedirectURI)
+}
+
+// ExchangeWithRedirect performs the same authorization-code exchange as
+// Exchange but uses an explicit redirect URI. OpenCode's device flow returns
+// an authorization code bound to auth.openai.com's device callback rather than
+// the browser flow's localhost callback.
+func (c Config) ExchangeWithRedirect(ctx context.Context, client *http.Client, code, verifier, redirectURI string) (*Token, error) {
+	c = c.WithDefaults()
+	return c.exchange(ctx, client, code, verifier, redirectURI)
+}
+
+func (c Config) exchange(ctx context.Context, client *http.Client, code, verifier, redirectURI string) (*Token, error) {
 	if code == "" {
 		return nil, errf("token.exchange", ErrInvalidTokenResponse, "authorization code is required")
 	}
 	if err := ValidateVerifier(verifier); err != nil {
 		return nil, errf("token.exchange", ErrInvalidVerifier, "valid PKCE verifier is required")
 	}
+	if redirectURI == "" {
+		return nil, errf("token.exchange", ErrInvalidTokenResponse, "redirect URI is required")
+	}
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
-	form.Set("redirect_uri", c.RedirectURI)
+	form.Set("redirect_uri", redirectURI)
 	form.Set("client_id", c.ClientID)
 	form.Set("code_verifier", verifier)
 	return c.tokenRequest(ctx, client, form, "token.exchange")
