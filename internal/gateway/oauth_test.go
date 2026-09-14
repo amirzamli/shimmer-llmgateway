@@ -336,6 +336,20 @@ template = "chatgpt"
 `, config.ChatGPTCodexBaseURL)
 }
 
+func writeChatGPTTextStream(w http.ResponseWriter, text string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	fl := w.(http.Flusher)
+	for _, line := range []string{
+		`data: {"type":"response.created","response":{"id":"resp_1","object":"response","created_at":1722600000,"status":"in_progress","model":"gpt-5.3-codex"}}`,
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","status":"in_progress","role":"assistant","content":[]}}`,
+		fmt.Sprintf(`data: {"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":%q}`, text),
+		`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","created_at":1722600000,"status":"completed","model":"gpt-5.3-codex","output":[],"usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}}}`,
+	} {
+		fmt.Fprintf(w, "%s\n\n", line)
+		fl.Flush()
+	}
+}
+
 func TestOAuthBuildUpstreamHeaders(t *testing.T) {
 	provider := newFakeProvider(t, nil)
 	srv, _ := newGatewayServer(t, provider, chatgptOAuthTOML(provider.url()), nil, io.Discard)
@@ -349,7 +363,7 @@ func TestOAuthBuildUpstreamHeaders(t *testing.T) {
 		t.Fatalf("Resolve: %v", err)
 	}
 	rt := &route{inst: inst, template: cfg.Templates[inst.Template], model: model, alias: inst.Alias, provider: inst.Template}
-	body := []byte(`{"model":"chatgpt/gpt-5.3-codex","messages":[{"role":"user","content":"hi"}],"stream":false}`)
+	body := []byte(`{"model":"chatgpt/gpt-5.3-codex","messages":[{"role":"user","content":"hi"}],"max_tokens":32000,"stream":false}`)
 	inbound := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(body)))
 	// A hostile client tries to inject its own identity; it must never win.
 	inbound.Header.Set("Authorization", "Bearer client-evil")
@@ -393,13 +407,25 @@ func TestOAuthBuildUpstreamHeaders(t *testing.T) {
 	}
 	// The Responses request carries the resolved model name.
 	var up struct {
-		Model string `json:"model"`
+		Model           string `json:"model"`
+		Store           *bool  `json:"store"`
+		Stream          bool   `json:"stream"`
+		MaxOutputTokens *int   `json:"max_output_tokens"`
 	}
 	if err := json.Unmarshal(sentBody, &up); err != nil {
 		t.Fatalf("sent body: %v", err)
 	}
 	if up.Model != "gpt-5.3-codex" {
 		t.Errorf("upstream model = %q, want gpt-5.3-codex", up.Model)
+	}
+	if up.Store == nil || *up.Store {
+		t.Errorf("upstream store = %v, want explicit false", up.Store)
+	}
+	if !up.Stream {
+		t.Error("upstream stream = false, want forced streaming")
+	}
+	if up.MaxOutputTokens != nil {
+		t.Errorf("upstream max_output_tokens = %d, want omitted", *up.MaxOutputTokens)
 	}
 }
 
@@ -426,8 +452,7 @@ func TestOAuthChatEndToEnd(t *testing.T) {
 		if !strings.HasSuffix(r.URL.Path, "/codex/responses") {
 			provider.t.Errorf("upstream path = %q, want /codex/responses suffix", r.URL.Path)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"id":"resp_1","object":"response","status":"completed","model":"gpt-5.3-codex","output":[{"type":"message","id":"msg_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"oauth-hi","annotations":[]}]}],"usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}}`))
+		writeChatGPTTextStream(w, "oauth-hi")
 	})
 	srv, st := newGatewayServer(t, provider, chatgptOAuthTOML(provider.url()), nil, io.Discard)
 	old := freshOAuthCred()
@@ -440,7 +465,7 @@ func TestOAuthChatEndToEnd(t *testing.T) {
 	gs := httptest.NewServer(srv.Handler())
 	t.Cleanup(gs.Close)
 
-	resp := postChat(t, gs, `{"model":"chatgpt/gpt-5.3-codex","messages":[{"role":"user","content":"hi"}]}`, map[string]string{
+	resp := postChat(t, gs, `{"model":"chatgpt/gpt-5.3-codex","messages":[{"role":"user","content":"hi"}],"max_tokens":32000,"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object"}}}],"tool_choice":"auto"}`, map[string]string{
 		"X-Session-Id":       "sess-oauth-e2e",
 		"Authorization":      "Bearer client-evil",
 		"ChatGPT-Account-Id": "client-evil",
@@ -468,13 +493,29 @@ func TestOAuthChatEndToEnd(t *testing.T) {
 		t.Errorf("upstream originator = %q, want %q", pr.Originator, oauth.Originator)
 	}
 	var up struct {
-		Model string `json:"model"`
+		Model           string `json:"model"`
+		Store           *bool  `json:"store"`
+		Stream          bool   `json:"stream"`
+		MaxOutputTokens *int   `json:"max_output_tokens"`
+		ToolChoice      string `json:"tool_choice"`
 	}
 	if err := json.Unmarshal(pr.Body, &up); err != nil {
 		t.Fatalf("upstream body: %v", err)
 	}
 	if up.Model != "gpt-5.3-codex" {
 		t.Errorf("upstream model = %q, want gpt-5.3-codex", up.Model)
+	}
+	if up.Store == nil || *up.Store {
+		t.Errorf("upstream store = %v, want explicit false", up.Store)
+	}
+	if !up.Stream {
+		t.Error("upstream stream = false, want forced streaming")
+	}
+	if up.MaxOutputTokens != nil {
+		t.Errorf("upstream max_output_tokens = %d, want omitted", *up.MaxOutputTokens)
+	}
+	if up.ToolChoice != "auto" {
+		t.Errorf("upstream tool_choice = %q, want scalar auto", up.ToolChoice)
 	}
 	// Capture stays chat-shaped and records the request.
 	req := waitForRequest(t, st, "sess-oauth-e2e", 5*time.Second)
@@ -483,20 +524,63 @@ func TestOAuthChatEndToEnd(t *testing.T) {
 	}
 }
 
+func TestOAuthResponsesNonStreamEndToEnd(t *testing.T) {
+	provider := newFakeProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeChatGPTTextStream(w, "responses-hi")
+	})
+	srv, st := newGatewayServer(t, provider, chatgptOAuthTOML(provider.url()), nil, io.Discard)
+	if err := srv.secrets.SetOAuth("chatgpt", freshOAuthCred()); err != nil {
+		t.Fatal(err)
+	}
+	gs := httptest.NewServer(srv.Handler())
+	t.Cleanup(gs.Close)
+
+	resp := postResponses(t, gs, `{"model":"chatgpt/gpt-5.3-codex","input":"hi","max_output_tokens":32000}`, map[string]string{"X-Session-Id": "sess-oauth-responses"})
+	body := drainClose(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", resp.StatusCode, body)
+	}
+	var client struct {
+		Object string `json:"object"`
+		Status string `json:"status"`
+		Output []struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(body, &client); err != nil {
+		t.Fatalf("client body not a Responses object: %v (%s)", err, body)
+	}
+	if client.Object != "response" || client.Status != "completed" || len(client.Output) != 1 || len(client.Output[0].Content) != 1 || client.Output[0].Content[0].Text != "responses-hi" {
+		t.Errorf("client response = %+v", client)
+	}
+
+	seen := provider.requests()
+	if len(seen) != 1 {
+		t.Fatalf("provider saw %d requests, want 1", len(seen))
+	}
+	var up struct {
+		Model           string `json:"model"`
+		Store           *bool  `json:"store"`
+		Stream          bool   `json:"stream"`
+		MaxOutputTokens *int   `json:"max_output_tokens"`
+	}
+	if err := json.Unmarshal(seen[0].Body, &up); err != nil {
+		t.Fatalf("upstream body: %v", err)
+	}
+	if up.Model != "gpt-5.3-codex" || up.Store == nil || *up.Store || !up.Stream || up.MaxOutputTokens != nil {
+		t.Errorf("upstream shape = model=%q store=%v stream=%v max_output_tokens=%v", up.Model, up.Store, up.Stream, up.MaxOutputTokens)
+	}
+	req := waitForRequest(t, st, "sess-oauth-responses", 5*time.Second)
+	if !strings.Contains(string(req.ResponseJSON), `"chat.completion"`) {
+		t.Errorf("capture response_json should stay chat-shaped: %q", req.ResponseJSON)
+	}
+}
+
 func TestOAuthStreamEndToEnd(t *testing.T) {
-	var provider *fakeProvider
-	provider = newFakeProvider(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		fl := w.(http.Flusher)
-		for _, line := range []string{
-			`data: {"type":"response.created","response":{"id":"resp_1","object":"response","created_at":1722600000,"status":"in_progress","model":"gpt-5.3-codex"}}`,
-			`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","status":"in_progress","role":"assistant","content":[]}}`,
-			`data: {"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"stream-hi"}`,
-			`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","created_at":1722600000,"status":"completed","model":"gpt-5.3-codex","output":[],"usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}}}`,
-		} {
-			fmt.Fprintf(w, "%s\n\n", line)
-			fl.Flush()
-		}
+	provider := newFakeProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeChatGPTTextStream(w, "stream-hi")
 	})
 	srv, st := newGatewayServer(t, provider, chatgptOAuthTOML(provider.url()), nil, io.Discard)
 	if err := srv.secrets.SetOAuth("chatgpt", freshOAuthCred()); err != nil {

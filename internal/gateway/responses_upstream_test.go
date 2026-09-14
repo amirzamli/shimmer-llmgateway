@@ -28,7 +28,7 @@ func TestTranslateChatToResponsesMessages(t *testing.T) {
 	    {"role":"tool","tool_call_id":"call_abc","content":"Sunny"}
 	  ]
 	}`
-	out, err := translateChatToResponses([]byte(body), "sess-1")
+	out, err := translateChatToResponses([]byte(body), "sess-1", false)
 	if err != nil {
 		t.Fatalf("translate: %v", err)
 	}
@@ -90,8 +90,9 @@ func TestTranslateChatToResponsesParams(t *testing.T) {
 	  "max_completion_tokens": 32000,
 	  "reasoning_effort": "high",
 	  "response_format": {"type":"json_object"},
+	  "store": true,
 	  "stream": true
-	}`), "sess-1")
+	}`), "sess-1", false)
 	if err != nil {
 		t.Fatalf("translate: %v", err)
 	}
@@ -116,8 +117,8 @@ func TestTranslateChatToResponsesParams(t *testing.T) {
 	if _, ok := tool["function"]; ok {
 		t.Errorf("tool should be flat, not nested: %v", tool)
 	}
-	tc, ok := m["tool_choice"].(map[string]any)
-	if !ok || tc["type"] != "auto" {
+	tc, ok := m["tool_choice"].(string)
+	if !ok || tc != "auto" {
 		t.Errorf("tool_choice = %v", m["tool_choice"])
 	}
 	if m["parallel_tool_calls"] != false {
@@ -143,16 +144,49 @@ func TestTranslateChatToResponsesParams(t *testing.T) {
 	if m["prompt_cache_key"] != "sess-1" {
 		t.Errorf("prompt_cache_key = %v, want sess-1", m["prompt_cache_key"])
 	}
-	for _, absent := range []string{"max_tokens", "max_completion_tokens", "response_format", "reasoning_effort", "messages"} {
+	for _, absent := range []string{"max_tokens", "max_completion_tokens", "response_format", "reasoning_effort", "messages", "store"} {
 		if _, ok := m[absent]; ok {
 			t.Errorf("translated body should not carry %q: %v", absent, m)
 		}
 	}
 }
 
+func TestTranslateChatToResponsesChatGPTCodex(t *testing.T) {
+	out, err := translateChatToResponses([]byte(`{
+  "model":"codex",
+  "messages":[{"role":"user","content":"hi"}],
+  "max_tokens":32000,
+  "max_completion_tokens":32000,
+	"tool_choice":"auto",
+  "stream":false,
+  "store":true
+}`), "sess-codex", true)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatalf("output not JSON: %v", err)
+	}
+	if m["store"] != false {
+		t.Errorf("store = %v, want false", m["store"])
+	}
+	if m["stream"] != true {
+		t.Errorf("stream = %v, want true", m["stream"])
+	}
+	if m["tool_choice"] != "auto" {
+		t.Errorf("tool_choice = %v, want scalar auto", m["tool_choice"])
+	}
+	for _, absent := range []string{"max_output_tokens", "max_tokens", "max_completion_tokens"} {
+		if _, ok := m[absent]; ok {
+			t.Errorf("ChatGPT Codex body should omit %q: %v", absent, m)
+		}
+	}
+}
+
 func TestTranslateChatToResponsesMaxTokens(t *testing.T) {
 	// max_tokens wins over max_completion_tokens when both are present.
-	out, err := translateChatToResponses([]byte(`{"model":"zen-x","messages":[{"role":"user","content":"hi"}],"max_tokens":100,"max_completion_tokens":200}`), "")
+	out, err := translateChatToResponses([]byte(`{"model":"zen-x","messages":[{"role":"user","content":"hi"}],"max_tokens":100,"max_completion_tokens":200}`), "", false)
 	if err != nil {
 		t.Fatalf("translate: %v", err)
 	}
@@ -165,7 +199,7 @@ func TestTranslateChatToResponsesMaxTokens(t *testing.T) {
 	}
 
 	// Neither present → no max_output_tokens key (no default injected).
-	out, err = translateChatToResponses([]byte(`{"model":"zen-x","messages":[{"role":"user","content":"hi"}]}`), "")
+	out, err = translateChatToResponses([]byte(`{"model":"zen-x","messages":[{"role":"user","content":"hi"}]}`), "", false)
 	if err != nil {
 		t.Fatalf("translate: %v", err)
 	}
@@ -181,7 +215,7 @@ func TestTranslateChatToResponsesMaxTokens(t *testing.T) {
 func TestTranslateChatToResponsesAbsentFields(t *testing.T) {
 	// Non-stream request with no session id: stream and prompt_cache_key are
 	// absent (not false/empty), like the other optional passthrough fields.
-	out, err := translateChatToResponses([]byte(`{"model":"zen-x","messages":[{"role":"user","content":"hi"}]}`), "")
+	out, err := translateChatToResponses([]byte(`{"model":"zen-x","messages":[{"role":"user","content":"hi"}]}`), "", false)
 	if err != nil {
 		t.Fatalf("translate: %v", err)
 	}
@@ -197,7 +231,7 @@ func TestTranslateChatToResponsesAbsentFields(t *testing.T) {
 }
 
 func TestTranslateChatToResponsesUnparseable(t *testing.T) {
-	if _, err := translateChatToResponses([]byte(`not json`), ""); err == nil {
+	if _, err := translateChatToResponses([]byte(`not json`), "", false); err == nil {
 		t.Errorf("translate accepted an unparseable body")
 	}
 }
@@ -221,7 +255,7 @@ func TestTranslateChatToResponsesRoundTrip(t *testing.T) {
 	  "reasoning_effort": "high",
 	  "response_format": {"type":"json_object"}
 	}`
-	out, err := translateChatToResponses([]byte(chatBody), "sess-1")
+	out, err := translateChatToResponses([]byte(chatBody), "sess-1", false)
 	if err != nil {
 		t.Fatalf("translate: %v", err)
 	}

@@ -12,7 +12,8 @@ package gateway
 //     assistant tool_calls → function_call items, role:"tool" →
 //     function_call_output, tools flattened to the responsesTool form,
 //     tool_choice mapped, max_tokens/max_completion_tokens →
-//     max_output_tokens, reasoning_effort → reasoning.effort,
+//     max_output_tokens (except for the restricted ChatGPT Codex contract),
+//     reasoning_effort → reasoning.effort,
 //     response_format → text.format, prompt_cache_key from the effective
 //     session id);
 //   - translateResponsesToChatCompletion: non-stream Responses response →
@@ -48,8 +49,10 @@ import (
 // translateOpenAIToAnthropic. sessionID is the request's effective session id
 // (the same id sent via the template's SessionHeader); when non-empty it is
 // forwarded as prompt_cache_key so upstream prompt caching and the gateway
-// session grouping stay consistent.
-func translateChatToResponses(chatBody []byte, sessionID string) ([]byte, error) {
+// session grouping stay consistent. chatGPTCodex selects the restricted
+// ChatGPT Codex contract, which requires streaming and rejects
+// max_output_tokens.
+func translateChatToResponses(chatBody []byte, sessionID string, chatGPTCodex bool) ([]byte, error) {
 	var req struct {
 		Model               string          `json:"model"`
 		Messages            []openAIMsg     `json:"messages"`
@@ -74,6 +77,10 @@ func translateChatToResponses(chatBody []byte, sessionID string) ([]byte, error)
 		"model": req.Model,
 		"input": items,
 	}
+	if chatGPTCodex {
+		// The ChatGPT Codex endpoint requires an explicit false value.
+		out["store"] = false
+	}
 	if instructions != "" {
 		out["instructions"] = instructions
 	}
@@ -95,14 +102,16 @@ func translateChatToResponses(chatBody []byte, sessionID string) ([]byte, error)
 		out["top_p"] = *req.TopP
 	}
 	// Both chat max_tokens spellings map to the Responses max_output_tokens;
-	// no default is injected (unlike the anthropic branch, which must default
-	// because Anthropic requires the field).
-	if req.MaxTokens != nil {
-		out["max_output_tokens"] = *req.MaxTokens
-	} else if req.MaxCompletionTokens != nil {
-		out["max_output_tokens"] = *req.MaxCompletionTokens
+	// ChatGPT Codex rejects that field, so its client-side limit is deliberately
+	// omitted. No default is injected.
+	if !chatGPTCodex {
+		if req.MaxTokens != nil {
+			out["max_output_tokens"] = *req.MaxTokens
+		} else if req.MaxCompletionTokens != nil {
+			out["max_output_tokens"] = *req.MaxCompletionTokens
+		}
 	}
-	if req.Stream {
+	if chatGPTCodex || req.Stream {
 		out["stream"] = true
 	}
 	if req.ReasoningEffort != "" {
@@ -205,11 +214,11 @@ func translateChatTools(tools []openAITool) []map[string]any {
 }
 
 // translateChatToolChoice maps OpenAI tool_choice to the Responses form:
-// string forms pass through; the nested function object
+// scalar forms pass through; the nested function object
 // {"type":"function","function":{"name":N}} becomes the flat
 // {"type":"function","name":N}. Unrecognized shapes are dropped rather than
 // rejected, mirroring translateToolChoice.
-func translateChatToolChoice(raw json.RawMessage) map[string]any {
+func translateChatToolChoice(raw json.RawMessage) any {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil
 	}
@@ -217,7 +226,7 @@ func translateChatToolChoice(raw json.RawMessage) map[string]any {
 	if err := json.Unmarshal(raw, &s); err == nil {
 		switch s {
 		case "none", "auto", "required":
-			return map[string]any{"type": s}
+			return s
 		}
 		return nil
 	}

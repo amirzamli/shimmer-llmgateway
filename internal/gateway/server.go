@@ -711,7 +711,7 @@ func (s *Server) buildUpstream(ctx context.Context, cfg *config.Config, rt *rout
 		}
 		upstreamBody = translated
 	} else if responses {
-		translated, err := translateChatToResponses(upstreamBody, sessionID)
+		translated, err := translateChatToResponses(upstreamBody, sessionID, rt.template.OAuth)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -936,6 +936,10 @@ func (s *Server) handleNonStream(w http.ResponseWriter, r *http.Request, cfg *co
 		s.writeError(w, http.StatusBadGateway, "UPSTREAM_ERROR", "upstream request failed: "+err.Error())
 		return
 	}
+	if rt.template.OAuth {
+		s.handleCodexNonStreamResponse(w, r, rt, chain, sentBody, sessionID, requestID, start, sf, rsp)
+		return
+	}
 	respBody, readErr := io.ReadAll(rsp.Body)
 	rsp.Body.Close()
 	if readErr != nil {
@@ -986,6 +990,93 @@ func (s *Server) handleNonStream(w http.ResponseWriter, r *http.Request, cfg *co
 		clientBody = sf.shapeClient(clientBody)
 	}
 	s.passthrough(w, rsp, clientBody)
+	s.capture(rec)
+}
+
+// handleCodexNonStreamResponse buffers the streaming-only ChatGPT Codex
+// response, reassembles it through the normal Responses translator, and then
+// shapes it for the client's requested surface.
+func (s *Server) handleCodexNonStreamResponse(w http.ResponseWriter, r *http.Request, rt *route, chain *plugins.Chain, sentBody []byte, sessionID, requestID string, start time.Time, sf clientSurface, rsp *http.Response) {
+	defer rsp.Body.Close()
+	if rsp.StatusCode >= 400 {
+		respBody, err := io.ReadAll(rsp.Body)
+		if err != nil {
+			rec := upstreamErrorRecord(rt, sf.requestJSON, requestFilteredBody(chain, sentBody), sessionID, requestID, start, err, chain.Applied())
+			rec.Endpoint = sf.endpoint
+			s.capture(rec)
+			s.writeError(w, http.StatusBadGateway, "UPSTREAM_ERROR", "upstream read failed: "+err.Error())
+			return
+		}
+		rec := &store.CaptureRecord{
+			ID:              requestID,
+			SessionID:       sessionID,
+			CreatedAt:       start,
+			Alias:           rt.alias,
+			Provider:        rt.provider,
+			ProviderBaseURL: rt.template.BaseURL,
+			Model:           rt.model,
+			Endpoint:        sf.endpoint,
+			DurationMS:      durationMS(start),
+			StatusCode:      rsp.StatusCode,
+			RequestJSON:     sf.requestJSON,
+			PluginsApplied:  chain.Applied(),
+			Error:           providerError(rsp.StatusCode, respBody),
+		}
+		rec.RequestFilteredJSON = requestFilteredBody(chain, sentBody)
+		s.passthrough(w, rsp, respBody)
+		s.capture(rec)
+		return
+	}
+
+	asm := newAssembler()
+	out := readResponsesStream(r.Context(), rsp, asm, func([]byte) error { return nil })
+	rec := &store.CaptureRecord{
+		ID:              requestID,
+		SessionID:       sessionID,
+		CreatedAt:       start,
+		Alias:           rt.alias,
+		Provider:        rt.provider,
+		ProviderBaseURL: rt.template.BaseURL,
+		Model:           rt.model,
+		Endpoint:        sf.endpoint,
+		DurationMS:      durationMS(start),
+		StatusCode:      rsp.StatusCode,
+		FinishReason:    out.finish,
+		Usage:           out.usage,
+		RequestJSON:     sf.requestJSON,
+		ResponseJSON:    out.reassembled,
+		Truncated:       out.truncated,
+		PluginsApplied:  chain.Applied(),
+		Error:           out.streamErr,
+		ChunkCount:      out.chunks,
+	}
+	rec.RequestFilteredJSON = requestFilteredBody(chain, sentBody)
+	if out.truncated || out.streamErr != nil {
+		s.capture(rec)
+		message := "upstream stream ended before completion"
+		if out.streamErr != nil {
+			message = out.streamErr.Message
+		}
+		s.writeError(w, http.StatusBadGateway, "UPSTREAM_ERROR", message)
+		return
+	}
+
+	clientBody := out.reassembled
+	if chain.HasResponse() {
+		respDomain := &plugins.Response{Body: clientBody}
+		if err := chain.FilterResponse(r.Context(), respDomain); err != nil {
+			s.logger.Error("response_plugin_failed", map[string]any{"session_id": sessionID, "error": err.Error()})
+		} else {
+			rec.ResponseFilteredJSON = respDomain.Body
+			clientBody = respDomain.Body
+		}
+	}
+	if sf.shapeClient != nil {
+		clientBody = sf.shapeClient(clientBody)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(rsp.StatusCode)
+	_, _ = w.Write(clientBody)
 	s.capture(rec)
 }
 
