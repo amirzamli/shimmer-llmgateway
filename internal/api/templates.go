@@ -17,6 +17,11 @@ type templateView struct {
 	Style     string   `json:"style"`
 	APIKeyEnv string   `json:"api_key_env"`
 	Models    []string `json:"models"`
+	// OAuth marks the template as authenticated by the browser sign-in flow
+	// (the built-in chatgpt template) instead of an API key. The dashboard
+	// uses it to offer the ChatGPT account surface and hide the key field;
+	// ordinary API-key templates leave it unset.
+	OAuth bool `json:"oauth,omitempty"`
 	// ModelStyles carries per-model protocol overrides for templates such as
 	// opencode_go, whose catalog mixes OpenAI chat, Responses, and Anthropic
 	// Messages models on one endpoint.
@@ -29,7 +34,7 @@ type templateView struct {
 }
 
 func templateViewOf(t *config.Template) templateView {
-	return templateView{Name: t.Name, BaseURL: t.BaseURL, Style: styleOf(t.Style), APIKeyEnv: t.APIKeyEnv, Models: t.Models, ModelStyles: t.ModelStyles, ModelReasoningOptions: t.ModelReasoningOptions, Docs: t.Docs}
+	return templateView{Name: t.Name, BaseURL: t.BaseURL, Style: styleOf(t.Style), APIKeyEnv: t.APIKeyEnv, Models: t.Models, OAuth: t.OAuth, ModelStyles: t.ModelStyles, ModelReasoningOptions: t.ModelReasoningOptions, Docs: t.Docs}
 }
 
 // styleOf normalizes an empty style to the "openai" default for the UI.

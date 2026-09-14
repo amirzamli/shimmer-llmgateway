@@ -110,7 +110,15 @@ type Template struct {
 	// API (request, non-stream response, and SSE stream), and "responses"
 	// forwards to <base_url>/responses and translates between the OpenAI chat
 	// format and the OpenAI Responses API (§4.2).
-	Style  string   `toml:"style,omitempty"`
+	Style string `toml:"style,omitempty"`
+	// OAuth marks the template as authenticated by a stored OAuth credential
+	// (the ChatGPT Plus browser flow) instead of an API key. For such
+	// templates the forward path resolves the instance's encrypted OAuth
+	// record (refreshing it when expired) and injects the credential identity
+	// upstream; api_key_env and the API-key secrets path are not consulted.
+	// The built-in chatgpt template sets this; ordinary templates leave it
+	// false and keep the unchanged API-key/keyless routing.
+	OAuth  bool     `toml:"oauth,omitempty"`
 	Models []string `toml:"models"`
 	// DefaultPlugins is a materialization seed only: when an instance of this
 	// template has no plugins of its own (nil), toRaw writes a copy of this
@@ -573,6 +581,23 @@ func builtinTemplates() map[string]Template {
 			APIKeyEnv: "OPENAI_API_KEY",
 			Models:    []string{"gpt-4o", "gpt-4o-mini"},
 		},
+		// chatgpt: a ChatGPT Plus/Pro account authenticated by the browser
+		// OAuth flow (internal/oauth) rather than an API key. The upstream is
+		// the verified OpenCode v1.18.30 ChatGPT codex endpoint, which speaks
+		// the Responses API, so the template defaults to the responses style
+		// and the forward path translates requests to that wire format. The
+		// gateway sends its own identity (never impersonating OpenCode): the
+		// stored credential's bearer token and account id, the per-conversation
+		// session-id header, and the gateway User-Agent. Models are configured
+		// here because the codex endpoint does not expose the OpenAI /models
+		// contract. Leave the list empty rather than shipping a stale model
+		// allowlist; callers select a currently supported codex model explicitly.
+		"chatgpt": {
+			BaseURL:       ChatGPTCodexBaseURL,
+			Style:         StyleResponses,
+			OAuth:         true,
+			SessionHeader: ChatGPTCodexSessionHeader,
+		},
 		"anthropic": {
 			BaseURL:   "https://api.anthropic.com/v1",
 			APIKeyEnv: "ANTHROPIC_API_KEY",
@@ -758,6 +783,13 @@ const (
 	StyleOpenAI     = "openai"
 	StyleAnthropic  = "anthropic"
 	StyleResponses  = "responses"
+	// ChatGPTCodexBaseURL is the only upstream base URL permitted for an
+	// OAuth-marked template. OAuth credentials are bearer credentials, so the
+	// endpoint cannot be user-configurable.
+	ChatGPTCodexBaseURL = "https://chatgpt.com/backend-api/codex"
+	// ChatGPTCodexSessionHeader is required by the fixed Codex upstream
+	// contract for conversation routing.
+	ChatGPTCodexSessionHeader = "session-id"
 )
 
 // IsCustomTemplatePlaceholder reports whether name is one of the endpoint-less
@@ -905,6 +937,25 @@ func Validate(c *Config) error {
 				problems = append(problems, fmt.Sprintf("template %q: %v", name, err))
 			}
 		}
+		if t.OAuth {
+			if t.BaseURL != ChatGPTCodexBaseURL {
+				problems = append(problems, fmt.Sprintf("template %q: oauth templates must use the fixed ChatGPT Codex base_url %q", name, ChatGPTCodexBaseURL))
+			}
+			if t.Style != StyleResponses {
+				problems = append(problems, fmt.Sprintf("template %q: oauth templates must use style %q", name, StyleResponses))
+			}
+			if t.SessionHeader != ChatGPTCodexSessionHeader {
+				problems = append(problems, fmt.Sprintf("template %q: oauth templates must use session_header %q", name, ChatGPTCodexSessionHeader))
+			}
+			if t.APIKeyEnv != "" {
+				problems = append(problems, fmt.Sprintf("template %q: oauth templates cannot set api_key_env", name))
+			}
+			for model, style := range t.ModelStyles {
+				if style != StyleResponses {
+					problems = append(problems, fmt.Sprintf("template %q: oauth model_styles for %q must use style %q", name, model, StyleResponses))
+				}
+			}
+		}
 		// Identity headers become literal upstream headers, so a bad name or
 		// a value carrying CR/LF would be a header-smuggling vector; reject
 		// both at load.
@@ -1035,6 +1086,9 @@ func Validate(c *Config) error {
 	for _, inst := range c.Instances {
 		if inst.Plugins != nil {
 			checkPlugins(*inst.Plugins, fmt.Sprintf("instance %q plugins", inst.Alias))
+		}
+		if t, ok := c.Templates[inst.Template]; ok && t.OAuth && inst.APIKeyEnv != "" {
+			problems = append(problems, fmt.Sprintf("instance %q: oauth instances cannot set api_key_env", inst.Alias))
 		}
 	}
 	for name, t := range c.Templates {

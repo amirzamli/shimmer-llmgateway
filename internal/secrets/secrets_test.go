@@ -6,8 +6,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // testKey is a fixed 32-byte AES-256 key used by tests.
@@ -311,6 +313,75 @@ func TestLegacyMigrationDeferredWithGeneratedKey(t *testing.T) {
 	}
 }
 
+func TestPendingMigrationRejectsMutationsUntilAck(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gateway.db.secrets.json")
+	legacy := []byte("{\n  \"openai\": \"sk-legacy-123\"\n}\n")
+	if err := os.WriteFile(path, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := s.SetOAuth("chatgpt", testCred()); !errors.Is(err, ErrMigrationPending) {
+		t.Fatalf("SetOAuth before ACK = %v, want ErrMigrationPending", err)
+	}
+	if err := s.Set("new", "sk-new"); !errors.Is(err, ErrMigrationPending) {
+		t.Fatalf("Set before ACK = %v, want ErrMigrationPending", err)
+	}
+	if err := s.Delete("openai"); !errors.Is(err, ErrMigrationPending) {
+		t.Fatalf("Delete before ACK = %v, want ErrMigrationPending", err)
+	}
+	if err := s.Move("openai", "renamed", nil); !errors.Is(err, ErrMigrationPending) {
+		t.Fatalf("Move before ACK = %v, want ErrMigrationPending", err)
+	}
+	onDisk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(onDisk, legacy) {
+		t.Errorf("rejected mutation before ACK rewrote the legacy file: %s", onDisk)
+	}
+	if key, ok := s.Get("openai"); !ok || key != "sk-legacy-123" {
+		t.Errorf("legacy key after rejected Delete = (%q, %v), want original", key, ok)
+	}
+	if _, ok := s.Get("new"); ok {
+		t.Error("rejected Set left a new key in memory")
+	}
+	if _, ok := s.Get("renamed"); ok {
+		t.Error("rejected Move left a destination in memory")
+	}
+	if _, ok, err := s.GetOAuth("chatgpt"); err != nil || ok {
+		t.Errorf("rejected OAuth mutation = (%v, %v), want absent", ok, err)
+	}
+
+	genKey, ok := s.GeneratedMasterKey()
+	if !ok || genKey == "" {
+		t.Fatal("generated key was cleared before ACK")
+	}
+	if err := s.AckMasterKey(); err != nil {
+		t.Fatalf("AckMasterKey: %v", err)
+	}
+	onDisk, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(onDisk), `"ciphertext"`) || strings.Contains(string(onDisk), "sk-legacy-123") {
+		t.Errorf("ACK did not encrypt the legacy map: %s", onDisk)
+	}
+	rawKey, err := base64.StdEncoding.DecodeString(genKey)
+	if err != nil {
+		t.Fatalf("decode generated key: %v", err)
+	}
+	s2, err := Open(path, rawKey)
+	if err != nil {
+		t.Fatalf("re-open with generated key: %v", err)
+	}
+	if key, ok := s2.Get("openai"); !ok || key != "sk-legacy-123" {
+		t.Errorf("reopened legacy key = (%q, %v), want original", key, ok)
+	}
+}
+
 func TestGeneratedKeyLifecycle(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "gateway.db.secrets.json")
 	s, err := Open(path, nil)
@@ -450,5 +521,366 @@ func TestResolveKey(t *testing.T) {
 	t.Setenv("NEVER_SET_ENV", "")
 	if key, ok := s.ResolveKey("NEVER_SET_ENV", "openai-2"); ok || key != "" {
 		t.Errorf("ResolveKey missing = (%q, %v), want ('', false)", key, ok)
+	}
+}
+
+// ---- OAuth credential records ----
+
+// testCred is a fixed OAuth credential used by the record tests.
+func testCred() OAuthCredential {
+	return OAuthCredential{
+		AccessToken:  "at-secret-access-token",
+		RefreshToken: "rt-secret-refresh-token",
+		ExpiresAt:    time.Now().Add(time.Hour),
+		AccountID:    "acc_123",
+	}
+}
+
+func TestOAuthRoundTripAndReload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gateway.db.secrets.json")
+	s, err := Open(path, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred := testCred()
+	if err := s.SetOAuth("chatgpt", cred); err != nil {
+		t.Fatalf("SetOAuth: %v", err)
+	}
+	got, ok, err := s.GetOAuth("chatgpt")
+	if err != nil || !ok {
+		t.Fatalf("GetOAuth = (%+v, %v, %v); want record, true, nil", got, ok, err)
+	}
+	if got.AccessToken != cred.AccessToken || got.RefreshToken != cred.RefreshToken || got.AccountID != cred.AccountID {
+		t.Errorf("GetOAuth = %+v, want %+v", got, cred)
+	}
+	if !got.ExpiresAt.Equal(cred.ExpiresAt) {
+		t.Errorf("ExpiresAt = %v, want %v", got.ExpiresAt, cred.ExpiresAt)
+	}
+	if got.Version != oauthRecordVersion {
+		t.Errorf("Version = %d, want %d", got.Version, oauthRecordVersion)
+	}
+
+	// A reload from disk sees the persisted record.
+	s2, err := Open(path, testKey)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	got2, ok, err := s2.GetOAuth("chatgpt")
+	if err != nil || !ok {
+		t.Fatalf("reloaded GetOAuth = (%+v, %v, %v); want record, true, nil", got2, ok, err)
+	}
+	if got2.AccessToken != cred.AccessToken || got2.RefreshToken != cred.RefreshToken {
+		t.Errorf("reloaded record = %+v, want %+v", got2, cred)
+	}
+}
+
+func TestOAuthRecordNoPlaintextOnDisk(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gateway.db.secrets.json")
+	s, err := Open(path, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetOAuth("chatgpt", testCred()); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"at-secret-access-token", "rt-secret-refresh-token", "acc_123"} {
+		if strings.Contains(string(data), secret) {
+			t.Errorf("on-disk bytes contain plaintext %q", secret)
+		}
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("secrets file mode = %o, want 0600", perm)
+	}
+}
+
+func TestOAuthAndLegacyKeyCoexist(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gateway.db.secrets.json")
+	s, err := Open(path, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Set("openai", "sk-api-key-123"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetOAuth("chatgpt", testCred()); err != nil {
+		t.Fatal(err)
+	}
+	// The API-key alias still resolves as a key...
+	if key, ok := s.ResolveKey("", "openai"); !ok || key != "sk-api-key-123" {
+		t.Errorf("ResolveKey(openai) = (%q, %v), want (sk-api-key-123, true)", key, ok)
+	}
+	// ...and GetOAuth reports it is not a record (no error).
+	if _, ok, err := s.GetOAuth("openai"); err != nil || ok {
+		t.Errorf("GetOAuth(openai) = (%v, %v); want false, nil", ok, err)
+	}
+	// The OAuth alias resolves as a record...
+	if _, ok, err := s.GetOAuth("chatgpt"); err != nil || !ok {
+		t.Errorf("GetOAuth(chatgpt) = (%v, %v); want true, nil", ok, err)
+	}
+	// ...and never as an API key.
+	if key, ok := s.ResolveKey("", "chatgpt"); ok || key != "" {
+		t.Errorf("ResolveKey(chatgpt) = (%q, %v), want ('', false) — an OAuth record is not a key", key, ok)
+	}
+	// A reload sees both values (the plaintext shape stayed the legacy map).
+	s2, err := Open(path, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := s2.GetOAuth("chatgpt"); !ok {
+		t.Error("reloaded store lost the OAuth record")
+	}
+	if _, ok := s2.Get("openai"); !ok {
+		t.Error("reloaded store lost the legacy key")
+	}
+}
+
+func TestResolveKeyEnvStillWinsOverOAuthRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gateway.db.secrets.json")
+	s, err := Open(path, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetOAuth("chatgpt", testCred()); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TEST_OAUTH_ENV", "sk-env-key")
+	// The env var is a real key and always wins — even for an alias whose
+	// stored value is an OAuth record (defensive: no path should send the
+	// record as a Bearer token).
+	if key, ok := s.ResolveKey("TEST_OAUTH_ENV", "chatgpt"); !ok || key != "sk-env-key" {
+		t.Errorf("ResolveKey with env = (%q, %v), want (sk-env-key, true)", key, ok)
+	}
+}
+
+func TestLegacyPlaintextFileWithOAuthRecordMigrates(t *testing.T) {
+	// A legacy plaintext file whose value happens to carry the marker prefix
+	// (written by an older tool) is read as a record after migration.
+	cred := testCred()
+	encoded, err := encodeOAuthRecord(cred)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "gateway.db.secrets.json")
+	legacy := "{\n  \"openai\": \"sk-legacy-123\",\n  \"chatgpt\": " + strconv.Quote(encoded) + "\n}\n"
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path, testKey)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if key, ok := s.Get("openai"); !ok || key != "sk-legacy-123" {
+		t.Errorf("Get(openai) = (%q, %v), want (sk-legacy-123, true)", key, ok)
+	}
+	got, ok, err := s.GetOAuth("chatgpt")
+	if err != nil || !ok {
+		t.Fatalf("GetOAuth(chatgpt) = (%v, %v); want true, nil", ok, err)
+	}
+	if got.AccessToken != cred.AccessToken || got.AccountID != cred.AccountID {
+		t.Errorf("migrated record = %+v, want %+v", got, cred)
+	}
+	// The file was migrated in place to an encrypted envelope.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"ciphertext"`) {
+		t.Errorf("migrated file is not an envelope: %s", data)
+	}
+	if strings.Contains(string(data), "at-secret-access-token") {
+		t.Errorf("migrated file still contains plaintext token material")
+	}
+}
+
+func TestOAuthDeleteAndReplacement(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gateway.db.secrets.json")
+	s, err := Open(path, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetOAuth("chatgpt", testCred()); err != nil {
+		t.Fatal(err)
+	}
+	// Delete clears the record.
+	if err := s.Delete("chatgpt"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, ok, err := s.GetOAuth("chatgpt"); err != nil || ok {
+		t.Errorf("GetOAuth after Delete = (%v, %v), want false, nil", ok, err)
+	}
+	// Set (API key) replaces a record; SetOAuth replaces a key.
+	if err := s.Set("chatgpt", "sk-now-a-key"); err != nil {
+		t.Fatal(err)
+	}
+	if key, ok := s.ResolveKey("", "chatgpt"); !ok || key != "sk-now-a-key" {
+		t.Errorf("ResolveKey after Set = (%q, %v), want (sk-now-a-key, true)", key, ok)
+	}
+	if err := s.SetOAuth("chatgpt", testCred()); err != nil {
+		t.Fatal(err)
+	}
+	if key, ok := s.ResolveKey("", "chatgpt"); ok || key != "" {
+		t.Errorf("ResolveKey after SetOAuth = (%q, %v), want ('', false)", key, ok)
+	}
+	if _, ok, err := s.GetOAuth("chatgpt"); err != nil || !ok {
+		t.Errorf("GetOAuth after SetOAuth = (%v, %v), want true, nil", ok, err)
+	}
+}
+
+func TestMoveCredentialAndReplacement(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gateway.db.secrets.json")
+	s, err := Open(path, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetOAuth("old", testCred()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Move("old", "new", nil); err != nil {
+		t.Fatalf("Move OAuth credential: %v", err)
+	}
+	if _, ok, err := s.GetOAuth("old"); err != nil || ok {
+		t.Errorf("old credential after Move = (%v, %v), want absent", ok, err)
+	}
+	if _, ok, err := s.GetOAuth("new"); err != nil || !ok {
+		t.Errorf("new credential after Move = (%v, %v), want present", ok, err)
+	}
+	replacement := "sk-replacement"
+	if err := s.Move("new", "final", &replacement); err != nil {
+		t.Fatalf("Move with replacement: %v", err)
+	}
+	if _, ok, err := s.GetOAuth("new"); err != nil || ok {
+		t.Errorf("source after replacement = (%v, %v), want absent", ok, err)
+	}
+	if key, ok := s.ResolveKey("", "final"); !ok || key != replacement {
+		t.Errorf("replacement destination = (%q, %v), want %q", key, ok, replacement)
+	}
+}
+
+func TestMoveRollsBackOnPersistenceFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gateway.db.secrets.json")
+	s, err := Open(path, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Set("old", "sk-old"); err != nil {
+		t.Fatal(err)
+	}
+	originalPath := s.path
+	s.path = filepath.Join(t.TempDir(), "missing", "gateway.db.secrets.json")
+	replacement := "sk-new"
+	if err := s.Move("old", "new", &replacement); err == nil {
+		t.Fatal("Move with an unwritable path succeeded, want error")
+	}
+	if key, ok := s.Get("old"); !ok || key != "sk-old" {
+		t.Errorf("source after failed Move = (%q, %v), want sk-old", key, ok)
+	}
+	if _, ok := s.Get("new"); ok {
+		t.Error("destination after failed Move still contains a value")
+	}
+	s.path = originalPath
+	s2, err := Open(originalPath, testKey)
+	if err != nil {
+		t.Fatalf("re-open after failed Move: %v", err)
+	}
+	if key, ok := s2.Get("old"); !ok || key != "sk-old" {
+		t.Errorf("on-disk source after failed Move = (%q, %v), want sk-old", key, ok)
+	}
+}
+
+func TestSetOAuthRollsBackOnPersistenceFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gateway.db.secrets.json")
+	s, err := Open(path, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := testCred()
+	if err := s.SetOAuth("chatgpt", old); err != nil {
+		t.Fatal(err)
+	}
+	// Force the atomic temp-file creation to fail without touching the original
+	// persisted file.
+	s.path = filepath.Join(t.TempDir(), "missing", "gateway.db.secrets.json")
+	replacement := testCred()
+	replacement.AccessToken = "replacement-access-token"
+	if err := s.SetOAuth("chatgpt", replacement); err == nil {
+		t.Fatal("SetOAuth with an unwritable path succeeded, want error")
+	}
+	got, ok, err := s.GetOAuth("chatgpt")
+	if err != nil || !ok {
+		t.Fatalf("GetOAuth after failed SetOAuth = (%+v, %v, %v), want old record", got, ok, err)
+	}
+	if got.AccessToken != old.AccessToken || got.RefreshToken != old.RefreshToken {
+		t.Errorf("failed SetOAuth changed in-memory record = %+v, want old record", got)
+	}
+}
+
+func TestSetOAuthRequiresAccessToken(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gateway.db.secrets.json")
+	s, err := Open(path, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred := testCred()
+	cred.AccessToken = ""
+	if err := s.SetOAuth("chatgpt", cred); err == nil {
+		t.Error("SetOAuth with empty access token succeeded, want error")
+	}
+}
+
+func TestGetOAuthCorruptedRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gateway.db.secrets.json")
+	s, err := Open(path, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A marker-prefixed value that is not a valid record body.
+	if err := s.Set("chatgpt", oauthRecordPrefix+"{not json"); err != nil {
+		t.Fatal(err)
+	}
+	_, ok, err := s.GetOAuth("chatgpt")
+	if err == nil {
+		t.Fatal("GetOAuth of corrupted record = nil error, want error")
+	}
+	if ok {
+		t.Error("GetOAuth of corrupted record returned ok=true")
+	}
+	if strings.Contains(err.Error(), "{not json") {
+		t.Errorf("corruption error leaked the stored value: %q", err)
+	}
+	// Unsupported versions are rejected without leaking the value.
+	raw, err := encodeOAuthRecord(testCred())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = strings.Replace(raw, `"v":1`, `"v":99`, 1)
+	if err := s.Set("chatgpt", raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.GetOAuth("chatgpt"); err == nil {
+		t.Error("GetOAuth of version-99 record = nil error, want error")
+	}
+}
+
+func TestOAuthCredentialExpiredSkew(t *testing.T) {
+	now := time.Now()
+	if testCred().Expired(now, 0) {
+		t.Error("fresh credential reported expired")
+	}
+	cred := testCred()
+	cred.ExpiresAt = now.Add(20 * time.Second)
+	if !cred.Expired(now, 30*time.Second) {
+		t.Error("credential inside the skew window reported fresh")
+	}
+	cred.ExpiresAt = time.Time{}
+	if cred.Expired(now, 0) {
+		t.Error("zero-expiry credential reported expired")
 	}
 }

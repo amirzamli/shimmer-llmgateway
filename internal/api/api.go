@@ -20,6 +20,7 @@ import (
 
 	"github.com/amirzamli/shimmer-llmgateway/internal/config"
 	"github.com/amirzamli/shimmer-llmgateway/internal/logging"
+	"github.com/amirzamli/shimmer-llmgateway/internal/oauth"
 	"github.com/amirzamli/shimmer-llmgateway/internal/quota"
 	"github.com/amirzamli/shimmer-llmgateway/internal/secrets"
 	"github.com/amirzamli/shimmer-llmgateway/internal/store"
@@ -61,13 +62,58 @@ type API struct {
 	// quota fetches per-provider account quota/balance for the UI with its
 	// own getter-based TTL cache (internal/quota; invalidated on PATCH/DELETE).
 	quota *quota.Fetcher
+	// oauthCfg pins the ChatGPT OAuth protocol (endpoints, client id, and the
+	// fixed loopback callback); the zero value uses the verified OpenCode
+	// defaults. oauthClient is the outbound client used for the
+	// authorization-code exchange (the gateway's no-redirect client; nil
+	// falls back to http.DefaultClient). oauthStates holds the server-side,
+	// short-lived, single-use, instance-bound authorization transactions.
+	oauthCfg    oauth.Config
+	oauthClient *http.Client
+	oauthStates *oauth.StateStore
+	oauthLife   *oauth.Lifecycle
+	// oauthListenAddrs are the explicitly configured listener addresses that
+	// may serve OAuth lifecycle requests from a trusted remote network.
+	oauthListenAddrs []string
 }
 
 // New builds the API handler set over the live config manager, the capture
 // store, and the secrets store. configPath is the gateway.toml path written
-// back on config mutations.
-func New(mgr *config.ConfigManager, configPath string, st *store.Store, sec *secrets.Store, logger *logging.Logger) *API {
-	return &API{mgr: mgr, path: configPath, store: st, sec: sec, logger: logger, startedAt: time.Now(), modelsCache: map[string]modelsCacheEntry{}, modelsFlight: map[string]*modelsFlightCall{}, quota: quota.New(mgr.Get, sec)}
+// back on config mutations. oauthClient is the outbound client used by the
+// ChatGPT sign-in code exchange (nil uses http.DefaultClient).
+func New(mgr *config.ConfigManager, configPath string, st *store.Store, sec *secrets.Store, logger *logging.Logger, oauthClient *http.Client) *API {
+	return &API{
+		mgr: mgr, path: configPath, store: st, sec: sec, logger: logger,
+		startedAt: time.Now(), modelsCache: map[string]modelsCacheEntry{}, modelsFlight: map[string]*modelsFlightCall{},
+		quota:       quota.New(mgr.Get, sec),
+		oauthCfg:    oauth.Config{},
+		oauthClient: oauthClient,
+		oauthStates: oauth.NewStateStore(),
+		oauthLife:   oauth.NewLifecycle(),
+	}
+}
+
+// SetOAuth pins the OAuth protocol configuration and outbound client used by
+// the ChatGPT sign-in handlers. The zero config uses the verified OpenCode
+// defaults; tests point the issuer at a mock token endpoint. The production
+// wiring (gateway.New) uses the defaults and the shared no-redirect client.
+func (a *API) SetOAuth(cfg oauth.Config, client *http.Client) {
+	a.oauthCfg = cfg
+	a.oauthClient = client
+}
+
+// SetOAuthLifecycle shares lifecycle fencing with the gateway refresh
+// resolver. It must be called before the API is served.
+func (a *API) SetOAuthLifecycle(life *oauth.Lifecycle) {
+	if life != nil {
+		a.oauthLife = life
+	}
+}
+
+// SetOAuthListenAddrs supplies the configured listener addresses used by the
+// OAuth source guard. It must be called before the API is served.
+func (a *API) SetOAuthListenAddrs(addrs []string) {
+	a.oauthListenAddrs = append([]string{}, addrs...)
 }
 
 // Handler returns the §6.2 router.
@@ -81,6 +127,12 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/instances/{alias}", a.handleInstancePatch)
 	mux.HandleFunc("DELETE /api/instances/{alias}", a.handleInstanceDelete)
 	mux.HandleFunc("GET /api/instances/{alias}/models", a.handleInstanceModels)
+	// ChatGPT OAuth account surface: start the browser sign-in, inspect the
+	// connection state (masked), and disconnect. The callback is served only by
+	// the gateway's dedicated loopback listener, not by this router.
+	mux.HandleFunc("POST /api/instances/{alias}/oauth/start", a.handleOAuthStart)
+	mux.HandleFunc("GET /api/instances/{alias}/oauth/status", a.handleOAuthStatus)
+	mux.HandleFunc("DELETE /api/instances/{alias}/oauth", a.handleOAuthDisconnect)
 	mux.HandleFunc("GET /api/quota", a.handleQuota)
 	mux.HandleFunc("GET /api/settings", a.handleSettingsGet)
 	mux.HandleFunc("PATCH /api/settings", a.handleSettingsPatch)

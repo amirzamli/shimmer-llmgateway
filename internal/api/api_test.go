@@ -73,7 +73,7 @@ func newAPITest(t *testing.T, toml string, masterKey []byte) (*httptest.Server, 
 	if err != nil {
 		t.Fatalf("secrets.Open: %v", err)
 	}
-	apiSrv := New(mgr, cfgPath, st, sec, logging.New(io.Discard))
+	apiSrv := New(mgr, cfgPath, st, sec, logging.New(io.Discard), nil)
 	gs := httptest.NewServer(apiSrv.Handler())
 	t.Cleanup(gs.Close)
 	return gs, mgr, st, cfgPath
@@ -191,6 +191,35 @@ func TestTemplatesListAndCreate(t *testing.T) {
 	status, _ = doJSON(t, gs, "POST", "/api/templates", `{"name":"myprov","base_url":"https://y"}`)
 	if status != http.StatusBadRequest {
 		t.Errorf("duplicate user template status = %d, want 400", status)
+	}
+}
+
+// TestTemplatesListExposesOAuthMarker asserts the dashboard-facing template
+// list carries the oauth marker: the built-in chatgpt template is flagged so
+// the UI can offer the browser sign-in surface and hide the key field, while
+// ordinary templates stay unmarked.
+func TestTemplatesListExposesOAuthMarker(t *testing.T) {
+	gs, _, _, _ := newAPITest(t, apiTestTOML, testMasterKey)
+	status, out := doJSON(t, gs, "GET", "/api/templates", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET /api/templates status = %d, want 200", status)
+	}
+	var chatgpt map[string]any
+	for _, x := range out["templates"].([]any) {
+		entry := x.(map[string]any)
+		if entry["name"] == "chatgpt" {
+			chatgpt = entry
+			continue
+		}
+		if entry["oauth"] == true {
+			t.Errorf("template %q unexpectedly oauth-marked: %v", entry["name"], entry["oauth"])
+		}
+	}
+	if chatgpt == nil {
+		t.Fatal("built-in chatgpt template missing from the list")
+	}
+	if chatgpt["oauth"] != true {
+		t.Errorf("chatgpt template oauth = %v, want true", chatgpt["oauth"])
 	}
 }
 
@@ -796,6 +825,63 @@ template = "openai"
 	}
 }
 
+func TestConcurrentCreateKeysStayBoundToTheirAliases(t *testing.T) {
+	gs, _, _, _ := newAPITest(t, `
+[[instances]]
+alias = "openai"
+template = "openai"
+`, testMasterKey)
+	const n = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	responses := make(chan struct {
+		alias string
+		key   string
+	}, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			key := fmt.Sprintf("sk-concurrent-%04d", i)
+			status, out := doJSON(t, gs, "POST", "/api/instances", fmt.Sprintf(`{"template":"ollama","key":%q}`, key))
+			if status != http.StatusCreated {
+				errs <- fmt.Errorf("POST instance %d status = %d, body = %v", i, status, out)
+				return
+			}
+			alias, ok := out["alias"].(string)
+			if !ok {
+				errs <- fmt.Errorf("POST instance %d returned invalid alias: %v", i, out)
+				return
+			}
+			if got, want := out["key_masked"], key[:3]+"…"+key[len(key)-4:]; got != want {
+				errs <- fmt.Errorf("POST instance %d key_masked = %v, want %v", i, got, want)
+				return
+			}
+			responses <- struct {
+				alias string
+				key   string
+			}{alias: alias, key: key}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	close(responses)
+	for err := range errs {
+		t.Error(err)
+	}
+
+	seen := make(map[string]bool, n)
+	for result := range responses {
+		if seen[result.alias] {
+			t.Errorf("duplicate auto-named alias %q", result.alias)
+		}
+		seen[result.alias] = true
+	}
+	if len(seen) != n {
+		t.Errorf("created aliases = %d, want %d", len(seen), n)
+	}
+}
+
 // TestMasterKeyGeneratedFlow covers the generated-key lifecycle: the endpoint
 // exposes a valid base64 key exactly once, ACK clears it (404 after), and ACK
 // stays idempotent (204 on repeated POSTs).
@@ -892,7 +978,7 @@ func TestMasterKeyLoopbackGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("secrets.Open: %v", err)
 	}
-	apiSrv := New(mgr, cfgPath, st, sec, logging.New(io.Discard))
+	apiSrv := New(mgr, cfgPath, st, sec, logging.New(io.Discard), nil)
 
 	for _, addr := range []string{"127.0.0.1:4321", "[::1]:4321", "localhost:4321", "127.8.8.8:99"} {
 		req := httptest.NewRequest("GET", "/api/secrets/master-key", nil)
@@ -959,7 +1045,7 @@ func TestMasterKeyLegacyMigrationOnAck(t *testing.T) {
 	if !sec.PendingMigration() {
 		t.Error("PendingMigration = false, want true for legacy file with generated key")
 	}
-	apiSrv := New(mgr, cfgPath, st, sec, logging.New(io.Discard))
+	apiSrv := New(mgr, cfgPath, st, sec, logging.New(io.Discard), nil)
 	gs := httptest.NewServer(apiSrv.Handler())
 	t.Cleanup(gs.Close)
 
@@ -1110,6 +1196,40 @@ func TestInstanceModelsKeylessNoAuth(t *testing.T) {
 	}
 	if models := out["models"].([]any); len(models) != 1 || models[0] != "llama3.1" {
 		t.Errorf("models = %v, want [llama3.1]", out["models"])
+	}
+}
+
+// TestInstanceModelsOAuthUsesConfiguredModels asserts an OAuth template (the
+// ChatGPT codex endpoint) never performs the OpenAI /models discovery fetch:
+// the configured models are returned with source "config" and no error, even
+// when the provider would refuse the connection.
+func TestInstanceModelsOAuthUsesConfiguredModels(t *testing.T) {
+	toml := `
+[providers.chatgpt]
+base_url = "https://chatgpt.com/backend-api/codex"
+style = "responses"
+oauth = true
+session_header = "session-id"
+models = ["gpt-5.3-codex"]
+
+[[instances]]
+alias = "chatgpt"
+template = "chatgpt"
+`
+	gs, _, _, _ := newAPITest(t, toml, testMasterKey)
+	status, out := doJSON(t, gs, "GET", "/api/instances/chatgpt/models", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET models status = %d, body %v", status, out)
+	}
+	if out["source"] != "config" {
+		t.Errorf("source = %v, want config (no /models discovery for OAuth templates)", out["source"])
+	}
+	if out["error"] != nil {
+		t.Errorf("error = %v, want absent (the config fallback is not an error)", out["error"])
+	}
+	models, ok := out["models"].([]any)
+	if !ok || len(models) != 1 || models[0] != "gpt-5.3-codex" {
+		t.Errorf("models = %v, want [gpt-5.3-codex]", out["models"])
 	}
 }
 

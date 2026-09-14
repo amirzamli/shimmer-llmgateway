@@ -4,6 +4,15 @@
 // generates on first run; the file is chmod 0600 and keys never appear in
 // gateway.toml or logs. Key precedence is env-var-then-file: the gateway uses
 // an instance's api_key_env when set, falling back to this store.
+//
+// The same encrypted file also holds one OAuth credential record per
+// instance (the ChatGPT Plus browser-flow credential: access token, refresh
+// token, expiry, and account id). Records are stored as versioned,
+// marker-prefixed JSON values under the instance alias, so the on-disk
+// plaintext shape stays the legacy alias→string map and every existing
+// secrets file (plaintext or encrypted envelope) keeps reading unchanged.
+// OAuth records are never returned as API keys by ResolveKey, and token
+// material never appears in any error or log emitted by this package.
 package secrets
 
 import (
@@ -16,11 +25,85 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 )
 
 // envelopeVersion is the on-disk envelope format version.
 const envelopeVersion = 1
+
+// OAuth record format: a marker-prefixed JSON value stored under the
+// instance alias in the same encrypted alias→string map as API keys. The
+// marker keeps records distinguishable from legacy key strings (a real key
+// starting with "oauth:v1:" plus a valid record JSON body is not a plausible
+// collision), so existing files keep their exact on-disk plaintext shape.
+const (
+	// oauthRecordPrefix marks an OAuth credential record value.
+	oauthRecordPrefix = "oauth:v1:"
+	// oauthRecordVersion is the credential record schema version. Unknown
+	// versions are rejected on read rather than silently reinterpreted.
+	oauthRecordVersion = 1
+)
+
+// OAuthCredential is the persisted OAuth credential for one gateway instance
+// (the ChatGPT Plus browser flow). It is stored encrypted inside the secrets
+// envelope; the type intentionally does not implement fmt.Stringer so an
+// accidental %v/%+v cannot render token material.
+type OAuthCredential struct {
+	// Version is the record schema version; SetOAuth stamps
+	// oauthRecordVersion when zero and GetOAuth rejects other values.
+	Version int `json:"v"`
+	// AccessToken is the bearer credential for the upstream API.
+	AccessToken string `json:"access_token"`
+	// RefreshToken rotates the access token; may be empty only when the
+	// provider never issued one.
+	RefreshToken string `json:"refresh_token,omitempty"`
+	// ExpiresAt is the access token expiry (zero = unknown).
+	ExpiresAt time.Time `json:"expires_at,omitzero"`
+	// AccountID is the verified ChatGPT account identifier; empty when the
+	// token claims carried none.
+	AccountID string `json:"account_id,omitempty"`
+}
+
+// Expired reports whether the access token has expired at now, applying skew
+// seconds of leeway (positive skew expires the token earlier).
+func (c OAuthCredential) Expired(now time.Time, skew time.Duration) bool {
+	return !c.ExpiresAt.IsZero() && now.Add(skew).After(c.ExpiresAt)
+}
+
+// isOAuthRecord reports whether a stored value is an OAuth credential record.
+func isOAuthRecord(value string) bool {
+	return strings.HasPrefix(value, oauthRecordPrefix)
+}
+
+// encodeOAuthRecord renders cred as the marker-prefixed on-disk value.
+func encodeOAuthRecord(cred OAuthCredential) (string, error) {
+	if cred.Version == 0 {
+		cred.Version = oauthRecordVersion
+	}
+	raw, err := json.Marshal(cred)
+	if err != nil {
+		return "", fmt.Errorf("secrets: encode oauth credential: %w", err)
+	}
+	return oauthRecordPrefix + string(raw), nil
+}
+
+// decodeOAuthRecord parses a marker-prefixed on-disk value. The error never
+// includes the stored value (which contains token material).
+func decodeOAuthRecord(value string) (OAuthCredential, error) {
+	var cred OAuthCredential
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(value, oauthRecordPrefix)), &cred); err != nil {
+		return OAuthCredential{}, fmt.Errorf("secrets: oauth credential record is corrupted")
+	}
+	if cred.Version != oauthRecordVersion {
+		return OAuthCredential{}, fmt.Errorf("secrets: unsupported oauth credential version %d", cred.Version)
+	}
+	if cred.AccessToken == "" {
+		return OAuthCredential{}, fmt.Errorf("secrets: oauth credential record has no access token")
+	}
+	return cred, nil
+}
 
 // Error sentinels: distinct startup failures per the encryption behavior
 // matrix. None of the errors ever include key material.
@@ -38,6 +121,10 @@ var (
 	// base64 or decoded length ≠ 32 bytes). The env value itself is never
 	// echoed.
 	ErrInvalidMasterKey = errors.New("invalid or malformed SHIMMER_MASTER_KEY")
+	// ErrMigrationPending reports a secrets mutation attempted before the
+	// generated master key was acknowledged. Returning an error is safer than
+	// claiming success for a value that exists only in memory.
+	ErrMigrationPending = errors.New("secrets migration pending master-key acknowledgement")
 )
 
 // envelope is the on-disk encrypted format: the plaintext alias→key JSON map
@@ -261,13 +348,65 @@ func (s *Store) Get(alias string) (string, bool) {
 // false when neither source has a key; callers decide whether that is a
 // keyless provider or a misconfiguration. This is the single implementation
 // shared by the gateway forward path, the /models fetch, and the quota fetcher.
+//
+// An OAuth credential record is not an API key: it is never returned here, so
+// an OAuth instance can never leak its token material into a Bearer header
+// through the API-key path (env vars still win and are unaffected).
 func (s *Store) ResolveKey(envName, alias string) (key string, ok bool) {
 	if envName != "" {
 		if k := os.Getenv(envName); k != "" {
 			return k, true
 		}
 	}
-	return s.Get(alias)
+	key, ok = s.Get(alias)
+	if ok && isOAuthRecord(key) {
+		return "", false
+	}
+	return key, ok
+}
+
+// SetOAuth stores (or replaces) the OAuth credential for alias and persists
+// atomically through the same encrypted envelope and 0600 atomic-rename path
+// as API keys. An empty access token is rejected: callers clear a credential
+// with Delete.
+func (s *Store) SetOAuth(alias string, cred OAuthCredential) error {
+	if cred.AccessToken == "" {
+		return errors.New("secrets: oauth credential requires an access token")
+	}
+	value, err := encodeOAuthRecord(cred)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	previous, existed := s.keys[alias]
+	s.keys[alias] = value
+	if err := s.persistLocked(); err != nil {
+		if existed {
+			s.keys[alias] = previous
+		} else {
+			delete(s.keys, alias)
+		}
+		return err
+	}
+	return nil
+}
+
+// GetOAuth returns the OAuth credential stored for alias. ok is false with a
+// nil error when the alias holds no credential (including the case where it
+// holds a legacy API key). An error reports a record that is present but
+// unreadable (corrupted or an unsupported version); no error ever contains
+// token material.
+func (s *Store) GetOAuth(alias string) (cred OAuthCredential, ok bool, err error) {
+	value, ok := s.Get(alias)
+	if !ok || !isOAuthRecord(value) {
+		return OAuthCredential{}, false, nil
+	}
+	cred, err = decodeOAuthRecord(value)
+	if err != nil {
+		return OAuthCredential{}, false, err
+	}
+	return cred, true, nil
 }
 
 // Set stores (or replaces) the key for alias and persists atomically.
@@ -277,24 +416,94 @@ func (s *Store) Set(alias, key string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	previous, existed := s.keys[alias]
 	s.keys[alias] = key
-	return s.persistLocked()
+	if err := s.persistLocked(); err != nil {
+		if existed {
+			s.keys[alias] = previous
+		} else {
+			delete(s.keys, alias)
+		}
+		return err
+	}
+	return nil
 }
 
 // Delete removes the key for alias (if present) and persists.
 func (s *Store) Delete(alias string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.keys[alias]; !ok {
+	previous, existed := s.keys[alias]
+	if !existed {
 		return nil
 	}
 	delete(s.keys, alias)
-	return s.persistLocked()
+	if err := s.persistLocked(); err != nil {
+		s.keys[alias] = previous
+		return err
+	}
+	return nil
+}
+
+// Move moves the value at oldAlias to newAlias and persists the result in one
+// encrypted write. When replacement is non-nil, the source is removed and the
+// destination is replaced with its value when non-empty; an empty replacement
+// only removes the source. This supports an instance rename with an optional
+// key replacement without a delete/set gap. The map is restored if persistence
+// fails. A nil replacement moves the existing source value, if any.
+func (s *Store) Move(oldAlias, newAlias string, replacement *string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if oldAlias == newAlias {
+		return nil
+	}
+	oldValue, oldExists := s.keys[oldAlias]
+	newValue, newExists := s.keys[newAlias]
+	if replacement == nil && !oldExists {
+		return nil
+	}
+	if replacement != nil && *replacement == "" && !oldExists {
+		return nil
+	}
+
+	if replacement == nil {
+		s.keys[newAlias] = oldValue
+	} else if *replacement != "" {
+		s.keys[newAlias] = *replacement
+	}
+	delete(s.keys, oldAlias)
+	if err := s.persistLocked(); err != nil {
+		if oldExists {
+			s.keys[oldAlias] = oldValue
+		} else {
+			delete(s.keys, oldAlias)
+		}
+		if newExists {
+			s.keys[newAlias] = newValue
+		} else {
+			delete(s.keys, newAlias)
+		}
+		return err
+	}
+	return nil
 }
 
 // persistLocked encrypts keys into an envelope and writes the secrets file
 // with mode 0600 via an atomic temp-file + rename (the caller holds s.mu).
+// Legacy plaintext migration is deliberately deferred until AckMasterKey, so
+// a crash cannot replace the only recoverable copy with ciphertext encrypted
+// by a key that exists only in memory. Mutations are rejected while migration
+// is pending rather than being reported as durable when they are memory-only.
 func (s *Store) persistLocked() error {
+	if s.pendingMigration {
+		return ErrMigrationPending
+	}
+	return s.persistNowLocked()
+}
+
+// persistNowLocked always writes the encrypted envelope. It is used by
+// startup creation and AckMasterKey, which must bypass the migration barrier.
+func (s *Store) persistNowLocked() error {
 	data, err := encryptEnvelope(s.keys, s.masterKey)
 	if err != nil {
 		return err
@@ -363,7 +572,7 @@ func (s *Store) AckMasterKey() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.pendingMigration {
-		if err := s.persistLocked(); err != nil {
+		if err := s.persistNowLocked(); err != nil {
 			return err
 		}
 		s.pendingMigration = false

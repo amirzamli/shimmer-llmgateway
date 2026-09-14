@@ -25,12 +25,22 @@ import (
 	"github.com/amirzamli/shimmer-llmgateway/internal/api"
 	"github.com/amirzamli/shimmer-llmgateway/internal/config"
 	"github.com/amirzamli/shimmer-llmgateway/internal/logging"
+	"github.com/amirzamli/shimmer-llmgateway/internal/netutil"
+	"github.com/amirzamli/shimmer-llmgateway/internal/oauth"
 	"github.com/amirzamli/shimmer-llmgateway/internal/plugins"
 	"github.com/amirzamli/shimmer-llmgateway/internal/pricing"
 	"github.com/amirzamli/shimmer-llmgateway/internal/secrets"
 	"github.com/amirzamli/shimmer-llmgateway/internal/store"
 	"github.com/amirzamli/shimmer-llmgateway/web"
 )
+
+// OAuthCallbackAddr is the fixed loopback listen address for the ChatGPT
+// OAuth callback. The verified OpenCode contract redirects the browser to
+// http://localhost:1455/auth/callback, so the gateway binds this address (in
+// addition to the configured listeners) whenever it is started; the sign-in
+// flow cannot complete without it. main treats a bind failure here like any
+// other listen failure.
+const OAuthCallbackAddr = "localhost:1455"
 
 // endpoint is the gateway-facing capture surface path recorded on every row.
 const endpoint = "/v1/chat/completions"
@@ -59,6 +69,8 @@ var providerTransport = &http.Transport{
 	IdleConnTimeout:       90 * time.Second,
 }
 
+var errOAuthEndpoint = errors.New("oauth template must use the fixed ChatGPT Codex endpoint")
+
 // Server is the capture-only gateway. It serves all configured instances;
 // config swaps are atomic via the ConfigManager.
 type Server struct {
@@ -70,6 +82,9 @@ type Server struct {
 	// secrets holds the UI-managed API keys (<store>.secrets.json, mode 0600);
 	// key resolution is env-var-then-file.
 	secrets *secrets.Store
+	// oauth resolves and refreshes the encrypted OAuth credentials used by
+	// OAuth-marked templates (the ChatGPT Plus browser flow).
+	oauth *OAuthResolver
 	// api is the §6.2 REST handler set mounted at /api/.
 	api *api.API
 
@@ -113,18 +128,29 @@ func New(cfg *config.ConfigManager, st *store.Store, logger *logging.Logger, con
 	if perr != nil {
 		logger.Error("pricing_load_failed", map[string]any{"error": perr.Error()})
 	}
+	// Refuse to follow upstream redirects: a redirecting or malicious
+	// base_url must not bounce the request to an internal endpoint. The
+	// shared transport bounds connection/header timeouts without imposing
+	// a total request deadline (see providerTransport).
+	client := &http.Client{Transport: providerTransport, CheckRedirect: noRedirect}
+	life := oauth.NewLifecycle()
+	apiHandler := api.New(cfg, configPath, st, sec, logger, client)
+	apiHandler.SetOAuthLifecycle(life)
+	apiHandler.SetOAuthListenAddrs(listenAddrs)
 	return &Server{
-		cfg:    cfg,
-		store:  st,
-		logger: logger,
-		// Refuse to follow upstream redirects: a redirecting or malicious
-		// base_url must not bounce the request to an internal endpoint. The
-		// shared transport bounds connection/header timeouts without imposing
-		// a total request deadline (see providerTransport).
-		client:         &http.Client{Transport: providerTransport, CheckRedirect: noRedirect},
-		append:         ap,
-		secrets:        sec,
-		api:            api.New(cfg, configPath, st, sec, logger),
+		cfg:     cfg,
+		store:   st,
+		logger:  logger,
+		client:  client,
+		append:  ap,
+		secrets: sec,
+		// The OAuth resolver shares the outbound client (redirect policy
+		// included) and persists rotated tokens through the secrets store.
+		oauth: NewOAuthResolver(sec, client, oauth.Config{}, life),
+		// The API uses the same no-redirect client for the sign-in code
+		// exchange (a redirecting token endpoint must not bounce the code
+		// and PKCE verifier elsewhere).
+		api:            apiHandler,
 		emitterFactory: newStreamEmitter,
 		pricing:        pt,
 		listenAddrs:    listenAddrs,
@@ -162,6 +188,43 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/", s.guard(s.api.Handler()))
 	mux.Handle("GET /{$}", s.guard(http.HandlerFunc(s.handleUI)))
 	return s.accessLog(mux)
+}
+
+// OAuthCallbackHandler returns the handler for the dedicated localhost:1455
+// listener. It is intentionally separate from Handler so configured remote or
+// dashboard listeners never expose the credential-bearing callback endpoint.
+func (s *Server) OAuthCallbackHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("GET /auth/callback", s.oauthCallbackGuard(http.HandlerFunc(s.api.HandleOAuthCallback)))
+	return s.accessLog(mux)
+}
+
+// oauthCallbackGuard requires both a loopback Host and a loopback TCP source.
+// The listener is already bound to localhost in production, but checking both
+// properties here protects alternate listener wiring and makes proxying a
+// callback from a remote interface impossible.
+func (s *Server) oauthCallbackGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := hostOnly(r.Host)
+		if host == "" || !netutil.IsLoopbackHost(host) {
+			s.writeError(w, http.StatusForbidden, "FORBIDDEN", "oauth callback requires a loopback Host")
+			return
+		}
+		if !loopbackRemoteAddr(r.RemoteAddr) {
+			s.writeError(w, http.StatusForbidden, "FORBIDDEN", "oauth callback requires a loopback source")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func loopbackRemoteAddr(remote string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(remote))
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // statusRecorder wraps an http.ResponseWriter to capture the response status
@@ -470,6 +533,30 @@ func (s *Server) writeResolveError(w http.ResponseWriter, err error) {
 	s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 }
 
+// writeBuildUpstreamError maps a buildUpstream failure. Non-OAuth failures
+// (body rewrite/translation) keep the existing 500 CONFIG_ERROR mapping. An
+// OAuth instance with no stored credential is also a configuration error (the
+// instance is not usable, mirroring the missing-API-key behavior). OAuth
+// refresh failures surface as sanitized 502 UPSTREAM_ERROR: the oauth package
+// errors render only fixed messages and never carry token material, verifiers,
+// or provider response bodies, so echoing them is safe.
+func (s *Server) writeBuildUpstreamError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errOAuthNotConfigured) {
+		s.writeError(w, http.StatusInternalServerError, "CONFIG_ERROR", err.Error())
+		return
+	}
+	if errors.Is(err, oauth.ErrOperationStale) {
+		s.writeError(w, http.StatusBadGateway, "UPSTREAM_ERROR", "oauth operation was superseded")
+		return
+	}
+	var oe *oauth.Error
+	if errors.As(err, &oe) {
+		s.writeError(w, http.StatusBadGateway, "UPSTREAM_ERROR", "upstream request failed: "+err.Error())
+		return
+	}
+	s.writeError(w, http.StatusInternalServerError, "CONFIG_ERROR", err.Error())
+}
+
 // handleResponses serves POST /v1/responses: the stateless OpenAI Responses
 // shim over the shared chat pipeline. Guards run before any upstream work
 // (the stateless contract); unknown tool types are skipped with a
@@ -657,6 +744,9 @@ func (s *Server) buildUpstream(ctx context.Context, cfg *config.Config, rt *rout
 	}
 
 	style := effectiveStyle(rt.template, rt.model)
+	if rt.template.OAuth && (rt.template.BaseURL != config.ChatGPTCodexBaseURL || style != config.StyleResponses || rt.template.SessionHeader != config.ChatGPTCodexSessionHeader) {
+		return nil, nil, errOAuthEndpoint
+	}
 	anthropic := style == config.StyleAnthropic
 	responses := style == config.StyleResponses
 	if anthropic {
@@ -687,15 +777,30 @@ func (s *Server) buildUpstream(ctx context.Context, cfg *config.Config, rt *rout
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	key, err := s.resolvedKey(cfg, rt.inst)
-	if err != nil {
-		return nil, nil, err
-	}
-	if key != "" {
-		if anthropic {
-			req.Header.Set("x-api-key", key)
-		} else {
-			req.Header.Set("Authorization", "Bearer "+key)
+	// Authentication: OAuth templates resolve the instance's encrypted OAuth
+	// credential (refreshing it when expired) instead of the API-key path;
+	// every other template keeps the unchanged env-var-then-secrets-file key
+	// resolution. The OAuth headers themselves are applied after the
+	// identity-header loop below so the stored credential identity always
+	// wins.
+	var oauthCred *secrets.OAuthCredential
+	if rt.template.OAuth {
+		cred, err := s.oauth.Credential(ctx, rt.inst.Alias)
+		if err != nil {
+			return nil, nil, err
+		}
+		oauthCred = &cred
+	} else {
+		key, err := s.resolvedKey(cfg, rt.inst)
+		if err != nil {
+			return nil, nil, err
+		}
+		if key != "" {
+			if anthropic {
+				req.Header.Set("x-api-key", key)
+			} else {
+				req.Header.Set("Authorization", "Bearer "+key)
+			}
 		}
 	}
 	if anthropic {
@@ -732,6 +837,27 @@ func (s *Server) buildUpstream(ctx context.Context, cfg *config.Config, rt *rout
 			v = cv
 		}
 		req.Header.Set(h, v)
+	}
+	// The stored OAuth credential identity is authoritative: a client-supplied
+	// Authorization or ChatGPT account header (which the identity-header loop
+	// above could otherwise forward) can never override it. The headers mirror
+	// the verified OpenCode v1.18.30 upstream contract: the bearer token, the
+	// ChatGPT-Account-Id account identifier, and the x-openai-internal-codex-
+	// residency header when the access token carries a compute-residency
+	// claim. Token material never reaches logs: it rides request headers only.
+	if oauthCred != nil {
+		req.Header.Del("Authorization")
+		req.Header.Del("ChatGPT-Account-Id")
+		req.Header.Del("x-openai-internal-codex-residency")
+		req.Header.Del("Originator")
+		req.Header.Set("Authorization", "Bearer "+oauthCred.AccessToken)
+		if oauthCred.AccountID != "" {
+			req.Header.Set("ChatGPT-Account-Id", oauthCred.AccountID)
+		}
+		if residency := oauth.ComputeResidency(oauthCred.AccessToken); residency != "" {
+			req.Header.Set("x-openai-internal-codex-residency", residency)
+		}
+		req.Header.Set("Originator", oauth.Originator)
 	}
 	return req, upstreamBody, nil
 }
@@ -846,7 +972,7 @@ func (s *Server) handleNonStream(w http.ResponseWriter, r *http.Request, cfg *co
 
 	req, sentBody, err := s.buildUpstream(r.Context(), cfg, rt, forwardedBody, sessionID, r)
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, "CONFIG_ERROR", err.Error())
+		s.writeBuildUpstreamError(w, err)
 		return
 	}
 	rsp, err := s.client.Do(req)
@@ -943,7 +1069,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *confi
 
 	req, sentBody, err := s.buildUpstream(ctx, cfg, rt, forwardedBody, sessionID, r)
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, "CONFIG_ERROR", err.Error())
+		s.writeBuildUpstreamError(w, err)
 		return
 	}
 	resp, err := s.client.Do(req)

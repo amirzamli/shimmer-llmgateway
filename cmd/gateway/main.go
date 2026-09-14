@@ -148,6 +148,23 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The ChatGPT OAuth sign-in redirects the browser to the fixed loopback
+	// callback http://localhost:1455/auth/callback (verified OpenCode
+	// contract), which this dedicated listener serves — the configured
+	// listen addresses may not include port 1455. A bind failure is fatal
+	// like any other listen failure: without the callback the sign-in flow
+	// cannot complete.
+	cbServer := &http.Server{Addr: gateway.OAuthCallbackAddr, Handler: srv.OAuthCallbackHandler()}
+	cbServerCopy := cbServer
+	go func() {
+		logger.Info("serving", map[string]any{"listen": gateway.OAuthCallbackAddr, "surface": "oauth callback"})
+		if err := cbServerCopy.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("listen_failed", map[string]any{"listen": gateway.OAuthCallbackAddr, "error": err.Error()})
+			os.Exit(1)
+		}
+	}()
+	servers = append(servers, cbServer)
+
 	// Shutdown on SIGINT/SIGTERM: drain in-flight requests (bounded), close
 	// the append log, then close the store. The store close is what
 	// checkpoints and truncates the WAL, so skipping it (os.Exit, a kill

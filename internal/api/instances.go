@@ -50,9 +50,19 @@ func (a *API) instanceViewOf(cfg *config.Config, inst *config.Instance) instance
 	if t, ok := cfg.Templates[inst.Template]; ok {
 		v.Style = styleOf(t.Style)
 		v.BaseURL = t.BaseURL
+		if t.OAuth {
+			v.APIKeyEnv = ""
+		}
 	}
 	if key, ok := a.sec.Get(inst.Alias); ok {
-		v.KeyMasked = secrets.MaskKey(key)
+		if _, isOAuth, err := a.sec.GetOAuth(inst.Alias); err != nil {
+			a.logger.Error("oauth_record_corrupted", map[string]any{"alias": inst.Alias, "error": err.Error()})
+		} else if !isOAuth {
+			v.KeyMasked = secrets.MaskKey(key)
+		}
+		// An OAuth credential record is not an API key: it is never masked for
+		// display here (the connection status surface lands with the OAuth API
+		// handlers in the next phase).
 	}
 	return v
 }
@@ -159,10 +169,16 @@ func (a *API) handleInstancesCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	err := a.update(func(c *config.Config) error {
+	a.updateMu.Lock()
+	before := a.mgr.Get().Clone()
+	candidate := before.Clone()
+	err := func(c *config.Config) error {
 		src, ok := c.Templates[req.Template]
 		if !ok {
 			return badRequest("unknown template %q", req.Template)
+		}
+		if src.OAuth && req.BaseURL != "" && req.BaseURL != config.ChatGPTCodexBaseURL {
+			return badRequest("OAuth instances must use the fixed ChatGPT Codex base_url %q", config.ChatGPTCodexBaseURL)
 		}
 		if req.BaseURL != "" {
 			// A custom endpoint resolves to the concrete template that serves
@@ -202,6 +218,9 @@ func (a *API) handleInstancesCreate(w http.ResponseWriter, r *http.Request) {
 		if config.IsCustomTemplatePlaceholder(req.Template) {
 			return badRequest("template %q requires an endpoint URL", req.Template)
 		}
+		if resolved := c.Templates[req.Template]; resolved != nil && resolved.OAuth && (req.APIKeyEnv != "" || req.Key != "") {
+			return badRequest("OAuth instances cannot use API keys or api_key_env")
+		}
 		for _, inst := range c.Instances {
 			if req.Alias != "" && inst.Alias == req.Alias {
 				return badRequest("alias %q already exists", req.Alias)
@@ -216,22 +235,80 @@ func (a *API) handleInstancesCreate(w http.ResponseWriter, r *http.Request) {
 			Priority:  req.Priority,
 		})
 		return nil
-	})
+	}(candidate)
+	if err == nil {
+		err = config.Validate(candidate)
+	}
 	if err != nil {
+		a.updateMu.Unlock()
 		a.writeUpdateError(w, err)
 		return
 	}
 
 	// The new instance is appended; its alias was auto-named by Validate if
 	// the request left it empty.
-	cfg := a.mgr.Get()
-	inst := cfg.Instances[len(cfg.Instances)-1]
-	if req.Key != "" {
-		if err := a.sec.Set(inst.Alias, req.Key); err != nil {
-			a.logger.Error("secrets_write_failed", map[string]any{"alias": inst.Alias, "error": err.Error()})
+	createdAlias := candidate.Instances[len(candidate.Instances)-1].Alias
+	err = a.commitInstanceTransition([]string{createdAlias}, before, candidate, func() error {
+		if req.Key == "" {
+			return a.sec.Delete(createdAlias)
 		}
+		return a.sec.Set(createdAlias, req.Key)
+	}, "failed to store the instance credential", func() {
+		a.oauthStates.PurgeInstance(createdAlias)
+	})
+	if err != nil {
+		a.updateMu.Unlock()
+		a.writeUpdateError(w, err)
+		return
 	}
-	writeJSON(w, http.StatusCreated, a.instanceViewOf(cfg, inst))
+	cfg := a.mgr.Get()
+	inst, ok := cfg.Instance(createdAlias)
+	if !ok {
+		a.updateMu.Unlock()
+		a.writeError(w, http.StatusInternalServerError, "INTERNAL", "created instance not found")
+		return
+	}
+	view := a.instanceViewOf(cfg, inst)
+	a.updateMu.Unlock()
+	writeJSON(w, http.StatusCreated, view)
+}
+
+// commitInstanceTransition persists candidate config and then applies its
+// credential mutation while updateMu and the affected lifecycle lock are held.
+// A cleanup failure rolls config back when possible; if rollback fails, the
+// committed config is fenced and the caller still receives a 500.
+func (a *API) commitInstanceTransition(ids []string, before, candidate *config.Config, cleanup func() error, cleanupMessage string, purge func()) error {
+	return a.oauthLife.WithTransition(ids, func() (bool, error) {
+		if err := a.mgr.Update(a.path, candidate); err != nil {
+			return false, err
+		}
+		if cleanup == nil {
+			if purge != nil {
+				purge()
+			}
+			return true, nil
+		}
+		if err := cleanup(); err != nil {
+			if rollbackErr := a.mgr.Update(a.path, before); rollbackErr == nil {
+				a.logger.Error("secrets_write_failed", map[string]any{"error": err.Error()})
+				return false, &apiError{status: http.StatusInternalServerError, code: "INTERNAL", message: cleanupMessage}
+			} else {
+				a.logger.Error("config_rollback_failed", map[string]any{"error": rollbackErr.Error()})
+			}
+			for _, alias := range ids {
+				a.invalidateModels(alias)
+				a.quota.InvalidateQuota(alias)
+			}
+			if purge != nil {
+				purge()
+			}
+			return true, &apiError{status: http.StatusInternalServerError, code: "INTERNAL", message: cleanupMessage}
+		}
+		if purge != nil {
+			purge()
+		}
+		return true, nil
+	})
 }
 
 // instancePatchReq is the PATCH /api/instances/{alias} body. All fields are
@@ -271,57 +348,57 @@ func (a *API) handleInstancePatch(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "invalid body: "+err.Error())
 		return
 	}
-
-	var renamed bool
-	var newAlias string
-	err := a.update(func(c *config.Config) error {
-		inst, ok := c.Instance(oldAlias)
-		if !ok {
-			return &apiError{status: http.StatusNotFound, code: "NOT_FOUND", message: fmt.Sprintf("instance %q not found", oldAlias)}
-		}
-		if req.Plugins != nil && req.PluginsInherit != nil && *req.PluginsInherit {
-			return badRequest("plugins and plugins_inherit are mutually exclusive")
-		}
-		if req.Alias != nil && *req.Alias != oldAlias {
-			alias := *req.Alias
-			if alias == "" {
-				return badRequest("alias cannot be empty; provide a name matching [A-Za-z0-9_.-]+ with interior single spaces (e.g. \"My Provider\")")
+	keyChange := req.Key != nil
+	a.updateMu.Lock()
+	before := a.mgr.Get().Clone()
+	candidate := before.Clone()
+	renamed, newAlias, err := applyInstancePatch(candidate, oldAlias, req)
+	if err == nil && keyChange {
+		if inst, ok := candidate.Instance(oldAlias); ok {
+			if tpl := candidate.Templates[inst.Template]; tpl != nil && tpl.OAuth {
+				err = badRequest("OAuth instances cannot use API keys")
 			}
-			if !aliasPatternOK(alias) {
-				return badRequest("alias must match [A-Za-z0-9_.-]+ with interior single spaces (e.g. \"My Provider\")")
-			}
-			for _, other := range c.Instances {
-				if other.Alias == alias {
-					return badRequest("alias %q already exists", alias)
-				}
-			}
-			inst.Alias = alias
-			renamed = true
-			newAlias = alias
 		}
-		if req.Disabled != nil {
-			inst.Disabled = *req.Disabled
-		}
-		if req.Priority != nil {
-			inst.Priority = *req.Priority
-		}
-		if req.ModelAliases != nil {
-			inst.ModelAliases = *req.ModelAliases
-		}
-		if req.ModelReasoning != nil {
-			inst.ModelReasoning = *req.ModelReasoning
-		}
-		if req.Plugins != nil {
-			ps := make([]string, len(*req.Plugins))
-			copy(ps, *req.Plugins)
-			inst.Plugins = &ps
-		}
-		if req.PluginsInherit != nil && *req.PluginsInherit {
-			inst.Plugins = nil
-		}
-		return nil
-	})
+	}
+	if err == nil && renamed {
+		// Validate the complete candidate before touching lifecycle state. A
+		// rejected alias/config update must not cancel a flow for the target.
+		err = config.Validate(candidate)
+	}
 	if err != nil {
+		a.updateMu.Unlock()
+		a.writeUpdateError(w, err)
+		return
+	}
+
+	var cleanup func() error
+	ids := []string{oldAlias}
+	cleanupMessage := "failed to update the stored credential"
+	if renamed {
+		ids = append(ids, newAlias)
+		cleanupMessage = "failed to move the stored credential"
+		cleanup = func() error { return a.sec.Move(oldAlias, newAlias, req.Key) }
+	} else if keyChange {
+		cleanup = func() error {
+			if *req.Key == "" {
+				return a.sec.Delete(oldAlias)
+			}
+			return a.sec.Set(oldAlias, *req.Key)
+		}
+	}
+	purge := func() {
+		if renamed {
+			a.oauthStates.PurgeInstance(oldAlias)
+			a.oauthStates.PurgeInstance(newAlias)
+		}
+	}
+	if cleanup != nil {
+		err = a.commitInstanceTransition(ids, before, candidate, cleanup, cleanupMessage, purge)
+	} else {
+		err = a.mgr.Update(a.path, candidate)
+	}
+	if err != nil {
+		a.updateMu.Unlock()
 		a.writeUpdateError(w, err)
 		return
 	}
@@ -336,33 +413,68 @@ func (a *API) handleInstancePatch(w http.ResponseWriter, r *http.Request) {
 		a.quota.InvalidateQuota(newAlias)
 	}
 
-	// Secrets follow the instance: a rename moves the stored key, a key
-	// replacement overwrites it, and a key clear removes it.
-	keyChange := req.Key != nil
-	if renamed {
-		if keyChange {
-			a.sec.Delete(oldAlias) //nolint:errcheck // best effort
-		} else if stored, ok := a.sec.Get(oldAlias); ok {
-			a.sec.Delete(oldAlias)      //nolint:errcheck // best effort
-			a.sec.Set(newAlias, stored) //nolint:errcheck // best effort
-		}
-	}
-	if keyChange {
-		alias := ifRenamed(newAlias, oldAlias)
-		if *req.Key == "" {
-			a.sec.Delete(alias) //nolint:errcheck // best effort
-		} else {
-			a.sec.Set(alias, *req.Key) //nolint:errcheck // best effort
-		}
-	}
-
 	cfg := a.mgr.Get()
 	inst, ok := cfg.Instance(ifRenamed(newAlias, oldAlias))
 	if !ok {
+		a.updateMu.Unlock()
 		a.writeError(w, http.StatusInternalServerError, "INTERNAL", "updated instance not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, a.instanceViewOf(cfg, inst))
+	view := a.instanceViewOf(cfg, inst)
+	a.updateMu.Unlock()
+	writeJSON(w, http.StatusOK, view)
+}
+
+// applyInstancePatch applies a validated request to a config candidate and
+// reports whether it renames the instance. It performs all request-level and
+// config-independent checks without touching lifecycle state.
+func applyInstancePatch(c *config.Config, oldAlias string, req instancePatchReq) (bool, string, error) {
+	inst, ok := c.Instance(oldAlias)
+	if !ok {
+		return false, "", &apiError{status: http.StatusNotFound, code: "NOT_FOUND", message: fmt.Sprintf("instance %q not found", oldAlias)}
+	}
+	if req.Plugins != nil && req.PluginsInherit != nil && *req.PluginsInherit {
+		return false, "", badRequest("plugins and plugins_inherit are mutually exclusive")
+	}
+	renamed := req.Alias != nil && *req.Alias != oldAlias
+	newAlias := ""
+	if renamed {
+		alias := *req.Alias
+		if alias == "" {
+			return false, "", badRequest("alias cannot be empty; provide a name matching [A-Za-z0-9_.-]+ with interior single spaces (e.g. \"My Provider\")")
+		}
+		if !aliasPatternOK(alias) {
+			return false, "", badRequest("alias must match [A-Za-z0-9_.-]+ with interior single spaces (e.g. \"My Provider\")")
+		}
+		for _, other := range c.Instances {
+			if other.Alias == alias {
+				return false, "", badRequest("alias %q already exists", alias)
+			}
+		}
+		inst.Alias = alias
+		newAlias = alias
+	}
+	if req.Disabled != nil {
+		inst.Disabled = *req.Disabled
+	}
+	if req.Priority != nil {
+		inst.Priority = *req.Priority
+	}
+	if req.ModelAliases != nil {
+		inst.ModelAliases = *req.ModelAliases
+	}
+	if req.ModelReasoning != nil {
+		inst.ModelReasoning = *req.ModelReasoning
+	}
+	if req.Plugins != nil {
+		ps := make([]string, len(*req.Plugins))
+		copy(ps, *req.Plugins)
+		inst.Plugins = &ps
+	}
+	if req.PluginsInherit != nil && *req.PluginsInherit {
+		inst.Plugins = nil
+	}
+	return renamed, newAlias, nil
 }
 
 // ifRenamed returns the effective alias after a rename.
@@ -375,24 +487,33 @@ func ifRenamed(newAlias, oldAlias string) string {
 
 func (a *API) handleInstanceDelete(w http.ResponseWriter, r *http.Request) {
 	alias := r.PathValue("alias")
-	err := a.update(func(c *config.Config) error {
-		for i, inst := range c.Instances {
-			if inst.Alias == alias {
-				c.Instances = append(c.Instances[:i], c.Instances[i+1:]...)
-				return nil
-			}
+	a.updateMu.Lock()
+	before := a.mgr.Get().Clone()
+	candidate := before.Clone()
+	if _, ok := candidate.Instance(alias); !ok {
+		a.updateMu.Unlock()
+		a.writeError(w, http.StatusNotFound, "NOT_FOUND", fmt.Sprintf("instance %q not found", alias))
+		return
+	}
+	for i, inst := range candidate.Instances {
+		if inst.Alias == alias {
+			candidate.Instances = append(candidate.Instances[:i], candidate.Instances[i+1:]...)
+			break
 		}
-		return &apiError{status: http.StatusNotFound, code: "NOT_FOUND", message: fmt.Sprintf("instance %q not found", alias)}
+	}
+	err := a.commitInstanceTransition([]string{alias}, before, candidate, func() error {
+		return a.sec.Delete(alias)
+	}, "failed to remove the stored credential", func() {
+		a.oauthStates.PurgeInstance(alias)
 	})
 	if err != nil {
+		a.updateMu.Unlock()
 		a.writeUpdateError(w, err)
 		return
 	}
-	a.sec.Delete(alias) //nolint:errcheck // best effort
-	// Invalidate the cached provider list (and quota) so a recycled alias
-	// never serves stale model or balance data after re-create.
 	a.invalidateModels(alias)
 	a.quota.InvalidateQuota(alias)
+	a.updateMu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
 }
 

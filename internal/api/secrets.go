@@ -3,6 +3,7 @@ package api
 import (
 	"net"
 	"net/http"
+	"strings"
 
 	"github.com/amirzamli/shimmer-llmgateway/internal/netutil"
 )
@@ -13,11 +14,15 @@ import (
 // address) makes the gateway reachable from other hosts, the one-time key
 // exposure must stay a localhost-only operation.
 func (a *API) requireLoopbackSource(w http.ResponseWriter, r *http.Request) bool {
+	return a.requireLoopbackSourceMessage(w, r, "master-key endpoint is only accessible from localhost")
+}
+
+func (a *API) requireLoopbackSourceMessage(w http.ResponseWriter, r *http.Request, message string) bool {
 	// Fail closed: an empty (unknown) peer address must never be treated as a
 	// loopback source, even though IsLoopbackHost counts "" as loopback for
 	// other client-address checks.
 	if r.RemoteAddr == "" {
-		a.writeError(w, http.StatusForbidden, "FORBIDDEN", "master-key endpoint is only accessible from localhost")
+		a.writeError(w, http.StatusForbidden, "FORBIDDEN", message)
 		return false
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -28,8 +33,61 @@ func (a *API) requireLoopbackSource(w http.ResponseWriter, r *http.Request) bool
 	if netutil.IsLoopbackHost(host) {
 		return true
 	}
-	a.writeError(w, http.StatusForbidden, "FORBIDDEN", "master-key endpoint is only accessible from localhost")
+	a.writeError(w, http.StatusForbidden, "FORBIDDEN", message)
 	return false
+}
+
+// requireOAuthSourceMessage allows OAuth lifecycle requests from loopback, or
+// from an explicitly configured listener address. The latter is opt-in: a
+// request arriving on an unconfigured CGNAT/ULA interface remains denied.
+func (a *API) requireOAuthSourceMessage(w http.ResponseWriter, r *http.Request, message string) bool {
+	if remoteLoopback(r.RemoteAddr) || a.requestUsesConfiguredListener(r) {
+		return true
+	}
+	a.writeError(w, http.StatusForbidden, "FORBIDDEN", message)
+	return false
+}
+
+func remoteLoopback(remote string) bool {
+	if strings.TrimSpace(remote) == "" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(remote))
+	if err != nil {
+		host = remote
+	}
+	return netutil.IsLoopbackHost(host)
+}
+
+func (a *API) requestUsesConfiguredListener(r *http.Request) bool {
+	local, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
+	if !ok || local == nil {
+		return false
+	}
+	configured := a.oauthListenAddrs
+	if len(configured) == 0 {
+		configured = a.mgr.Get().Addrs()
+	}
+	for _, listen := range configured {
+		if sameListener(local.String(), listen) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameListener(local, configured string) bool {
+	localHost, localPort, localErr := net.SplitHostPort(strings.TrimSpace(local))
+	configuredHost, configuredPort, configuredErr := net.SplitHostPort(strings.TrimSpace(configured))
+	if localErr != nil || configuredErr != nil || localPort != configuredPort {
+		return false
+	}
+	localIP := net.ParseIP(localHost)
+	configuredIP := net.ParseIP(configuredHost)
+	if localIP != nil && configuredIP != nil {
+		return localIP.Equal(configuredIP)
+	}
+	return strings.EqualFold(localHost, configuredHost)
 }
 
 // handleMasterKeyGet reports the one-time exposure of a gateway-generated

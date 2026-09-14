@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +28,7 @@ type providerRequest struct {
 	Authorization    string
 	XAPIKey          string
 	XOpencode        string
+	Originator       string
 	UserAgent        string
 	XOpencodeClient  string
 	XOpencodeProject string
@@ -48,6 +50,24 @@ type fakeProvider struct {
 	h http.HandlerFunc
 }
 
+// fakeProviderTransport keeps OAuth test configs on the production fixed
+// ChatGPT endpoint while routing those requests to the local fake provider.
+// This is test-only plumbing; production clients never rewrite the pinned URL.
+type fakeProviderTransport struct {
+	next        http.RoundTripper
+	providerURL *url.URL
+}
+
+func (t *fakeProviderTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Scheme == "https" && strings.EqualFold(req.URL.Host, "chatgpt.com") && strings.HasPrefix(req.URL.Path, "/backend-api/codex") {
+		clone := req.Clone(req.Context())
+		clone.URL.Scheme = t.providerURL.Scheme
+		clone.URL.Host = t.providerURL.Host
+		return t.next.RoundTrip(clone)
+	}
+	return t.next.RoundTrip(req)
+}
+
 func newFakeProvider(t *testing.T, h http.HandlerFunc) *fakeProvider {
 	fp := &fakeProvider{t: t, h: h}
 	fp.srv = httptest.NewServer(http.HandlerFunc(fp.handle))
@@ -65,6 +85,7 @@ func (fp *fakeProvider) handle(w http.ResponseWriter, r *http.Request) {
 		Authorization:    r.Header.Get("Authorization"),
 		XAPIKey:          r.Header.Get("x-api-key"),
 		XOpencode:        r.Header.Get("x-opencode-session"),
+		Originator:       r.Header.Get("originator"),
 		UserAgent:        r.Header.Get("User-Agent"),
 		XOpencodeClient:  r.Header.Get("X-Opencode-Client"),
 		XOpencodeProject: r.Header.Get("X-Opencode-Project"),
@@ -155,6 +176,11 @@ func newGatewayServer(t *testing.T, provider *fakeProvider, instances string, en
 	if err != nil {
 		t.Fatalf("gateway.New: %v", err)
 	}
+	providerURL, err := url.Parse(provider.url())
+	if err != nil {
+		t.Fatalf("parse fake provider URL: %v", err)
+	}
+	srv.client.Transport = &fakeProviderTransport{next: srv.client.Transport, providerURL: providerURL}
 	return srv, st
 }
 

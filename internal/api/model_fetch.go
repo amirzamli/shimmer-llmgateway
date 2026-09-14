@@ -85,11 +85,13 @@ func (a *API) handleInstanceModels(w http.ResponseWriter, r *http.Request) {
 // fetchInstanceModels returns the model list for an instance, serving the TTL
 // cache when fresh (unless refresh) and otherwise fetching <base_url>/models.
 // Anthropic-style templates have no OpenAI /models endpoint, so they always
-// fall back to the configured models (source "config"). Any fetch failure
-// falls back to the configured models with source "config" and the generic
-// error string; the underlying detail is logged, never surfaced.
+// fall back to the configured models (source "config"). OAuth templates (the
+// ChatGPT codex endpoint) likewise do not expose the OpenAI /models contract,
+// so they use the configured models without speculative discovery. Any fetch
+// failure falls back to the configured models with source "config" and the
+// generic error string; the underlying detail is logged, never surfaced.
 func (a *API) fetchInstanceModels(cfg *config.Config, inst *config.Instance, refresh bool) instanceModels {
-	if tmpl, ok := cfg.Templates[inst.Template]; ok && tmpl.Style == config.StyleAnthropic {
+	if tmpl, ok := cfg.Templates[inst.Template]; ok && (tmpl.Style == config.StyleAnthropic || tmpl.OAuth) {
 		return instanceModels{Alias: inst.Alias, Models: inst.EffectiveModels(cfg), Source: modelsSourceConfig, FetchedAt: time.Now()}
 	}
 	if !refresh {

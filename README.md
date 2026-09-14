@@ -91,6 +91,67 @@ Configure providers and instances in `gateway.toml` or from the dashboard.
 [`gateway.toml.example`](gateway.toml.example) contains a minimal configuration
 you can use as a starting point.
 
+## ChatGPT Plus sign-in (OAuth)
+
+The built-in `chatgpt` template routes to a ChatGPT Plus/Pro account through the
+same browser sign-in flow the OpenCode agent uses — no API key is involved, and
+the credential never leaves the gateway. Adding an instance of this template
+from the dashboard opens the provider login in your browser and stores the
+resulting credential encrypted next to your API keys.
+
+Prerequisites:
+
+- The gateway binds a fixed loopback callback listener on
+  `localhost:1455` (the verified redirect contract). Keep that port free and
+  local; the callback never listens on a remote address. If the port is
+  already taken, gateway startup fails rather than starting without a working
+  sign-in callback.
+- Complete the sign-in in a browser that can reach the dashboard
+  (<http://127.0.0.1:8787>) and the callback listener on `localhost:1455`.
+- When using a configured Tailscale listener from another machine, the OAuth
+  API accepts that listener, but the verified provider redirect remains
+  `localhost:1455`. Forward that port to the gateway first, for example
+  `ssh -N -L 1455:127.0.0.1:1455 user@gateway-host`.
+
+Flow:
+
+1. Dashboard → **+ Add instance** → template **chatgpt** → **Add instance**.
+2. Expand the instance → **Sign in with ChatGPT**. The dashboard opens the
+   provider's authorization page in a new tab.
+3. Log in with your ChatGPT Plus/Pro account and approve the access request.
+4. The provider redirects the browser to `http://localhost:1455/auth/callback`;
+   the gateway validates the transaction, exchanges the code, and shows a
+   short confirmation page — close that tab and return to the dashboard.
+5. The instance now shows **connected** with the masked account id and the
+   access-token expiry. The built-in template intentionally does not ship a
+   fixed model allowlist because codex model availability changes; route a
+   currently supported model as `chatgpt/<model-id>`.
+
+What happens afterwards:
+
+- **Refresh**: access tokens are refreshed automatically with an expiry skew;
+  rotated tokens are persisted in the same encrypted secrets file as API keys
+  (`<store>.secrets.json`, mode 0600). A failed refresh surfaces as a
+  sanitized authentication error — token material never appears in URLs, JSON,
+  logs, or the dashboard.
+- **Disconnect**: the dashboard's **Disconnect** button (or deleting the
+  instance) drops the stored credential and retires any in-flight sign-in;
+  the instance itself stays configured and can be reconnected anytime. There
+  is no separate provider-side revocation call.
+- **API keys**: OAuth instances never take an API key — the key field is
+  hidden for the `chatgpt` template, and the ordinary API-key providers keep
+  their existing forms and behavior unchanged.
+
+Routes used by the flow (behind the admin host/origin guard; lifecycle routes
+also require a loopback TCP source):
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| POST | `/api/instances/{alias}/oauth/start` | mint a short-lived, single-use sign-in transaction and return the provider authorization URL |
+| GET | `/api/instances/{alias}/oauth/status` | connection state: masked account id and token expiry, or `connected: false` |
+| DELETE | `/api/instances/{alias}/oauth` | disconnect (idempotent; credential only, the instance stays) |
+| GET | `/auth/callback` | fixed loopback-only callback served only at `http://localhost:1455/auth/callback` |
+
 ## MCP inspector (optional)
 
 Inspect captures from the same SQLite store with:

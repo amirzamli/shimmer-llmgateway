@@ -331,7 +331,7 @@ func TestBuiltinTemplatesPresent(t *testing.T) {
 	want := []string{
 		"openai", "anthropic", "ollama", "groq", "vllm", "lite_llm",
 		"openrouter", "deepseek", "gemini", "mistral", "kimi", "zai",
-		"opencode_zen", "opencode_go", "commandcode",
+		"opencode_zen", "opencode_go", "commandcode", "chatgpt",
 	}
 	for _, name := range want {
 		if _, ok := cfg.Templates[name]; !ok {
@@ -359,6 +359,33 @@ func TestBuiltinTemplatesPresent(t *testing.T) {
 	// built-in template declares it so the forward path synthesises one.
 	if got := cfg.Templates["opencode_go"].SessionHeader; got != "x-opencode-session" {
 		t.Errorf("opencode_go session_header = %q, want x-opencode-session", got)
+	}
+	// The ChatGPT Plus template is OAuth-authenticated and pinned to the
+	// verified OpenCode v1.18.30 upstream contract: the codex Responses
+	// endpoint and the session-id conversation header. The codex endpoint has
+	// no stable OpenAI /models contract, so the built-in model list is empty.
+	chatgpt := cfg.Templates["chatgpt"]
+	if !chatgpt.OAuth {
+		t.Error("chatgpt oauth = false, want true")
+	}
+	if chatgpt.BaseURL != "https://chatgpt.com/backend-api/codex" {
+		t.Errorf("chatgpt base_url = %q, want the verified codex base", chatgpt.BaseURL)
+	}
+	if chatgpt.Style != StyleResponses {
+		t.Errorf("chatgpt style = %q, want %q (the codex endpoint speaks Responses)", chatgpt.Style, StyleResponses)
+	}
+	if chatgpt.APIKeyEnv != "" {
+		t.Errorf("chatgpt api_key_env = %q, want empty (OAuth accounts have no API key)", chatgpt.APIKeyEnv)
+	}
+	if got := chatgpt.SessionHeader; got != "session-id" {
+		t.Errorf("chatgpt session_header = %q, want session-id", got)
+	}
+	if len(chatgpt.Models) != 0 {
+		t.Errorf("chatgpt models = %v, want no hard-coded allowlist", chatgpt.Models)
+	}
+	// Ordinary templates are not OAuth: the marker must be opt-in only.
+	if cfg.Templates["openai"].OAuth || cfg.Templates["opencode_go"].OAuth {
+		t.Error("an API-key template has oauth = true")
 	}
 	// OpenCode Go serves three protocols on one base URL: the template default
 	// is the openai chat style (/chat/completions), and model_styles overrides
@@ -1022,6 +1049,63 @@ models = ["m1"]
 	}
 	if strings.Contains(string(data), "Name =") {
 		t.Errorf("Marshal leaked the Name field: %s", data)
+	}
+}
+
+func TestOAuthTemplateFieldRoundTrip(t *testing.T) {
+	cfg := mustParse(t, `
+[providers.oauth_custom]
+base_url = "https://chatgpt.com/backend-api/codex"
+style = "responses"
+oauth = true
+session_header = "session-id"
+models = ["gpt-5.3-codex"]
+`)
+	tmpl := cfg.Templates["oauth_custom"]
+	if !tmpl.OAuth {
+		t.Fatal("oauth = false after parse, want true")
+	}
+	data, err := Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(data), "oauth = true") {
+		t.Errorf("Marshal dropped the oauth marker: %s", data)
+	}
+	re, err := Parse(data)
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	if !re.Templates["oauth_custom"].OAuth {
+		t.Error("oauth marker lost in the marshal/parse round trip")
+	}
+	// The marker stays opt-in: an API-key template never serializes it.
+	plain := mustParse(t, `
+[providers.custom]
+base_url = "https://example.com/v1"
+models = ["m1"]
+`)
+	plainData, err := Marshal(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(plainData), "oauth") {
+		t.Errorf("Marshal emitted oauth for an API-key template: %s", plainData)
+	}
+}
+
+func TestOAuthTemplateEndpointIsFixed(t *testing.T) {
+	for _, baseURL := range []string{"https://example.com/codex", "http://127.0.0.1:9000/codex"} {
+		_, err := Parse([]byte("[providers.oauth_custom]\nbase_url = \"" + baseURL + "\"\nstyle = \"responses\"\noauth = true\n"))
+		if err == nil {
+			t.Errorf("OAuth template base_url %q was accepted, want fixed endpoint validation error", baseURL)
+		}
+	}
+	if _, err := Parse([]byte("[providers.oauth_custom]\nbase_url = \"" + ChatGPTCodexBaseURL + "\"\noauth = true\n")); err == nil {
+		t.Error("OAuth template without responses style was accepted, want fixed endpoint validation error")
+	}
+	if _, err := Parse([]byte("[providers.oauth_custom]\nbase_url = \"" + ChatGPTCodexBaseURL + "\"\nstyle = \"responses\"\noauth = true\n")); err == nil {
+		t.Error("OAuth template without session_header was accepted, want fixed contract validation error")
 	}
 }
 
