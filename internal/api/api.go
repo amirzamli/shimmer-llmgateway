@@ -82,12 +82,13 @@ type API struct {
 // New builds the API handler set over the live config manager, the capture
 // store, and the secrets store. configPath is the gateway.toml path written
 // back on config mutations. oauthClient is the outbound client used by the
-// ChatGPT sign-in code exchange (nil uses http.DefaultClient).
-func New(mgr *config.ConfigManager, configPath string, st *store.Store, sec *secrets.Store, logger *logging.Logger, oauthClient *http.Client) *API {
+// ChatGPT sign-in code exchange (nil uses http.DefaultClient). oauthResolver
+// supplies refresh-aware credentials to the quota fetcher.
+func New(mgr *config.ConfigManager, configPath string, st *store.Store, sec *secrets.Store, logger *logging.Logger, oauthClient *http.Client, oauthResolver quota.OAuthCredentialResolver) *API {
 	return &API{
 		mgr: mgr, path: configPath, store: st, sec: sec, logger: logger,
 		startedAt: time.Now(), modelsCache: map[string]modelsCacheEntry{}, modelsFlight: map[string]*modelsFlightCall{},
-		quota:        quota.New(mgr.Get, sec),
+		quota:        quota.New(mgr.Get, sec, oauthResolver),
 		oauthCfg:     oauth.Config{},
 		oauthClient:  oauthClient,
 		oauthDevices: oauth.NewDeviceStore(),

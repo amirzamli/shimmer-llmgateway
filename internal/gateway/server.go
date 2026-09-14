@@ -125,7 +125,8 @@ func New(cfg *config.ConfigManager, st *store.Store, logger *logging.Logger, con
 	// a total request deadline (see providerTransport).
 	client := &http.Client{Transport: providerTransport, CheckRedirect: noRedirect}
 	life := oauth.NewLifecycle()
-	apiHandler := api.New(cfg, configPath, st, sec, logger, client)
+	oauthResolver := NewOAuthResolver(sec, client, oauth.Config{}, life)
+	apiHandler := api.New(cfg, configPath, st, sec, logger, client, oauthResolver)
 	apiHandler.SetOAuthLifecycle(life)
 	apiHandler.SetOAuthListenAddrs(listenAddrs)
 	return &Server{
@@ -137,7 +138,7 @@ func New(cfg *config.ConfigManager, st *store.Store, logger *logging.Logger, con
 		secrets: sec,
 		// The OAuth resolver shares the outbound client (redirect policy
 		// included) and persists rotated tokens through the secrets store.
-		oauth: NewOAuthResolver(sec, client, oauth.Config{}, life),
+		oauth: oauthResolver,
 		// The API uses the same no-redirect client for the device sign-in code
 		// exchange (a redirecting token endpoint must not bounce the code
 		// and PKCE verifier elsewhere).

@@ -373,7 +373,7 @@
   .instance-row.drop-above { box-shadow: 0 -2px 0 var(--accent); }
   .instance-row.drop-below { box-shadow: 0 2px 0 var(--accent); }
   .drag-grip, .aliases-caret { flex: 0 0 auto; color: var(--dim); font-size: 11px; }
-  .aliases-caret { transition: transform .15s ease; }
+  .aliases-caret { display: inline-block; transition: transform .15s ease; }
   .aliases-instance[open] .aliases-caret { transform: rotate(90deg); }
   .instance-expand { flex: 0 0 auto; min-width: 14px; min-height: 20px; padding: 0; border: 0; background: transparent; color: var(--dim); font-size: 11px; line-height: 1; }
   .instance-expand:hover { background: transparent; color: var(--accent); }
@@ -1082,23 +1082,32 @@ function pluginListHtml(instance) {
     <div id="plugin-list-${domId(instance.alias)}" class="plugin-list">${chips}<span class="plugin-add-wrap"><button class="ghost btn-sm" type="button" data-action="plugin-menu" data-alias="${esc(instance.alias)}">+ Add</button><span class="plugin-menu hidden"></span></span></div>
   </div>`;
 }
-function modelOptions(alias) { return (state.models[alias] || []).map(model => `<option value="${esc(model)}">`).join(""); }
+function modelOptions(alias, current) {
+  const values = state.models[alias] || [], options = current && !values.includes(current) ? [current, ...values] : values;
+  let html = current ? "" : `<option value="" disabled selected>Select a model</option>`;
+  return html + options.map(model => `<option value="${esc(model)}" ${model === current ? "selected" : ""}>${esc(model)}</option>`).join("");
+}
 function aliasesStatus(alias) {
   const meta = state.modelMeta[alias];
   if (!meta) return "";
   const source = meta.source === "provider" ? "provider models" : "configured models";
   return `${esc(source)}${meta.fetched_at ? " · " + esc(fmtTime(meta.fetched_at)) : ""}${meta.error ? ` <span class="badge warn">${esc(meta.error)}</span>` : ""}`;
 }
-const reasoningFallback = ["low", "medium", "high", "max"];
+const reasoningFallback = ["minimal", "low", "medium", "high", "xhigh", "max"];
+function reasoningValues(instance, model) {
+  const template = templateFor(instance), options = template && template.model_reasoning_options;
+  const advertised = options && Object.prototype.hasOwnProperty.call(options, model) ? options[model] : null;
+  return { values: Array.isArray(advertised) ? advertised.slice() : reasoningFallback.slice(), advertised: Array.isArray(advertised) };
+}
+function reasoningLabel(value) { return value === "xhigh" ? "Extra high" : value.charAt(0).toUpperCase() + value.slice(1); }
 function reasoningOptions(instance, model, current) {
-  const template = templateFor(instance);
-  const advertised = template && template.model_reasoning_options && template.model_reasoning_options[model];
-  const values = Array.isArray(advertised) && advertised.length ? advertised.slice() : reasoningFallback.slice();
-  if (current && !values.includes(current)) values.push(current);
-  return `<option value="" ${!current ? "selected" : ""}>Default</option><option value="none" ${current === "none" ? "selected" : ""}>None</option>${values.map(value => `<option value="${esc(value)}" ${current === value ? "selected" : ""}>${esc(value.charAt(0).toUpperCase() + value.slice(1))}</option>`).join("")}`;
+  const metadata = reasoningValues(instance, model), showNone = !metadata.advertised || metadata.values.includes("none"), values = metadata.values.filter(value => value !== "none");
+  if (current && current !== "none" && !values.includes(current)) values.push(current);
+  const defaultSelected = !current || (current === "none" && !showNone);
+  return `<option value="" ${defaultSelected ? "selected" : ""}>Default</option>${showNone ? `<option value="none" ${current === "none" ? "selected" : ""}>None</option>` : ""}${values.map(value => `<option value="${esc(value)}" ${current === value ? "selected" : ""}>${esc(reasoningLabel(value))}</option>`).join("")}`;
 }
 function aliasRowHtml(instance, key, model, reasoning) {
-  return `<tr><td><input class="alias-key" value="${esc(key)}" placeholder="e.g. fast"></td><td><input class="alias-model" list="models-${domId(instance.alias)}" value="${esc(model)}" placeholder="model id"></td><td><select class="alias-reasoning">${reasoningOptions(instance, model, reasoning)}</select></td><td><button class="danger-ghost btn-sm" type="button" data-action="alias-remove">Remove</button></td></tr>`;
+  return `<tr><td><input class="alias-key" value="${esc(key)}" placeholder="e.g. fast"></td><td><select class="alias-model" aria-label="Model target">${modelOptions(instance.alias, model)}</select></td><td><select class="alias-reasoning">${reasoningOptions(instance, model, reasoning)}</select></td><td><button class="danger-ghost btn-sm" type="button" data-action="alias-remove">Remove</button></td></tr>`;
 }
 function aliasesHtml(instance) {
   const entries = Object.entries(instance.model_aliases || {}).sort((a, b) => a[0].localeCompare(b[0]));
@@ -1258,7 +1267,7 @@ function instanceHtml(instance) {
       <span class="segmented-control provider-state-control" data-state="${stateValue}" data-alias="${esc(instance.alias)}" role="group" aria-label="${esc(instance.alias)} state"><span class="slider" aria-hidden="true"></span><button type="button" data-action="provider-state" data-val="enabled" class="${!instance.disabled ? "active" : ""}">Enable</button><button type="button" data-action="provider-state" data-val="disabled" class="${instance.disabled ? "active" : ""}">Disable</button></span>
       <span class="instance-actions"><button class="ghost btn-sm" type="button" data-action="edit-instance" data-alias="${esc(instance.alias)}">Edit</button><button class="danger-ghost btn-sm" type="button" data-action="delete-instance" data-alias="${esc(instance.alias)}">Delete</button></span>
     </summary>
-    <div class="instance-body"><datalist id="models-${domId(instance.alias)}">${modelOptions(instance.alias)}</datalist>
+    <div class="instance-body">
       <div class="instance-section"><div class="instance-section-head"><span class="section-title">Aliases</span><span id="models-status-${domId(instance.alias)}" class="muted" style="font-size:10px">${aliasesStatus(instance.alias)}</span><span class="spacer"></span><button class="ghost btn-sm" type="button" data-action="models-refresh" data-alias="${esc(instance.alias)}">Refresh models</button><button class="outline btn-sm" type="button" data-action="alias-add" data-alias="${esc(instance.alias)}">+ Add alias</button></div><table class="aliases-table"><thead><tr><th>Alias name</th><th>Model target</th><th>Reasoning</th><th></th></tr></thead><tbody id="aliases-body-${domId(instance.alias)}">${aliasesHtml(instance)}</tbody></table></div>
       ${pluginListHtml(instance)}${oauthAccountHtml(instance)}${connectionHtml(instance)}
       <div class="instance-footer"><span class="muted" style="font-size:10px">Changes are staged until saved.</span><span class="spacer"></span><button class="ghost btn-sm" type="button" data-action="instance-cancel" data-alias="${esc(instance.alias)}">Cancel</button><button class="btn-sm" type="button" data-action="instance-save" data-alias="${esc(instance.alias)}">Save changes</button></div>
@@ -1310,6 +1319,13 @@ function stagedAliasMaps(alias) {
   });
   return { modelAliases, modelReasoning };
 }
+function syncAliasReasoning(row, instance) {
+  const model = row && row.querySelector(".alias-model"), reasoning = row && row.querySelector(".alias-reasoning");
+  if (!model || !reasoning) return;
+  const metadata = reasoningValues(instance, model.value), current = reasoning.value;
+  const valid = !current || metadata.values.includes(current) || (!metadata.advertised && current === "none");
+  reasoning.innerHTML = reasoningOptions(instance, model.value, valid ? current : "");
+}
 async function loadModels(alias, refresh) {
   try {
     const data = await api("/api/instances/" + encodeURIComponent(alias) + "/models" + (refresh ? "?refresh=1" : ""));
@@ -1322,8 +1338,11 @@ async function loadModels(alias, refresh) {
   }
 }
 function updateModelDom(alias) {
-  const datalist = $("models-" + domId(alias)), status = $("models-status-" + domId(alias));
-  if (datalist) datalist.innerHTML = modelOptions(alias);
+  const body = $("aliases-body-" + domId(alias)), status = $("models-status-" + domId(alias));
+  if (body) body.querySelectorAll(".alias-model").forEach(select => {
+    const current = select.value;
+    select.innerHTML = modelOptions(alias, current);
+  });
   if (status) status.innerHTML = aliasesStatus(alias);
 }
 async function loadProviders() {
@@ -1403,7 +1422,6 @@ async function saveEdit() {
 }
 async function deleteInstance(alias) {
   if (!window.confirm("Delete instance " + alias + "? This cannot be undone from the dashboard.")) return;
-  oauthPollCancel(alias);
   oauthDevicePollCancel(alias);
   try {
     await api("/api/instances/" + encodeURIComponent(alias), { method: "DELETE" });
@@ -1777,6 +1795,10 @@ document.addEventListener("input", event => {
 document.addEventListener("change", event => {
   if (event.target.id === "add-template") updateAddTemplate();
   if (event.target.id === "edit-clear-key" && event.target.checked) $("edit-key").value = "";
+  if (event.target.classList.contains("alias-model")) {
+    const row = event.target.closest("tr"), container = event.target.closest(".aliases-instance"), instance = container && state.instances.find(item => item.alias === container.dataset.alias);
+    if (row && instance) syncAliasReasoning(row, instance);
+  }
   if (["f-status", "f-since", "f-until"].includes(event.target.id)) loadSessions(false);
 });
 document.addEventListener("toggle", event => {

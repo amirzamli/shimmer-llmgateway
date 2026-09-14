@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -73,7 +74,7 @@ func newAPITest(t *testing.T, toml string, masterKey []byte) (*httptest.Server, 
 	if err != nil {
 		t.Fatalf("secrets.Open: %v", err)
 	}
-	apiSrv := New(mgr, cfgPath, st, sec, logging.New(io.Discard), nil)
+	apiSrv := New(mgr, cfgPath, st, sec, logging.New(io.Discard), nil, nil)
 	gs := httptest.NewServer(apiSrv.Handler())
 	t.Cleanup(gs.Close)
 	return gs, mgr, st, cfgPath
@@ -978,7 +979,7 @@ func TestMasterKeyLoopbackGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("secrets.Open: %v", err)
 	}
-	apiSrv := New(mgr, cfgPath, st, sec, logging.New(io.Discard), nil)
+	apiSrv := New(mgr, cfgPath, st, sec, logging.New(io.Discard), nil, nil)
 
 	for _, addr := range []string{"127.0.0.1:4321", "[::1]:4321", "localhost:4321", "127.8.8.8:99"} {
 		req := httptest.NewRequest("GET", "/api/secrets/master-key", nil)
@@ -1045,7 +1046,7 @@ func TestMasterKeyLegacyMigrationOnAck(t *testing.T) {
 	if !sec.PendingMigration() {
 		t.Error("PendingMigration = false, want true for legacy file with generated key")
 	}
-	apiSrv := New(mgr, cfgPath, st, sec, logging.New(io.Discard), nil)
+	apiSrv := New(mgr, cfgPath, st, sec, logging.New(io.Discard), nil, nil)
 	gs := httptest.NewServer(apiSrv.Handler())
 	t.Cleanup(gs.Close)
 
@@ -1230,6 +1231,26 @@ template = "chatgpt"
 	models, ok := out["models"].([]any)
 	if !ok || len(models) != 1 || models[0] != "gpt-5.3-codex" {
 		t.Errorf("models = %v, want [gpt-5.3-codex]", out["models"])
+	}
+}
+
+func TestInstanceModelsOAuthUsesBuiltinModels(t *testing.T) {
+	toml := `
+[[instances]]
+alias = "chatgpt"
+template = "chatgpt"
+`
+	gs, _, _, _ := newAPITest(t, toml, testMasterKey)
+	status, out := doJSON(t, gs, "GET", "/api/instances/chatgpt/models", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET models status = %d, body %v", status, out)
+	}
+	if out["source"] != "config" {
+		t.Errorf("source = %v, want config", out["source"])
+	}
+	want := []any{"gpt-5.2-codex", "gpt-5.3-codex", "gpt-5.6", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-6-astra"}
+	if models, ok := out["models"].([]any); !ok || !reflect.DeepEqual(models, want) {
+		t.Errorf("models = %v, want %v", out["models"], want)
 	}
 }
 

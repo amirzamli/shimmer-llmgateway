@@ -115,8 +115,8 @@ Flow:
    and approve the access request.
 4. The gateway polls the provider and completes the token exchange server-side.
 5. The instance shows **connected** with the masked account id and the
-   access-token expiry. The built-in template intentionally does not ship a
-   fixed model allowlist because codex model availability changes; route a
+   access-token expiry. The alias editor uses the built-in Codex model list,
+   while availability still depends on the account and rollout. Route a
    currently supported model as `chatgpt/<model-id>`.
 
 What happens afterwards:

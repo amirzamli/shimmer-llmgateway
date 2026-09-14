@@ -153,6 +153,47 @@ func TestParseOpenCodeGo(t *testing.T) {
 	})
 }
 
+func TestParseChatGPT(t *testing.T) {
+	body := `{
+		"plan_type":"plus",
+		"rate_limit":{
+			"primary_window":{"used_percent":25.5,"limit_window_seconds":18000,"reset_at":1780000000},
+			"secondary_window":{"used_percent":"75","limit_window_seconds":"604800","reset_at":"2026-08-24T00:00:00Z"},
+			"tertiary_window":{"used_percent":110,"reset_at":"2026-09-01T00:00:00Z"}
+		},
+		"credits":{"balance":"3.50"}
+	}`
+	windows, err := parseChatGPT([]byte(body))
+	if err != nil {
+		t.Fatalf("parseChatGPT: %v", err)
+	}
+	if got := *windows["5h"].UsedPercent; got != 25.5 {
+		t.Errorf("primary percent = %v, want 25.5", got)
+	}
+	if got := *windows["5h"].WindowSeconds; got != 18000 {
+		t.Errorf("primary window seconds = %d, want 18000", got)
+	}
+	if got := *windows["5h"].ResetAt; got != 1780000000000 {
+		t.Errorf("primary reset = %d, want 1780000000000", got)
+	}
+	if got := *windows["weekly"].UsedPercent; got != 75 {
+		t.Errorf("secondary percent = %v, want 75", got)
+	}
+	if got := *windows["monthly"].UsedPercent; got != 100 {
+		t.Errorf("tertiary percent = %v, want 100 (clamped)", got)
+	}
+	if got := windows["credits_balance"].ValueLabel; got != "3.50" {
+		t.Errorf("credits balance = %q, want 3.50", got)
+	}
+
+	if _, err := parseChatGPT([]byte(`{"rate_limit":{}}`)); !errors.Is(err, errNoQuotaData) {
+		t.Errorf("empty usage error = %v, want %q", err, errNoQuotaData)
+	}
+	if _, err := parseChatGPT([]byte(`not json`)); err == nil {
+		t.Error("parseChatGPT accepted invalid JSON")
+	}
+}
+
 func TestParseOpenRouter(t *testing.T) {
 	tests := []struct {
 		name string
@@ -295,7 +336,7 @@ func TestListClassification(t *testing.T) {
 	}
 	t.Setenv("QUOTA_TEST_KEY", "sk-env-key")
 
-	f := New(func() *config.Config { return cfg }, sec)
+	f := New(func() *config.Config { return cfg }, sec, nil)
 	results := f.List(context.Background(), false)
 	if len(results) != 4 {
 		t.Fatalf("results = %d, want 4", len(results))
@@ -374,5 +415,59 @@ func TestListClassification(t *testing.T) {
 	}
 	if rCmd.UsageURL != "https://commandcode.ai/studio" {
 		t.Errorf("cmd-code usage_url = %q, want https://commandcode.ai/studio", rCmd.UsageURL)
+	}
+}
+
+func TestChatGPTOAuthQuota(t *testing.T) {
+	var gotAuth, gotAccount string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/backend-api/wham/usage" {
+			t.Errorf("path = %q, want /backend-api/wham/usage", r.URL.Path)
+		}
+		gotAuth = r.Header.Get("Authorization")
+		gotAccount = r.Header.Get("ChatGPT-Account-Id")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"rate_limit":{"primary_window":{"used_percent":12,"reset_at":1780000000},"secondary_window":{"used_percent":34,"reset_at":1781000000}}}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	sec, err := secrets.Open(filepath.Join(t.TempDir(), "test.secrets.json"), quotaTestKey)
+	if err != nil {
+		t.Fatalf("secrets.Open: %v", err)
+	}
+	if err := sec.SetOAuth("chatgpt", secrets.OAuthCredential{
+		AccessToken: "oauth-access-token",
+		AccountID:   "acct-123",
+		ExpiresAt:   time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("secrets.SetOAuth: %v", err)
+	}
+
+	cfg := &config.Config{
+		Templates: map[string]*config.Template{
+			"chatgpt": {Name: "chatgpt", BaseURL: srv.URL + "/backend-api/codex", OAuth: true},
+		},
+		Instances: []*config.Instance{{Alias: "chatgpt", Template: "chatgpt"}},
+	}
+	f := New(func() *config.Config { return cfg }, sec, nil)
+	results := f.List(context.Background(), false)
+	if len(results) != 1 {
+		t.Fatalf("results = %d, want 1", len(results))
+	}
+	r := results[0]
+	if !r.Supported || !r.Configured || !r.Ok {
+		t.Fatalf("chatgpt = %+v, want supported+configured+ok", r)
+	}
+	if gotAuth != "Bearer oauth-access-token" {
+		t.Errorf("Authorization = %q, want OAuth bearer", gotAuth)
+	}
+	if gotAccount != "acct-123" {
+		t.Errorf("ChatGPT-Account-Id = %q, want acct-123", gotAccount)
+	}
+	if got := *r.Windows["5h"].UsedPercent; got != 12 {
+		t.Errorf("5h percent = %v, want 12", got)
+	}
+	if got := *r.Windows["weekly"].UsedPercent; got != 34 {
+		t.Errorf("weekly percent = %v, want 34", got)
 	}
 }

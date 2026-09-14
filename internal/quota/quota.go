@@ -1,10 +1,12 @@
 // Package quota fetches per-provider account quota/balance for the gateway UI
-// (§6.2): DeepSeek balance, OpenCode Go usage limits, and OpenRouter credits.
+// (§6.2): DeepSeek balance, OpenCode Go usage limits, OpenRouter credits, and
+// ChatGPT OAuth usage limits.
 // Each provider has a small strategy (suffix + payload parser) registered by
 // template name; unsupported templates are reported as a gap so the UI can
-// show them. Keys never leave this package and no error string ever includes
-// the base URL or key material — the /api/ surface is unauthenticated, so
-// failures surface a fixed message while the underlying detail is dropped.
+// show them. Credentials are used only for the outbound probe and no error
+// string ever includes the base URL or credential material — the /api/ surface
+// is unauthenticated, so failures surface a fixed message while the underlying
+// detail is dropped.
 package quota
 
 import (
@@ -91,7 +93,15 @@ type Result struct {
 type providerSpec struct {
 	providerName string
 	suffix       string
+	oauth        bool
 	parse        func([]byte) (map[string]Window, error)
+}
+
+// OAuthCredentialResolver supplies a current ChatGPT OAuth credential. The
+// gateway implementation refreshes expired access tokens before returning;
+// quota keeps the interface here to avoid importing the gateway package.
+type OAuthCredentialResolver interface {
+	Credential(context.Context, string) (secrets.OAuthCredential, error)
 }
 
 // specs registers the quota strategies for providers with
@@ -101,6 +111,7 @@ var specs = map[string]providerSpec{
 	"deepseek":    {providerName: "DeepSeek", suffix: "/user/balance", parse: parseDeepSeek},
 	"opencode_go": {providerName: "OpenCode Go", suffix: "/usage", parse: parseOpenCodeGo},
 	"openrouter":  {providerName: "OpenRouter", suffix: "/credits", parse: parseOpenRouter},
+	"chatgpt":     {providerName: "ChatGPT", suffix: "/wham/usage", oauth: true, parse: parseChatGPT},
 }
 
 // usageURLs maps template names to web-based usage / quota dashboard URLs
@@ -119,13 +130,16 @@ type Fetcher struct {
 
 	// mu guards cache, the in-memory per-alias fetch results (TTL
 	// quotaCacheTTL; invalidated on instance PATCH/DELETE).
-	mu    sync.Mutex
-	cache map[string]Result
+	mu            sync.Mutex
+	cache         map[string]Result
+	oauthResolver OAuthCredentialResolver
 }
 
-// New returns a Fetcher resolving keys with the gateway's §6.2 precedence
-// (api_key_env first, then the secrets store).
-func New(getCfg func() *config.Config, sec *secrets.Store) *Fetcher {
+// New returns a Fetcher resolving API keys with the gateway's §6.2 precedence
+// (api_key_env first, then the secrets store). resolver supplies refresh-aware
+// OAuth credentials for ChatGPT instances; nil keeps the direct secrets
+// fallback used by isolated tests.
+func New(getCfg func() *config.Config, sec *secrets.Store, resolver OAuthCredentialResolver) *Fetcher {
 	return &Fetcher{
 		getCfg: getCfg,
 		sec:    sec,
@@ -138,7 +152,8 @@ func New(getCfg func() *config.Config, sec *secrets.Store) *Fetcher {
 				return http.ErrUseLastResponse
 			},
 		},
-		cache: map[string]Result{},
+		cache:         map[string]Result{},
+		oauthResolver: resolver,
 	}
 }
 
@@ -194,12 +209,15 @@ func (f *Fetcher) resultFor(ctx context.Context, cfg *config.Config, inst *confi
 		Configured: true,
 		FetchedAt:  time.Now(),
 	}
-	if key := f.fetchKey(cfg, inst); key == "" {
+	credential, configured, credentialErr := f.fetchCredential(ctx, cfg, inst, spec)
+	if !configured {
 		res.Configured = false
+		res.Error = credentialErr
+	} else if credentialErr != "" {
 		res.Ok = false
-		res.Error = quotaErrNotConfigured
+		res.Error = credentialErr
 	} else {
-		windows, errMsg := f.fetchWindows(ctx, cfg, inst, spec, key)
+		windows, errMsg := f.fetchWindows(ctx, cfg, inst, spec, credential)
 		if errMsg != "" {
 			res.Ok = false
 			res.Error = errMsg
@@ -226,21 +244,75 @@ func (f *Fetcher) fetchKey(cfg *config.Config, inst *config.Instance) string {
 	return key
 }
 
+type quotaCredential struct {
+	token     string
+	accountID string
+}
+
+// fetchCredential resolves either the normal API key or the ChatGPT OAuth
+// credential. OAuth instances are read through the refresh-aware resolver when
+// one is installed; the direct secrets fallback keeps the quota package usable
+// in isolated tests and reports the same configured state.
+func (f *Fetcher) fetchCredential(ctx context.Context, cfg *config.Config, inst *config.Instance, spec providerSpec) (quotaCredential, bool, string) {
+	if !spec.oauth {
+		if key := f.fetchKey(cfg, inst); key != "" {
+			return quotaCredential{token: key}, true, ""
+		}
+		return quotaCredential{}, false, quotaErrNotConfigured
+	}
+
+	f.mu.Lock()
+	resolver := f.oauthResolver
+	f.mu.Unlock()
+	if resolver != nil {
+		cred, err := resolver.Credential(ctx, inst.Alias)
+		if err == nil && cred.AccessToken != "" {
+			return quotaCredential{token: cred.AccessToken, accountID: cred.AccountID}, true, ""
+		}
+		stored, ok, storedErr := f.sec.GetOAuth(inst.Alias)
+		if storedErr != nil {
+			return quotaCredential{}, true, quotaErrInvalidResponse
+		}
+		if !ok || stored.AccessToken == "" {
+			return quotaCredential{}, false, quotaErrNotConfigured
+		}
+		return quotaCredential{}, true, quotaErrAuthFailed
+	}
+
+	cred, ok, err := f.sec.GetOAuth(inst.Alias)
+	if err != nil {
+		return quotaCredential{}, true, quotaErrInvalidResponse
+	}
+	if !ok || cred.AccessToken == "" {
+		return quotaCredential{}, false, quotaErrNotConfigured
+	}
+	return quotaCredential{token: cred.AccessToken, accountID: cred.AccountID}, true, ""
+}
+
 // fetchWindows GETs the provider's quota endpoint (base_url + strategy
 // suffix) with Bearer auth, maps the status/body to the fixed set of
-// user-facing errors (never the URL or key), and parses the windows.
-func (f *Fetcher) fetchWindows(ctx context.Context, cfg *config.Config, inst *config.Instance, spec providerSpec, key string) (map[string]Window, string) {
+// user-facing errors (never the URL or credential), and parses the windows.
+func (f *Fetcher) fetchWindows(ctx context.Context, cfg *config.Config, inst *config.Instance, spec providerSpec, credential quotaCredential) (map[string]Window, string) {
 	tmpl, ok := cfg.Templates[inst.Template]
 	if !ok {
 		return nil, quotaErrInvalidResponse
 	}
-	url := strings.TrimRight(tmpl.BaseURL, "/") + spec.suffix
+	baseURL := strings.TrimRight(tmpl.BaseURL, "/")
+	if spec.oauth {
+		// The ChatGPT request endpoint includes /codex, while the account usage
+		// endpoint is rooted at /backend-api/wham/usage.
+		baseURL = strings.TrimSuffix(baseURL, "/codex")
+	}
+	url := baseURL + spec.suffix
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, quotaErrRequestFailed
 	}
-	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Authorization", "Bearer "+credential.token)
+	if credential.accountID != "" {
+		req.Header.Set("ChatGPT-Account-Id", credential.accountID)
+	}
 	// No inbound client exists on this path, so the probe always identifies
 	// itself with the gateway's constant UA instead of Go's "Go-http-client/1.1".
 	req.Header.Set("User-Agent", config.UserAgent)
@@ -435,6 +507,82 @@ func parseOpenCodeGo(body []byte) (map[string]Window, error) {
 		return nil, errOpenCodeUsage
 	}
 	return windows, nil
+}
+
+// chatGPTUsageWindow is one rate-limit window from GET /wham/usage. The
+// endpoint returns numeric values today, but raw fields keep the parser
+// tolerant of the numeric-string form used by some provider APIs.
+type chatGPTUsageWindow struct {
+	UsedPercent       json.RawMessage `json:"used_percent"`
+	LimitWindowSecond json.RawMessage `json:"limit_window_seconds"`
+	ResetAt           json.RawMessage `json:"reset_at"`
+}
+
+// parseChatGPT parses the ChatGPT Codex usage response. Its primary and
+// secondary windows correspond to the rolling and weekly limits shown by the
+// OpenCode Go quota surface; a tertiary window and credit balance are retained
+// when the account supplies them.
+func parseChatGPT(body []byte) (map[string]Window, error) {
+	var payload struct {
+		RateLimit struct {
+			Primary   chatGPTUsageWindow `json:"primary_window"`
+			Secondary chatGPTUsageWindow `json:"secondary_window"`
+			Tertiary  chatGPTUsageWindow `json:"tertiary_window"`
+		} `json:"rate_limit"`
+		Credits struct {
+			Balance json.RawMessage `json:"balance"`
+		} `json:"credits"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
+	}
+
+	windows := map[string]Window{}
+	addWindow := func(key string, raw chatGPTUsageWindow) {
+		percent, ok := asFloat(raw.UsedPercent)
+		if !ok {
+			return
+		}
+		used := math.Max(0, math.Min(100, percent))
+		window := Window{UsedPercent: &used}
+		if seconds, ok := asFloat(raw.LimitWindowSecond); ok && seconds >= 0 {
+			windowSeconds := int64(seconds)
+			window.WindowSeconds = &windowSeconds
+		}
+		if reset, ok := parseResetAt(raw.ResetAt); ok {
+			window.ResetAt = &reset
+		}
+		windows[key] = window
+	}
+	addWindow("5h", payload.RateLimit.Primary)
+	addWindow("weekly", payload.RateLimit.Secondary)
+	addWindow("monthly", payload.RateLimit.Tertiary)
+	if balance, ok := quotaValueLabel(payload.Credits.Balance); ok {
+		windows["credits_balance"] = Window{ValueLabel: balance}
+	}
+	if len(windows) == 0 {
+		return nil, errNoQuotaData
+	}
+	return windows, nil
+}
+
+// quotaValueLabel renders a provider balance without accepting arbitrary JSON
+// into the UI. String balances stay verbatim; numeric balances use a stable
+// non-exponential representation.
+func quotaValueLabel(raw json.RawMessage) (string, bool) {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return "", false
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		s = strings.TrimSpace(s)
+		return s, s != ""
+	}
+	v, ok := asFloat(raw)
+	if !ok {
+		return "", false
+	}
+	return strconv.FormatFloat(v, 'f', -1, 64), true
 }
 
 // parseOpenRouter parses GET {base}/credits: total_credits / total_usage

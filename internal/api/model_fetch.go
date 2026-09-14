@@ -38,9 +38,8 @@ var modelsClient = &http.Client{
 }
 
 // instanceModels is the GET /api/instances/{alias}/models response. Source is
-// "provider" when the list came from a live fetch and "config" when the fetch
-// failed (or was skipped) and the configured models were returned. Error is
-// the generic string above, present only on an actual fetch failure.
+// "provider" for a live fetch and "config" for configured-model fallback.
+// Error is the generic string above, present only on an actual fetch failure.
 type instanceModels struct {
 	Alias     string    `json:"alias"`
 	Models    []string  `json:"models"`
@@ -86,10 +85,10 @@ func (a *API) handleInstanceModels(w http.ResponseWriter, r *http.Request) {
 // cache when fresh (unless refresh) and otherwise fetching <base_url>/models.
 // Anthropic-style templates have no OpenAI /models endpoint, so they always
 // fall back to the configured models (source "config"). OAuth templates (the
-// ChatGPT codex endpoint) likewise do not expose the OpenAI /models contract,
-// so they use the configured models without speculative discovery. Any fetch
-// failure falls back to the configured models with source "config" and the
-// generic error string; the underlying detail is logged, never surfaced.
+// ChatGPT codex endpoint) likewise do not expose the OpenAI /models contract;
+// they use the configured models with source "config". Any fetch failure falls
+// back to the configured models with source "config" and the generic error
+// string; the underlying detail is logged, never surfaced.
 func (a *API) fetchInstanceModels(cfg *config.Config, inst *config.Instance, refresh bool) instanceModels {
 	if tmpl, ok := cfg.Templates[inst.Template]; ok && (tmpl.Style == config.StyleAnthropic || tmpl.OAuth) {
 		return instanceModels{Alias: inst.Alias, Models: inst.EffectiveModels(cfg), Source: modelsSourceConfig, FetchedAt: time.Now()}

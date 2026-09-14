@@ -70,8 +70,9 @@ const DefaultRetentionDays = 7
 const UserAgent = "shimmer-gateway/1.0"
 
 // genericReasoningLevels is the fallback effort vocabulary for models whose
-// template advertises no ModelReasoningOptions. Sentinels ("", "default",
-// "none") are handled separately in Validate.
+// template advertises no ModelReasoningOptions. Empty and "default" are always
+// accepted; "none" is accepted without metadata and otherwise only when the
+// advertised model supports it.
 var genericReasoningLevels = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
 
 var (
@@ -588,15 +589,34 @@ func builtinTemplates() map[string]Template {
 		// and the forward path translates requests to that wire format. The
 		// gateway sends its own identity (never impersonating OpenCode): the
 		// stored credential's bearer token and account id, the per-conversation
-		// session-id header, and the gateway User-Agent. Models are configured
-		// here because the codex endpoint does not expose the OpenAI /models
-		// contract. Leave the list empty rather than shipping a stale model
-		// allowlist; callers select a currently supported codex model explicitly.
+		// session-id header, and the gateway User-Agent. The built-in model list
+		// follows the same configured-model path as the other providers. The
+		// codex endpoint does not expose the OpenAI /models contract, so this list
+		// is used directly by the dashboard and gateway model listing; prefixed
+		// callers may still select any currently supported codex model.
 		"chatgpt": {
 			BaseURL:       ChatGPTCodexBaseURL,
 			Style:         StyleResponses,
 			OAuth:         true,
 			SessionHeader: ChatGPTCodexSessionHeader,
+			Models: []string{
+				"gpt-5.2-codex",
+				"gpt-5.3-codex",
+				"gpt-5.6",
+				"gpt-5.6-luna",
+				"gpt-5.6-sol",
+				"gpt-5.6-terra",
+				"gpt-6-astra",
+			},
+			ModelReasoningOptions: map[string][]string{
+				"gpt-5.2-codex": {"low", "medium", "high", "xhigh"},
+				"gpt-5.3-codex": {"low", "medium", "high", "xhigh"},
+				"gpt-5.6":       {"none", "low", "medium", "high", "xhigh", "max"},
+				"gpt-5.6-luna":  {"none", "low", "medium", "high", "xhigh", "max"},
+				"gpt-5.6-sol":   {"none", "low", "medium", "high", "xhigh", "max"},
+				"gpt-5.6-terra": {"none", "low", "medium", "high", "xhigh", "max"},
+				"gpt-6-astra":   {"low", "medium", "high", "xhigh", "max"},
+			},
 		},
 		"anthropic": {
 			BaseURL:   "https://api.anthropic.com/v1",
@@ -1027,35 +1047,40 @@ func Validate(c *Config) error {
 			if !aliasRe.MatchString(key) {
 				problems = append(problems, fmt.Sprintf("instance %q: model reasoning key %q must match %s", inst.Alias, key, AliasPattern))
 			}
-			// Two-tier reasoning validation: sentinels are always accepted;
-			// anything else must be either an extended generic level or a
-			// value the instance's template advertises for the resolved model.
-			switch value {
-			case "", "default", "none":
-			default:
-				valid := false
-				var advertised []string
-				if t, ok := c.Templates[inst.Template]; ok {
-					model := key
-					if mapped, ok := inst.ModelAliases[key]; ok {
-						model = mapped
-					}
-					if opts, ok := t.ModelReasoningOptions[model]; ok {
-						advertised = opts
-						valid = slices.Contains(opts, value)
-					}
+			// Model-specific metadata wins over the generic vocabulary. The
+			// "none" sentinel is only accepted for an advertised model when
+			// that model explicitly supports it; OpenAI's reasoning models do
+			// not all accept none.
+			var advertised []string
+			advertisedKnown := false
+			if t, ok := c.Templates[inst.Template]; ok {
+				model := key
+				if mapped, ok := inst.ModelAliases[key]; ok {
+					model = mapped
 				}
-				// No advertised options for this model: fall back to the
-				// extended generic effort vocabulary.
-				if !valid && advertised == nil {
+				if opts, ok := t.ModelReasoningOptions[model]; ok {
+					advertised = opts
+					advertisedKnown = true
+				}
+			}
+			valid := false
+			switch value {
+			case "", "default":
+				valid = true
+			case "none":
+				valid = !advertisedKnown || slices.Contains(advertised, value)
+			default:
+				if advertisedKnown {
+					valid = slices.Contains(advertised, value)
+				} else {
 					valid = slices.Contains(genericReasoningLevels, value)
 				}
-				if !valid {
-					if advertised != nil {
-						problems = append(problems, fmt.Sprintf("instance %q: model reasoning for %q has invalid value %q (must be one of: %s)", inst.Alias, key, value, strings.Join(advertised, ", ")))
-					} else {
-						problems = append(problems, fmt.Sprintf("instance %q: model reasoning for %q has invalid value %q (must be one of: default, none, minimal, low, medium, high, xhigh, max, or a value advertised by the model)", inst.Alias, key, value))
-					}
+			}
+			if !valid {
+				if advertisedKnown {
+					problems = append(problems, fmt.Sprintf("instance %q: model reasoning for %q has invalid value %q (must be one of: %s)", inst.Alias, key, value, strings.Join(advertised, ", ")))
+				} else {
+					problems = append(problems, fmt.Sprintf("instance %q: model reasoning for %q has invalid value %q (must be one of: default, none, minimal, low, medium, high, xhigh, max, or a value advertised by the model)", inst.Alias, key, value))
 				}
 			}
 		}

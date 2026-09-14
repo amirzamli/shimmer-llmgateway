@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -363,7 +364,8 @@ func TestBuiltinTemplatesPresent(t *testing.T) {
 	// The ChatGPT Plus template is OAuth-authenticated and pinned to the
 	// verified OpenCode v1.18.30 upstream contract: the codex Responses
 	// endpoint and the session-id conversation header. The codex endpoint has
-	// no stable OpenAI /models contract, so the built-in model list is empty.
+	// no stable OpenAI /models contract, so the built-in list is used directly
+	// instead of live discovery.
 	chatgpt := cfg.Templates["chatgpt"]
 	if !chatgpt.OAuth {
 		t.Error("chatgpt oauth = false, want true")
@@ -380,8 +382,14 @@ func TestBuiltinTemplatesPresent(t *testing.T) {
 	if got := chatgpt.SessionHeader; got != "session-id" {
 		t.Errorf("chatgpt session_header = %q, want session-id", got)
 	}
-	if len(chatgpt.Models) != 0 {
-		t.Errorf("chatgpt models = %v, want no hard-coded allowlist", chatgpt.Models)
+	if !slices.Equal(chatgpt.Models, []string{"gpt-5.2-codex", "gpt-5.3-codex", "gpt-5.6", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-6-astra"}) {
+		t.Errorf("chatgpt models = %v, want the built-in Codex model list", chatgpt.Models)
+	}
+	if got := chatgpt.ModelReasoningOptions["gpt-5.3-codex"]; !slices.Equal(got, []string{"low", "medium", "high", "xhigh"}) {
+		t.Errorf("chatgpt gpt-5.3-codex reasoning options = %v, want [low medium high xhigh]", got)
+	}
+	if got := chatgpt.ModelReasoningOptions["gpt-5.6-sol"]; !slices.Equal(got, []string{"none", "low", "medium", "high", "xhigh", "max"}) {
+		t.Errorf("chatgpt gpt-5.6-sol reasoning options = %v, want [none low medium high xhigh max]", got)
 	}
 	// Ordinary templates are not OAuth: the marker must be opt-in only.
 	if cfg.Templates["openai"].OAuth || cfg.Templates["opencode_go"].OAuth {
@@ -1648,6 +1656,29 @@ model_reasoning = { chat = "extreme" }
 `
 	if _, err := Parse([]byte(extreme)); err == nil {
 		t.Fatal("Parse accepted invalid model reasoning level 'extreme' via fallback")
+	}
+
+	// OpenAI model metadata is also model-specific: gpt-6-astra does not
+	// advertise none, while the GPT-5.6 family does.
+	chatGPTNone := `
+[[instances]]
+alias = "chatgpt"
+template = "chatgpt"
+model_aliases = { astra = "gpt-6-astra" }
+model_reasoning = { astra = "none" }
+`
+	if _, err := Parse([]byte(chatGPTNone)); err == nil {
+		t.Fatal("Parse accepted 'none' for gpt-6-astra, which does not advertise it")
+	}
+	chatGPTDefault := `
+[[instances]]
+alias = "chatgpt"
+template = "chatgpt"
+model_aliases = { sol = "gpt-5.6-sol" }
+model_reasoning = { sol = "none" }
+`
+	if _, err := Parse([]byte(chatGPTDefault)); err != nil {
+		t.Errorf("Parse rejected advertised 'none' for gpt-5.6-sol: %v", err)
 	}
 }
 

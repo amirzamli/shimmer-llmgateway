@@ -108,7 +108,7 @@ func newOAuthAPI(t *testing.T) (*API, *httptest.Server, *config.ConfigManager, *
 	if err != nil {
 		t.Fatalf("secrets.Open: %v", err)
 	}
-	a := New(mgr, cfgPath, st, sec, logging.New(io.Discard), nil)
+	a := New(mgr, cfgPath, st, sec, logging.New(io.Discard), nil, nil)
 	a.SetOAuth(oauth.Config{Issuer: te.srv.URL}, te.srv.Client())
 	gs := httptest.NewServer(a.Handler())
 	t.Cleanup(gs.Close)
