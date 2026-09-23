@@ -50,6 +50,29 @@ func mustParse(t *testing.T, data string) *Config {
 	return cfg
 }
 
+func TestInstanceCaptureOptionRoundTrip(t *testing.T) {
+	cfg := mustParse(t, `
+[providers.openai]
+base_url = "https://api.openai.com/v1"
+models = ["gpt-4o"]
+
+[[instances]]
+alias = "proxy"
+template = "openai"
+capture = false
+`)
+	if cfg.Instances[0].Capture == nil || *cfg.Instances[0].Capture {
+		t.Fatalf("capture = %v, want explicit false", cfg.Instances[0].Capture)
+	}
+	out, err := Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(out), "capture = false") {
+		t.Fatalf("marshaled config lost capture=false:\n%s", out)
+	}
+}
+
 func assertAliases(t *testing.T, cfg *Config, want ...string) {
 	t.Helper()
 	if len(cfg.Instances) != len(want) {
@@ -396,19 +419,20 @@ func TestBuiltinTemplatesPresent(t *testing.T) {
 		t.Error("an API-key template has oauth = true")
 	}
 	// OpenCode Go serves three protocols on one base URL: the template default
-	// is the openai chat style (/chat/completions), and model_styles overrides
-	// the 12 models that speak /responses or /messages upstream.
+	// is the OpenAI-compatible chat style (/chat/completions), model_styles
+	// routes Grok/GPT/Muse to /responses, and MiniMax/Qwen to /messages.
 	if got := cfg.Templates["opencode_go"].Style; got != "" {
 		t.Errorf("opencode_go style = %q, want the empty openai default", got)
 	}
 	ms := cfg.Templates["opencode_go"].ModelStyles
-	if len(ms) != 12 {
-		t.Errorf("opencode_go model_styles = %d entries, want 12", len(ms))
+	if len(ms) != 13 {
+		t.Errorf("opencode_go model_styles = %d entries, want 13", len(ms))
 	}
 	for model, want := range map[string]string{
+		"grok-4.7":                   StyleResponses,
 		"grok-4.6":                   StyleResponses,
+		"gpt-5.6-luna":               StyleResponses,
 		"muse-spark-1.3-contributor": StyleResponses,
-		"muse-spark-1.2-contributor": StyleResponses,
 		"minimax-m3":                 StyleAnthropic,
 		"qwen3.6-plus":               StyleAnthropic,
 	} {
@@ -416,30 +440,33 @@ func TestBuiltinTemplatesPresent(t *testing.T) {
 			t.Errorf("opencode_go model_styles[%q] = %q, want %q", model, got, want)
 		}
 	}
-	// deepseek-v4-flash is not in the map: it resolves to the template's
-	// openai chat default.
-	if _, ok := ms["deepseek-v4-flash"]; ok {
-		t.Errorf("opencode_go model_styles should not list deepseek-v4-flash (chat default), got %q", ms["deepseek-v4-flash"])
+	if got := cfg.Templates["opencode_go"].ModelReasoningOptions["mimo-v2.6-pro"]; got == nil {
+		t.Fatal("opencode_go MiMo metadata must explicitly record no documented effort values")
 	}
-	// The built-in models list carries the full Console Go catalog so every
-	// model is routable out of the box. The catalog is order-sensitive (it is
-	// the authoritative upstream list), so pin the length and spot-check both
-	// ends plus a model that only exists in this refresh.
+	if len(cfg.Templates["opencode_go"].ModelReasoningOptions["mimo-v2.6-pro"]) != 0 {
+		t.Fatal("opencode_go MiMo metadata unexpectedly advertises effort values")
+	}
+	// GLM, Kimi, DeepSeek, MiMo, Hy4, and Hy3 resolve to the template's
+	// chat-completions default.
+	if _, ok := ms["glm-5.3"]; ok {
+		t.Errorf("opencode_go model_styles should not list glm-5.3 (chat default), got %q", ms["glm-5.3"])
+	}
+	// The built-in models list mirrors the current Go endpoint catalog exactly.
 	models := cfg.Templates["opencode_go"].Models
-	if len(models) != 28 {
-		t.Errorf("opencode_go models = %d entries, want 28: %v", len(models), models)
+	wantModels := []string{
+		"grok-4.7", "grok-4.6", "gpt-5.6-luna",
+		"glm-5.3-flash", "glm-5.3", "glm-5.2", "glm-5.1",
+		"kimi-k3", "kimi-k2.7-code", "kimi-k2.6", "longcat-2.0",
+		"deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-v4-flash",
+		"deepseek-v4-flash-vision-exp",
+		"mimo-v2.6-flash", "mimo-v2.6-pro", "mimo-v2.5", "mimo-v2.5-pro",
+		"minimax-m3", "minimax-m2.7", "minimax-m2.5",
+		"muse-spark-1.3-contributor", "muse-spark-1.2-contributor",
+		"qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus",
+		"hy4-preview", "hy3",
 	}
-	present := map[string]bool{}
-	for _, m := range models {
-		present[m] = true
-	}
-	for _, m := range []string{"deepseek-flash", "deepseek-v4-flash-vision-exp", "hy3", "muse-spark-1.2-contributor"} {
-		if !present[m] {
-			t.Errorf("opencode_go models missing %q", m)
-		}
-	}
-	if present["omen-alpha"] {
-		t.Errorf("opencode_go models must not list omen-alpha (not in the current catalog)")
+	if !slices.Equal(models, wantModels) {
+		t.Errorf("opencode_go models = %v, want %v", models, wantModels)
 	}
 	// OpenCode Go also expects coding-agent identity headers on every call;
 	// the built-in template declares the same values the real opencode client
@@ -1636,7 +1663,8 @@ model_reasoning = { big = "medium" }
 	}
 
 	// An alias whose model has no advertised options falls back to the
-	// generic vocabulary: medium passes, extreme still fails.
+	// generic vocabulary when metadata is genuinely unknown: medium passes,
+	// extreme still fails.
 	generic := `
 [[instances]]
 alias = "ds"
@@ -1656,6 +1684,20 @@ model_reasoning = { chat = "extreme" }
 `
 	if _, err := Parse([]byte(extreme)); err == nil {
 		t.Fatal("Parse accepted invalid model reasoning level 'extreme' via fallback")
+	}
+
+	// An explicit empty capability list is not the same as unknown metadata:
+	// MiMo models must reject configured effort values rather than using the
+	// generic fallback.
+	mimoInvalid := `
+[[instances]]
+alias = "go"
+template = "opencode_go"
+model_aliases = { large = "mimo-v2.6-pro" }
+model_reasoning = { large = "max" }
+`
+	if _, err := Parse([]byte(mimoInvalid)); err == nil {
+		t.Fatal("Parse accepted reasoning effort for MiMo without documented effort values")
 	}
 
 	// OpenAI model metadata is also model-specific: gpt-6-astra does not

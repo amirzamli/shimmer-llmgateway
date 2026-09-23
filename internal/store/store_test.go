@@ -197,6 +197,7 @@ func TestOpenCreatesSchemaAndPragmas(t *testing.T) {
 			{"usage_json", "TEXT", false, false},
 			{"request_json", "TEXT", false, false},
 			{"request_filtered_json", "TEXT", false, false},
+			{"upstream_request_json", "TEXT", false, false},
 			{"response_json", "TEXT", false, false},
 			{"response_filtered_json", "TEXT", false, false},
 			{"plugins_applied", "TEXT", false, false},
@@ -309,6 +310,7 @@ func TestCaptureRoundTrip(t *testing.T) {
 	rec.SessionID = "sess-1"
 	rec.Usage = json.RawMessage(`{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}`)
 	rec.RequestFilteredJSON = json.RawMessage(`{"model":"gpt-4o","messages":[{"role":"user","content":"REDACTED"}]}`)
+	rec.UpstreamRequestJSON = json.RawMessage(`{"model":"gpt-4o","messages":[{"role":"user","content":"REDACTED"}]}`)
 	rec.ResponseFilteredJSON = json.RawMessage(`{"choices":[{"message":{"role":"assistant","content":"bye"}}]}`)
 	rec.PluginsApplied = []string{"redact"}
 	mustCapture(t, st, rec)
@@ -335,6 +337,7 @@ func TestCaptureRoundTrip(t *testing.T) {
 	}
 	if string(r.RequestJSON) != string(rec.RequestJSON) ||
 		string(r.RequestFilteredJSON) != string(rec.RequestFilteredJSON) ||
+		string(r.UpstreamRequestJSON) != string(rec.UpstreamRequestJSON) ||
 		string(r.ResponseJSON) != string(rec.ResponseJSON) ||
 		string(r.ResponseFilteredJSON) != string(rec.ResponseFilteredJSON) {
 		t.Errorf("payload round-trip mismatch")

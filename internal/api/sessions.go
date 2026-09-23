@@ -60,6 +60,7 @@ type requestView struct {
 	Usage                json.RawMessage  `json:"usage"`
 	RequestJSON          json.RawMessage  `json:"request_json"`
 	RequestFilteredJSON  json.RawMessage  `json:"request_filtered_json"`
+	UpstreamRequestJSON  json.RawMessage  `json:"upstream_request_json"`
 	ResponseJSON         json.RawMessage  `json:"response_json"`
 	ResponseFilteredJSON json.RawMessage  `json:"response_filtered_json"`
 	PluginsApplied       []string         `json:"plugins_applied"`
@@ -84,6 +85,7 @@ func requestViewOf(r *store.Request) requestView {
 		Usage:                r.Usage,
 		RequestJSON:          r.RequestJSON,
 		RequestFilteredJSON:  r.RequestFilteredJSON,
+		UpstreamRequestJSON:  r.UpstreamRequestJSON,
 		ResponseJSON:         r.ResponseJSON,
 		ResponseFilteredJSON: r.ResponseFilteredJSON,
 		PluginsApplied:       r.PluginsApplied,

@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -88,7 +89,10 @@ type Server struct {
 	// pricing holds the per-model token rates loaded from disk at startup
 	// (pricing.DefaultPath) used to estimate the cost of captured traffic
 	// (nil when the table failed to load, which disables cost estimation).
-	pricing *pricing.Table
+	pricing       *pricing.Table
+	pricingMu     sync.RWMutex
+	pricingCancel context.CancelFunc
+	pricingDone   chan struct{}
 	// listenAddrs are the addresses the gateway is being served on; they
 	// seed the admin-surface Host allowlist (see guard).
 	listenAddrs []string
@@ -129,7 +133,7 @@ func New(cfg *config.ConfigManager, st *store.Store, logger *logging.Logger, con
 	apiHandler := api.New(cfg, configPath, st, sec, logger, client, oauthResolver)
 	apiHandler.SetOAuthLifecycle(life)
 	apiHandler.SetOAuthListenAddrs(listenAddrs)
-	return &Server{
+	s := &Server{
 		cfg:     cfg,
 		store:   st,
 		logger:  logger,
@@ -145,8 +149,10 @@ func New(cfg *config.ConfigManager, st *store.Store, logger *logging.Logger, con
 		api:            apiHandler,
 		emitterFactory: newStreamEmitter,
 		pricing:        pt,
-		listenAddrs:    listenAddrs,
-	}, nil
+		listenAddrs:    listenAddrs, pricingDone: make(chan struct{}),
+	}
+	s.startPricingRefresh()
+	return s, nil
 }
 
 // Close releases the gateway's file handles: the §8 append log (the secrets
@@ -154,7 +160,58 @@ func New(cfg *config.ConfigManager, st *store.Store, logger *logging.Logger, con
 // shutdown after the HTTP servers have drained; the store is closed separately
 // so its close-time WAL checkpoint runs last.
 func (s *Server) Close() error {
+	if s.pricingCancel != nil {
+		s.pricingCancel()
+		<-s.pricingDone
+	}
 	return s.append.Close()
+}
+
+func (s *Server) startPricingRefresh() {
+	ctx, cancel := context.WithCancel(context.Background())
+	s.pricingCancel = cancel
+	go func() {
+		defer close(s.pricingDone)
+		missing := s.pricing == nil
+		for {
+			h := s.cfg.Get().Settings.PricingRefreshHours
+			if h <= 0 {
+				return
+			}
+			refresh := func() {
+				ft, err := pricing.FetchAndBuild(pricing.SourceURL, 30*time.Second)
+				if err != nil {
+					s.logger.Warn("pricing_refresh_failed", map[string]any{"error": err.Error()})
+					return
+				}
+				if err = pricing.WriteSnapshot(pricing.DefaultPath, ft); err != nil {
+					s.logger.Warn("pricing_snapshot_write_failed", map[string]any{"error": err.Error()})
+					return
+				}
+				pt, err := pricing.Load(pricing.DefaultPath)
+				if err != nil {
+					return
+				}
+				s.pricingMu.Lock()
+				s.pricing = pt
+				s.pricingMu.Unlock()
+				BackfillCostsWithTable(ctx, s.store, s.logger, pt)
+			}
+			if missing {
+				refresh()
+				missing = false
+				continue
+			}
+			t := time.NewTimer(time.Duration(h) * time.Hour)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return
+			case <-t.C:
+				refresh()
+			}
+		}
+	}()
 }
 
 // Handler returns the HTTP router. Any /v1/* path other than the capture
@@ -252,7 +309,8 @@ func (s *Server) accessLog(next http.Handler) http.Handler {
 
 // sessionIDFromRequest resolves the §4.3 client-side session id from headers:
 // an explicit X-Session-Id always wins; opencode-style clients that send
-// their native x-opencode-session header are honored next. (Header lookup is
+// their native x-opencode-session header are honored next, followed by the
+// session-id spelling used by the ChatGPT Codex upstream. (Header lookup is
 // case-insensitive, so the x-session-id session-affinity compat spelling is
 // matched by the first branch.) An empty result means the caller falls back
 // to its own (fresh-UUID) default. Values are NOT normalized here —
@@ -263,6 +321,9 @@ func sessionIDFromRequest(r *http.Request) string {
 		return sid
 	}
 	if sid := r.Header.Get("x-opencode-session"); sid != "" {
+		return sid
+	}
+	if sid := r.Header.Get("session-id"); sid != "" {
 		return sid
 	}
 	return ""
@@ -384,6 +445,10 @@ type route struct {
 	alias     string
 	provider  string
 	reasoning string
+	// reasoningKnown distinguishes an explicit empty capability list from
+	// missing metadata. When true, the configured effort is only forwarded if
+	// it is documented for the resolved model.
+	reasoningKnown bool
 }
 
 // clientSurface is the per-request seam between the shared completion
@@ -442,12 +507,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	tmpl := cfg.Templates[inst.Template]
 	rt := &route{
-		inst:      inst,
-		template:  tmpl,
-		model:     model,
-		alias:     inst.Alias,
-		provider:  tmpl.Name,
-		reasoning: reasoning,
+		inst:           inst,
+		template:       tmpl,
+		model:          model,
+		alias:          inst.Alias,
+		provider:       tmpl.Name,
+		reasoning:      reasoning,
+		reasoningKnown: reasoningCapabilityKnown(tmpl, model),
 	}
 
 	// §4.3 session correlation: echo the effective session id on every
@@ -553,12 +619,13 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 	tmpl := cfg.Templates[inst.Template]
 	rt := &route{
-		inst:      inst,
-		template:  tmpl,
-		model:     model,
-		alias:     inst.Alias,
-		provider:  tmpl.Name,
-		reasoning: inst.EffectiveReasoning(aliasKey),
+		inst:           inst,
+		template:       tmpl,
+		model:          model,
+		alias:          inst.Alias,
+		provider:       tmpl.Name,
+		reasoning:      inst.EffectiveReasoning(aliasKey),
+		reasoningKnown: reasoningCapabilityKnown(tmpl, model),
 	}
 
 	// §4.3 session correlation, identical to the chat surface, with one
@@ -664,6 +731,14 @@ func effectiveStyle(tmpl *config.Template, model string) string {
 	return tmpl.Style
 }
 
+// reasoningCapabilityKnown reports whether the template has explicit metadata
+// for the resolved model. An explicit empty list means no effort value is
+// documented and is intentionally different from missing metadata.
+func reasoningCapabilityKnown(tmpl *config.Template, model string) bool {
+	_, ok := tmpl.ReasoningOptions(model)
+	return ok
+}
+
 // buildUpstream builds the provider request: Authorization injected from the
 // resolved instance's api_key_env (never from the client — keys are not
 // stored or logged), body forwarded verbatim except the model field rewritten
@@ -690,8 +765,23 @@ func effectiveStyle(tmpl *config.Template, model string) string {
 func (s *Server) buildUpstream(ctx context.Context, cfg *config.Config, rt *route, body []byte, sessionID string, inbound *http.Request) (*http.Request, []byte, error) {
 	upstreamBody := body
 	sent, ok := modelField(body)
-	if !ok || sent != rt.model || rt.reasoning != "" {
-		rewritten, err := rewriteModelAndReasoning(body, rt.model, rt.reasoning)
+	// Only inject configured reasoning when the resolved model explicitly
+	// advertises that effort value. Unknown model metadata is transparent
+	// pass-through; an explicit empty option list prevents unsupported values
+	// from leaking to providers such as MiMo. For a model with known
+	// capabilities, remove a client-supplied effort that is not documented as
+	// well; otherwise an OpenCode client can bypass the profile with xhigh.
+	reasoning := rt.reasoning
+	stripReasoning := false
+	if rt.reasoningKnown {
+		options, _ := rt.template.ReasoningOptions(rt.model)
+		stripReasoning = true
+		if reasoning == "" || !slices.Contains(options, reasoning) {
+			reasoning = ""
+		}
+	}
+	if !ok || sent != rt.model || reasoning != "" || stripReasoning {
+		rewritten, err := rewriteModelAndReasoningPolicy(body, rt.model, reasoning, stripReasoning)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -932,7 +1022,7 @@ func (s *Server) handleNonStream(w http.ResponseWriter, r *http.Request, cfg *co
 	}
 	rsp, err := s.client.Do(req)
 	if err != nil {
-		s.capture(upstreamErrorRecord(rt, sf.requestJSON, requestFilteredBody(chain, sentBody), sessionID, requestID, start, err, chain.Applied()))
+		s.captureFor(rt, upstreamErrorRecord(rt, sf.requestJSON, requestFilteredBody(chain, sentBody), sentBody, sessionID, requestID, start, err, chain.Applied()))
 		s.writeError(w, http.StatusBadGateway, "UPSTREAM_ERROR", "upstream request failed: "+err.Error())
 		return
 	}
@@ -943,7 +1033,7 @@ func (s *Server) handleNonStream(w http.ResponseWriter, r *http.Request, cfg *co
 	respBody, readErr := io.ReadAll(rsp.Body)
 	rsp.Body.Close()
 	if readErr != nil {
-		s.capture(upstreamErrorRecord(rt, sf.requestJSON, requestFilteredBody(chain, sentBody), sessionID, requestID, start, readErr, chain.Applied()))
+		s.captureFor(rt, upstreamErrorRecord(rt, sf.requestJSON, requestFilteredBody(chain, sentBody), sentBody, sessionID, requestID, start, readErr, chain.Applied()))
 		s.writeError(w, http.StatusBadGateway, "UPSTREAM_ERROR", "upstream read failed: "+readErr.Error())
 		return
 	}
@@ -952,18 +1042,19 @@ func (s *Server) handleNonStream(w http.ResponseWriter, r *http.Request, cfg *co
 	respBody = translateUpstreamBody(effectiveStyle(rt.template, rt.model), rsp.StatusCode, respBody)
 
 	rec := &store.CaptureRecord{
-		ID:              requestID,
-		SessionID:       sessionID,
-		CreatedAt:       start,
-		Alias:           rt.alias,
-		Provider:        rt.provider,
-		ProviderBaseURL: rt.template.BaseURL,
-		Model:           rt.model,
-		Endpoint:        sf.endpoint,
-		DurationMS:      durationMS(start),
-		StatusCode:      rsp.StatusCode,
-		RequestJSON:     sf.requestJSON,
-		PluginsApplied:  chain.Applied(),
+		ID:                  requestID,
+		SessionID:           sessionID,
+		CreatedAt:           start,
+		Alias:               rt.alias,
+		Provider:            rt.provider,
+		ProviderBaseURL:     rt.template.BaseURL,
+		Model:               rt.model,
+		Endpoint:            sf.endpoint,
+		DurationMS:          durationMS(start),
+		StatusCode:          rsp.StatusCode,
+		RequestJSON:         sf.requestJSON,
+		UpstreamRequestJSON: sentBody,
+		PluginsApplied:      chain.Applied(),
 	}
 	rec.RequestFilteredJSON = requestFilteredBody(chain, sentBody)
 
@@ -990,7 +1081,7 @@ func (s *Server) handleNonStream(w http.ResponseWriter, r *http.Request, cfg *co
 		clientBody = sf.shapeClient(clientBody)
 	}
 	s.passthrough(w, rsp, clientBody)
-	s.capture(rec)
+	s.captureFor(rt, rec)
 }
 
 // handleCodexNonStreamResponse buffers the streaming-only ChatGPT Codex
@@ -1001,58 +1092,60 @@ func (s *Server) handleCodexNonStreamResponse(w http.ResponseWriter, r *http.Req
 	if rsp.StatusCode >= 400 {
 		respBody, err := io.ReadAll(rsp.Body)
 		if err != nil {
-			rec := upstreamErrorRecord(rt, sf.requestJSON, requestFilteredBody(chain, sentBody), sessionID, requestID, start, err, chain.Applied())
+			rec := upstreamErrorRecord(rt, sf.requestJSON, requestFilteredBody(chain, sentBody), sentBody, sessionID, requestID, start, err, chain.Applied())
 			rec.Endpoint = sf.endpoint
-			s.capture(rec)
+			s.captureFor(rt, rec)
 			s.writeError(w, http.StatusBadGateway, "UPSTREAM_ERROR", "upstream read failed: "+err.Error())
 			return
 		}
 		rec := &store.CaptureRecord{
-			ID:              requestID,
-			SessionID:       sessionID,
-			CreatedAt:       start,
-			Alias:           rt.alias,
-			Provider:        rt.provider,
-			ProviderBaseURL: rt.template.BaseURL,
-			Model:           rt.model,
-			Endpoint:        sf.endpoint,
-			DurationMS:      durationMS(start),
-			StatusCode:      rsp.StatusCode,
-			RequestJSON:     sf.requestJSON,
-			PluginsApplied:  chain.Applied(),
-			Error:           providerError(rsp.StatusCode, respBody),
+			ID:                  requestID,
+			SessionID:           sessionID,
+			CreatedAt:           start,
+			Alias:               rt.alias,
+			Provider:            rt.provider,
+			ProviderBaseURL:     rt.template.BaseURL,
+			Model:               rt.model,
+			Endpoint:            sf.endpoint,
+			DurationMS:          durationMS(start),
+			StatusCode:          rsp.StatusCode,
+			RequestJSON:         sf.requestJSON,
+			UpstreamRequestJSON: sentBody,
+			PluginsApplied:      chain.Applied(),
+			Error:               providerError(rsp.StatusCode, respBody),
 		}
 		rec.RequestFilteredJSON = requestFilteredBody(chain, sentBody)
 		s.passthrough(w, rsp, respBody)
-		s.capture(rec)
+		s.captureFor(rt, rec)
 		return
 	}
 
 	asm := newAssembler()
 	out := readResponsesStream(r.Context(), rsp, asm, func([]byte) error { return nil })
 	rec := &store.CaptureRecord{
-		ID:              requestID,
-		SessionID:       sessionID,
-		CreatedAt:       start,
-		Alias:           rt.alias,
-		Provider:        rt.provider,
-		ProviderBaseURL: rt.template.BaseURL,
-		Model:           rt.model,
-		Endpoint:        sf.endpoint,
-		DurationMS:      durationMS(start),
-		StatusCode:      rsp.StatusCode,
-		FinishReason:    out.finish,
-		Usage:           out.usage,
-		RequestJSON:     sf.requestJSON,
-		ResponseJSON:    out.reassembled,
-		Truncated:       out.truncated,
-		PluginsApplied:  chain.Applied(),
-		Error:           out.streamErr,
-		ChunkCount:      out.chunks,
+		ID:                  requestID,
+		SessionID:           sessionID,
+		CreatedAt:           start,
+		Alias:               rt.alias,
+		Provider:            rt.provider,
+		ProviderBaseURL:     rt.template.BaseURL,
+		Model:               rt.model,
+		Endpoint:            sf.endpoint,
+		DurationMS:          durationMS(start),
+		StatusCode:          rsp.StatusCode,
+		FinishReason:        out.finish,
+		Usage:               out.usage,
+		RequestJSON:         sf.requestJSON,
+		UpstreamRequestJSON: sentBody,
+		ResponseJSON:        out.reassembled,
+		Truncated:           out.truncated,
+		PluginsApplied:      chain.Applied(),
+		Error:               out.streamErr,
+		ChunkCount:          out.chunks,
 	}
 	rec.RequestFilteredJSON = requestFilteredBody(chain, sentBody)
 	if out.truncated || out.streamErr != nil {
-		s.capture(rec)
+		s.captureFor(rt, rec)
 		message := "upstream stream ended before completion"
 		if out.streamErr != nil {
 			message = out.streamErr.Message
@@ -1077,7 +1170,7 @@ func (s *Server) handleCodexNonStreamResponse(w http.ResponseWriter, r *http.Req
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(rsp.StatusCode)
 	_, _ = w.Write(clientBody)
-	s.capture(rec)
+	s.captureFor(rt, rec)
 }
 
 // requestFilteredBody returns the body forwarded to the provider when request
@@ -1120,7 +1213,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *confi
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
-		s.capture(upstreamErrorRecord(rt, body, requestFilteredBody(chain, sentBody), sessionID, requestID, start, err, chain.Applied()))
+		s.captureFor(rt, upstreamErrorRecord(rt, body, requestFilteredBody(chain, sentBody), sentBody, sessionID, requestID, start, err, chain.Applied()))
 		s.writeError(w, http.StatusBadGateway, "UPSTREAM_ERROR", "upstream request failed: "+err.Error())
 		return
 	}
@@ -1133,23 +1226,24 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *confi
 		}
 		respBody = translateUpstreamBody(effectiveStyle(rt.template, rt.model), resp.StatusCode, respBody)
 		rec := &store.CaptureRecord{
-			ID:              requestID,
-			SessionID:       sessionID,
-			CreatedAt:       start,
-			Alias:           rt.alias,
-			Provider:        rt.provider,
-			ProviderBaseURL: rt.template.BaseURL,
-			Model:           rt.model,
-			Endpoint:        sf.endpoint,
-			DurationMS:      durationMS(start),
-			StatusCode:      resp.StatusCode,
-			RequestJSON:     sf.requestJSON,
-			PluginsApplied:  chain.Applied(),
-			Error:           providerError(resp.StatusCode, respBody),
+			ID:                  requestID,
+			SessionID:           sessionID,
+			CreatedAt:           start,
+			Alias:               rt.alias,
+			Provider:            rt.provider,
+			ProviderBaseURL:     rt.template.BaseURL,
+			Model:               rt.model,
+			Endpoint:            sf.endpoint,
+			DurationMS:          durationMS(start),
+			StatusCode:          resp.StatusCode,
+			RequestJSON:         sf.requestJSON,
+			UpstreamRequestJSON: sentBody,
+			PluginsApplied:      chain.Applied(),
+			Error:               providerError(resp.StatusCode, respBody),
 		}
 		rec.RequestFilteredJSON = requestFilteredBody(chain, sentBody)
 		s.passthrough(w, resp, respBody)
-		s.capture(rec)
+		s.captureFor(rt, rec)
 		return
 	}
 
@@ -1204,24 +1298,25 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *confi
 	}
 
 	rec := &store.CaptureRecord{
-		ID:              requestID,
-		SessionID:       sessionID,
-		CreatedAt:       start,
-		Alias:           rt.alias,
-		Provider:        rt.provider,
-		ProviderBaseURL: rt.template.BaseURL,
-		Model:           rt.model,
-		Endpoint:        sf.endpoint,
-		DurationMS:      durationMS(start),
-		StatusCode:      resp.StatusCode,
-		FinishReason:    out.finish,
-		Usage:           out.usage,
-		RequestJSON:     sf.requestJSON,
-		ResponseJSON:    out.reassembled,
-		Truncated:       out.truncated,
-		PluginsApplied:  chain.Applied(),
-		Error:           out.streamErr,
-		ChunkCount:      out.chunks,
+		ID:                  requestID,
+		SessionID:           sessionID,
+		CreatedAt:           start,
+		Alias:               rt.alias,
+		Provider:            rt.provider,
+		ProviderBaseURL:     rt.template.BaseURL,
+		Model:               rt.model,
+		Endpoint:            sf.endpoint,
+		DurationMS:          durationMS(start),
+		StatusCode:          resp.StatusCode,
+		FinishReason:        out.finish,
+		Usage:               out.usage,
+		RequestJSON:         sf.requestJSON,
+		UpstreamRequestJSON: sentBody,
+		ResponseJSON:        out.reassembled,
+		Truncated:           out.truncated,
+		PluginsApplied:      chain.Applied(),
+		Error:               out.streamErr,
+		ChunkCount:          out.chunks,
 	}
 	rec.RequestFilteredJSON = requestFilteredBody(chain, sentBody)
 	if chain.HasResponse() {
@@ -1239,6 +1334,16 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *confi
 				rec.ResponseFilteredJSON = respDomain.Body
 			}
 		}
+	}
+	s.captureFor(rt, rec)
+}
+
+// captureFor allows a deliberately configured proxy hop to forward traffic
+// without creating a second stored request. The default is to capture; only
+// an explicit `capture = false` on the routed instance disables this hop.
+func (s *Server) captureFor(rt *route, rec *store.CaptureRecord) {
+	if rt != nil && rt.inst != nil && rt.inst.Capture != nil && !*rt.inst.Capture {
+		return
 	}
 	s.capture(rec)
 }
@@ -1355,21 +1460,22 @@ func providerError(status int, body []byte) *store.ErrorInfo {
 // provider response received); the data is necessarily incomplete. filteredBody
 // is the post-request-plugin body when request plugins ran, else nil. requestID
 // is the request's pre-generated id, shared with any retry log lines.
-func upstreamErrorRecord(rt *route, body, filteredBody []byte, sessionID, requestID string, start time.Time, cause error, applied []string) *store.CaptureRecord {
+func upstreamErrorRecord(rt *route, body, filteredBody, upstreamBody []byte, sessionID, requestID string, start time.Time, cause error, applied []string) *store.CaptureRecord {
 	rec := &store.CaptureRecord{
-		ID:              requestID,
-		SessionID:       sessionID,
-		CreatedAt:       start,
-		Alias:           rt.alias,
-		Provider:        rt.provider,
-		ProviderBaseURL: rt.template.BaseURL,
-		Model:           rt.model,
-		Endpoint:        endpoint,
-		DurationMS:      durationMS(start),
-		StatusCode:      502,
-		RequestJSON:     body,
-		Truncated:       true,
-		Error:           &store.ErrorInfo{Code: "UPSTREAM_ERROR", Message: "upstream error: " + cause.Error()},
+		ID:                  requestID,
+		SessionID:           sessionID,
+		CreatedAt:           start,
+		Alias:               rt.alias,
+		Provider:            rt.provider,
+		ProviderBaseURL:     rt.template.BaseURL,
+		Model:               rt.model,
+		Endpoint:            endpoint,
+		DurationMS:          durationMS(start),
+		StatusCode:          502,
+		RequestJSON:         body,
+		UpstreamRequestJSON: upstreamBody,
+		Truncated:           true,
+		Error:               &store.ErrorInfo{Code: "UPSTREAM_ERROR", Message: "upstream error: " + cause.Error()},
 	}
 	if len(filteredBody) > 0 {
 		rec.RequestFilteredJSON = filteredBody
@@ -1416,6 +1522,15 @@ func rewriteModel(body []byte, model string) ([]byte, error) {
 // rewriteModelAndReasoning re-serializes the body with the model field set to model
 // and optionally reasoning_effort set to reasoning (when non-empty).
 func rewriteModelAndReasoning(body []byte, model string, reasoning string) ([]byte, error) {
+	return rewriteModelAndReasoningPolicy(body, model, reasoning, false)
+}
+
+// rewriteModelAndReasoningPolicy is the capability-aware form of the model
+// rewrite. stripReasoning removes a client-supplied reasoning_effort before an
+// explicit model profile is forwarded; this is how a known model with no
+// documented effort values remains compatible with clients that always send a
+// generic effort variant.
+func rewriteModelAndReasoningPolicy(body []byte, model string, reasoning string, stripReasoning bool) ([]byte, error) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(body, &m); err != nil {
 		return nil, err
@@ -1425,6 +1540,9 @@ func rewriteModelAndReasoning(body []byte, model string, reasoning string) ([]by
 		return nil, err
 	}
 	m["model"] = b
+	if stripReasoning {
+		delete(m, "reasoning_effort")
+	}
 	if reasoning != "" {
 		rb, err := json.Marshal(reasoning)
 		if err != nil {

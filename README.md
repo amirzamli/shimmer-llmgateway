@@ -91,6 +91,13 @@ Configure providers and instances in `gateway.toml` or from the dashboard.
 [`gateway.toml.example`](gateway.toml.example) contains a minimal configuration
 you can use as a starting point.
 
+### OpenCode Harness
+
+The OpenCode harness does not automatically detect models exposed by the gateway. When
+using Shimmer with OpenCode, the
+[opencode-models-discovery](https://github.com/yuhp/opencode-models-discovery)
+plugin is recommended for discovering available models.
+
 ## LLM API providers
 
 Built-in templates are available for `openai`, `anthropic`, `ollama`, `groq`,

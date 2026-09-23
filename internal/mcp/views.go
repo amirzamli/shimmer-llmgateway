@@ -54,6 +54,7 @@ type requestDetailView struct {
 	Usage            json.RawMessage  `json:"usage"`
 	Request          json.RawMessage  `json:"request"`
 	RequestFiltered  json.RawMessage  `json:"request_filtered"`
+	UpstreamRequest  json.RawMessage  `json:"upstream_request"`
 	Response         json.RawMessage  `json:"response"`
 	ResponseFiltered json.RawMessage  `json:"response_filtered"`
 	PluginsApplied   []string         `json:"plugins_applied"`
@@ -78,6 +79,7 @@ func requestDetailViewOf(r *store.Request) requestDetailView {
 		Usage:            embedRaw(r.Usage),
 		Request:          embedRaw(r.RequestJSON),
 		RequestFiltered:  embedRaw(r.RequestFilteredJSON),
+		UpstreamRequest:  embedRaw(r.UpstreamRequestJSON),
 		Response:         embedRaw(r.ResponseJSON),
 		ResponseFiltered: embedRaw(r.ResponseFilteredJSON),
 		PluginsApplied:   r.PluginsApplied,

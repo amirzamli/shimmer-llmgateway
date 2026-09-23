@@ -93,6 +93,9 @@ func requestLines(req *Request) []map[string]any {
 	if len(req.RequestFilteredJSON) > 0 {
 		line["request_filtered"] = embedBytes(req.RequestFilteredJSON)
 	}
+	if len(req.UpstreamRequestJSON) > 0 {
+		line["upstream_request"] = embedBytes(req.UpstreamRequestJSON)
+	}
 	if len(req.ResponseJSON) > 0 {
 		line["response"] = embedBytes(req.ResponseJSON)
 	}

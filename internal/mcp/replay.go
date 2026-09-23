@@ -58,6 +58,7 @@ type requestTurnView struct {
 	CreatedAt  string          `json:"created_at"`
 	StatusCode int             `json:"status_code"`
 	Request    json.RawMessage `json:"request,omitempty"`
+	Upstream   json.RawMessage `json:"upstream_request,omitempty"`
 	Response   json.RawMessage `json:"response,omitempty"`
 }
 
@@ -82,13 +83,22 @@ func buildConversation(sess *store.Session, includeFull bool) (*conversationView
 	var prev []openAIMessage
 	for _, req := range sess.Requests {
 		if msgs, ok := parseOpenAIMessages(req.RequestJSON); ok {
-			for _, m := range newMessagesTail(prev, msgs) {
+			fresh := newMessagesTail(prev, msgs)
+			for _, m := range fresh {
 				conv.Messages = append(conv.Messages, messageFromOpenAI(m))
 			}
-			prev = msgs
+			// Keep the logical replay, including prior assistant responses, as
+			// the next alignment baseline. Clients normally resend the whole
+			// history, but a changed system prompt or a retry can make the
+			// request no longer share a byte-for-byte prefix with the prior
+			// request.
+			prev = append(prev, fresh...)
 		}
 		if asst := assistantReplayMessage(req, rowsByReq[req.ID]); asst != nil {
 			conv.Messages = append(conv.Messages, *asst)
+			if m, ok := assistantOpenAIMessage(req.ResponseJSON); ok {
+				prev = append(prev, m)
+			}
 		}
 
 		turn := requestTurnView{
@@ -101,6 +111,7 @@ func buildConversation(sess *store.Session, includeFull bool) (*conversationView
 		}
 		if includeFull {
 			turn.Request = embedRaw(req.RequestJSON)
+			turn.Upstream = embedRaw(req.UpstreamRequestJSON)
 			turn.Response = embedRaw(req.ResponseJSON)
 		}
 		conv.Requests = append(conv.Requests, turn)
@@ -110,9 +121,12 @@ func buildConversation(sess *store.Session, includeFull bool) (*conversationView
 
 // openAIMessage is a message object inside a chat completions request body.
 type openAIMessage struct {
-	Role       string          `json:"role"`
-	Content    json.RawMessage `json:"content"`
-	ToolCallID string          `json:"tool_call_id"`
+	Role         string          `json:"role"`
+	Content      json.RawMessage `json:"content"`
+	ToolCallID   string          `json:"tool_call_id"`
+	Name         string          `json:"name"`
+	ToolCalls    json.RawMessage `json:"tool_calls"`
+	FunctionCall json.RawMessage `json:"function_call"`
 }
 
 // parseOpenAIMessages extracts the messages array from a request body.
@@ -129,27 +143,81 @@ func parseOpenAIMessages(body []byte) ([]openAIMessage, bool) {
 	return req.Messages, true
 }
 
-// newMessagesTail returns the tail of cur after the longest common prefix with
-// prev. OpenAI clients re-send the full history on every request, so the tail
-// is the content actually added in this turn (including role:"tool" results).
+// newMessagesTail returns the messages in cur that are not part of the
+// longest common subsequence with prev. OpenAI clients re-send the full
+// history on every request, so this is the content actually added in the
+// current turn (including role:"tool" results). LCS is intentional here:
+// changing a system/developer prompt at index zero must not make every later
+// message look new, and a prior response already shown in the replay must not
+// be shown again when the client echoes it in the next request.
 func newMessagesTail(prev, cur []openAIMessage) []openAIMessage {
 	if len(prev) == 0 {
 		return cur
 	}
-	n := 0
-	for n < len(prev) && n < len(cur) && sameOpenAIMessage(prev[n], cur[n]) {
-		n++
+
+	// dp[i][j] is the LCS length for prev[i:] and cur[j:]. Message counts are
+	// normally small even when individual system messages are large, so the
+	// straightforward O(n*m) table keeps the alignment deterministic and easy
+	// to audit.
+	dp := make([][]int, len(prev)+1)
+	for i := range dp {
+		dp[i] = make([]int, len(cur)+1)
 	}
-	if n >= len(cur) {
-		return nil
+	for i := len(prev) - 1; i >= 0; i-- {
+		for j := len(cur) - 1; j >= 0; j-- {
+			if sameOpenAIMessage(prev[i], cur[j]) {
+				dp[i][j] = dp[i+1][j+1] + 1
+			} else if dp[i+1][j] >= dp[i][j+1] {
+				dp[i][j] = dp[i+1][j]
+			} else {
+				dp[i][j] = dp[i][j+1]
+			}
+		}
 	}
-	return cur[n:]
+
+	var fresh []openAIMessage
+	i, j := 0, 0
+	for i < len(prev) && j < len(cur) {
+		if sameOpenAIMessage(prev[i], cur[j]) {
+			i++
+			j++
+			continue
+		}
+		if dp[i+1][j] >= dp[i][j+1] {
+			i++
+		} else {
+			fresh = append(fresh, cur[j])
+			j++
+		}
+	}
+	fresh = append(fresh, cur[j:]...)
+	return fresh
 }
 
-// sameOpenAIMessage compares two message objects by canonical JSON.
+// sameOpenAIMessage compares the fields that can change a model's view of a
+// chat message. Comparing tool calls as well as content matters when the
+// assistant response is echoed in the following request.
 func sameOpenAIMessage(a, b openAIMessage) bool {
-	return a.Role == b.Role && a.ToolCallID == b.ToolCallID &&
-		bytes.Equal(compactRaw(a.Content), compactRaw(b.Content))
+	return a.Role == b.Role && a.ToolCallID == b.ToolCallID && a.Name == b.Name &&
+		bytes.Equal(compactRaw(a.Content), compactRaw(b.Content)) &&
+		bytes.Equal(compactRaw(a.ToolCalls), compactRaw(b.ToolCalls)) &&
+		bytes.Equal(compactRaw(a.FunctionCall), compactRaw(b.FunctionCall))
+}
+
+// assistantOpenAIMessage extracts the provider response in the same shape as
+// the assistant message clients normally echo into their next request. It is
+// used only as an alignment baseline; assistantReplayMessage remains the
+// richer public representation with tool-call verdicts.
+func assistantOpenAIMessage(body []byte) (openAIMessage, bool) {
+	var resp struct {
+		Choices []struct {
+			Message openAIMessage `json:"message"`
+		} `json:"choices"`
+	}
+	if len(body) == 0 || json.Unmarshal(body, &resp) != nil || len(resp.Choices) == 0 {
+		return openAIMessage{}, false
+	}
+	return resp.Choices[0].Message, true
 }
 
 // compactRaw normalizes raw JSON for comparison (falls back to the raw bytes).

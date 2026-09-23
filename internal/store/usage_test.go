@@ -364,7 +364,7 @@ func TestMigrateAddsCostColumns(t *testing.T) {
 	}
 	rows.Close()
 	for _, want := range []string{"prompt_tokens", "completion_tokens", "cached_tokens",
-		"cost_input", "cost_output", "cost_cache_read", "cost_cache_write", "cost_total", "cost_priced"} {
+		"cost_input", "cost_output", "cost_cache_read", "cost_cache_write", "cost_total", "cost_priced", "upstream_request_json"} {
 		if !cols[want] {
 			t.Errorf("column %q missing after migration", want)
 		}

@@ -48,12 +48,15 @@ func usageTokens(usage json.RawMessage) (prompt, completion, cached int64) {
 // flag to report how much of a total is estimated, and the startup backfill
 // prices such rows once the table learns them.
 func (s *Server) estimateCost(rec *store.CaptureRecord) {
-	if s.pricing == nil || len(rec.Usage) == 0 {
+	s.pricingMu.RLock()
+	pt := s.pricing
+	s.pricingMu.RUnlock()
+	if pt == nil || len(rec.Usage) == 0 {
 		return
 	}
 	prompt, completion, cached := usageTokens(rec.Usage)
 	rec.PromptTokens, rec.CompletionTokens, rec.CachedTokens = prompt, completion, cached
-	p, ok := s.pricing.Lookup(rec.Model, rec.Provider, rec.ProviderBaseURL)
+	p, ok := pt.Lookup(rec.Model, rec.Provider, rec.ProviderBaseURL)
 	if !ok || p.Local {
 		return
 	}
@@ -64,7 +67,7 @@ func (s *Server) estimateCost(rec *store.CaptureRecord) {
 	rec.CostCacheWrite = split.CacheWrite
 	rec.CostTotal = split.Total()
 	rec.CostPriced = true
-	rec.CostSchema = s.pricing.Schema()
+	rec.CostSchema = pt.Schema()
 }
 
 // BackfillCosts prices requests captured while their model was unpriced (rows
@@ -102,6 +105,30 @@ func BackfillCosts(ctx context.Context, st *store.Store, logger *logging.Logger)
 		return
 	}
 	if n > 0 {
+		logger.Info("cost_backfilled", map[string]any{"requests": n, "schema": pt.Schema()})
+	}
+}
+
+func BackfillCostsWithTable(ctx context.Context, st *store.Store, logger *logging.Logger, pt *pricing.Table) {
+	n, err := st.BackfillCosts(ctx, func(model, provider string, usage json.RawMessage) store.BackfilledCost {
+		prompt, completion, cached := usageTokens(usage)
+		bc := store.BackfilledCost{PromptTokens: prompt, CompletionTokens: completion, CachedTokens: cached}
+		p, ok := pt.Lookup(model, provider, "")
+		if !ok || p.Local {
+			return bc
+		}
+		split := p.Estimate(prompt, completion, cached)
+		bc.Input = split.Input
+		bc.Output = split.Output
+		bc.CacheRead = split.CacheRead
+		bc.Total = split.Total()
+		bc.Priced = true
+		bc.Schema = pt.Schema()
+		return bc
+	})
+	if err != nil {
+		logger.Warn("cost_backfill_failed", map[string]any{"error": err.Error()})
+	} else if n > 0 {
 		logger.Info("cost_backfilled", map[string]any{"requests": n, "schema": pt.Schema()})
 	}
 }

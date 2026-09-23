@@ -14,7 +14,7 @@ import (
 const (
 	requestSelect = `SELECT id, session_id, seq, created_at, alias, provider, model, endpoint,
 		duration_ms, status_code, finish_reason, usage_json, request_json,
-		request_filtered_json, response_json, response_filtered_json,
+		request_filtered_json, upstream_request_json, response_json, response_filtered_json,
 		plugins_applied, error_json, truncated,
 		prompt_tokens, completion_tokens, cached_tokens,
 		cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total,
@@ -161,12 +161,12 @@ func shortenPreview(value string) string {
 
 func scanRequest(s rowScanner) (Request, error) {
 	var r Request
-	var usage, reqJSON, reqFiltJSON, respJSON, respFiltJSON, plugins, errJSON []byte
+	var usage, reqJSON, reqFiltJSON, upstreamReqJSON, respJSON, respFiltJSON, plugins, errJSON []byte
 	var truncated, priced int
 	var costInput, costOutput, costCacheRead, costCacheWrite, costTotal float64
 	err := s.Scan(&r.ID, &r.SessionID, &r.Seq, &r.CreatedAt, &r.Alias, &r.Provider,
 		&r.Model, &r.Endpoint, &r.DurationMS, &r.StatusCode, &r.FinishReason,
-		&usage, &reqJSON, &reqFiltJSON, &respJSON, &respFiltJSON,
+		&usage, &reqJSON, &reqFiltJSON, &upstreamReqJSON, &respJSON, &respFiltJSON,
 		&plugins, &errJSON, &truncated,
 		&r.PromptTokens, &r.CompletionTokens, &r.CachedTokens,
 		&costInput, &costOutput, &costCacheRead, &costCacheWrite, &costTotal, &priced,
@@ -177,6 +177,7 @@ func scanRequest(s rowScanner) (Request, error) {
 	r.Usage = usage
 	r.RequestJSON = reqJSON
 	r.RequestFilteredJSON = reqFiltJSON
+	r.UpstreamRequestJSON = upstreamReqJSON
 	r.ResponseJSON = respJSON
 	r.ResponseFilteredJSON = respFiltJSON
 	r.Truncated = truncated != 0

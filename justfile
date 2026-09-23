@@ -64,23 +64,22 @@ base_url = "http://localhost:11434/v1"
 api_key_env = ""
 models = ["llama3.1"]
 
-# [providers.opencode_go] mirrors the built-in template: Console Go's full
-# catalog defaults to the openai chat style (/chat/completions), needs
-# the x-opencode-session header the gateway synthesises from the request's
-# session id (session_header below), and expect the coding-agent identity
-# headers (identity_headers). model_styles overrides the models that speak the
-# Responses API (/responses — muse contributors) or the Anthropic Messages API
-# (/messages — minimax/qwen); no plugin seed.
+# [providers.opencode_go] mirrors the built-in template: Console Go's Go
+# catalog defaults to the OpenAI-compatible chat style (/chat/completions),
+# needs the x-opencode-session header the gateway synthesises from the
+# request's session id (session_header below), and expects the coding-agent
+# identity headers (identity_headers). model_styles routes Grok, GPT 5.6 Luna,
+# and Muse Spark to /responses; MiniMax/Qwen use the Anthropic /messages API.
 [providers.opencode_go]
 base_url = "https://opencode.ai/zen/go/v1"
 api_key_env = "OPENCODE_API_KEY"
 models = [
-  "grok-4.6", "gpt-5.6-luna",
+  "grok-4.7", "grok-4.6", "gpt-5.6-luna",
   "glm-5.3-flash", "glm-5.3", "glm-5.2", "glm-5.1",
   "kimi-k3", "kimi-k2.7-code", "kimi-k2.6", "longcat-2.0",
-  "deepseek-flash", "deepseek-v4-pro", "deepseek-v4-flash",
+  "deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-v4-flash",
   "deepseek-v4-flash-vision-exp",
-  "mimo-v2.5", "mimo-v2.5-pro",
+  "mimo-v2.6-flash", "mimo-v2.6-pro", "mimo-v2.5", "mimo-v2.5-pro",
   "minimax-m3", "minimax-m2.7", "minimax-m2.5",
   "muse-spark-1.3-contributor", "muse-spark-1.2-contributor",
   "qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus",
@@ -89,13 +88,14 @@ models = [
 session_header = "x-opencode-session"
 identity_headers = { "X-Opencode-Client" = "cli", "X-Opencode-Project" = "global" }
 model_styles = {
+  "grok-4.7" = "responses",
   "grok-4.6" = "responses",
   "gpt-5.6-luna" = "responses",
-  "muse-spark-1.3-contributor" = "responses",
-  "muse-spark-1.2-contributor" = "responses",
   "minimax-m3" = "anthropic",
   "minimax-m2.7" = "anthropic",
   "minimax-m2.5" = "anthropic",
+  "muse-spark-1.3-contributor" = "responses",
+  "muse-spark-1.2-contributor" = "responses",
   "qwen3.8-max" = "anthropic",
   "qwen3.8-flash" = "anthropic",
   "qwen3.7-max" = "anthropic",

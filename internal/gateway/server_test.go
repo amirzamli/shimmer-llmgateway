@@ -513,6 +513,9 @@ func TestNonStreamForwardAndCapture(t *testing.T) {
 	if sent.Model != "gpt-4o" {
 		t.Errorf("request_json model = %q, want gpt-4o verbatim", sent.Model)
 	}
+	if string(req.UpstreamRequestJSON) != `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}` {
+		t.Errorf("upstream_request_json = %s, want exact provider body", req.UpstreamRequestJSON)
+	}
 	if len(req.ResponseJSON) == 0 {
 		t.Error("response_json empty")
 	}
@@ -525,6 +528,34 @@ func TestNonStreamForwardAndCapture(t *testing.T) {
 	}
 	if sess.RequestCount != 1 || sess.FailureCount != 0 {
 		t.Errorf("session counters = %d/%d, want 1/0", sess.RequestCount, sess.FailureCount)
+	}
+}
+
+func TestCaptureCanBeDisabledForProxyInstance(t *testing.T) {
+	provider := newFakeProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	})
+	toml := fmt.Sprintf(`
+[settings]
+default_alias = "proxy"
+
+[providers.proxy-openai]
+base_url = %q
+api_key_env = ""
+models = ["gpt-4o"]
+
+[[instances]]
+alias = "proxy"
+template = "proxy-openai"
+capture = false
+`, provider.url()+"/v1")
+	gs, st := newGatewayTest(t, provider, toml, defaultEnv)
+	drainClose(t, postChat(t, gs, `{"model":"proxy/gpt-4o","messages":[{"role":"user","content":"hi"}]}`, map[string]string{"X-Session-Id": "sess-no-capture"}))
+	if sessions, err := st.ListSessions(context.Background(), store.SessionFilter{}); err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	} else if len(sessions) != 0 {
+		t.Fatalf("captured sessions = %d, want 0 for capture=false", len(sessions))
 	}
 }
 
@@ -1058,6 +1089,7 @@ func TestSessionIDFromRequest(t *testing.T) {
 		{"explicit X-Session-Id", []string{"X-Session-Id", "sess-a"}, "sess-a"},
 		{"affinity compat spelling x-session-id", []string{"x-session-id", "sess-c"}, "sess-c"},
 		{"opencode native header", []string{"x-opencode-session", "sess-b"}, "sess-b"},
+		{"codex native header", []string{"session-id", "sess-d"}, "sess-d"},
 		{"X-Session-Id wins over x-opencode-session", []string{"X-Session-Id", "sess-a", "x-opencode-session", "sess-b"}, "sess-a"},
 	}
 	for _, tc := range cases {
@@ -1769,6 +1801,46 @@ model_aliases = { small = "gpt-4o" }
 	}
 	if !hasAliased {
 		t.Error("models list missing the prefixed alias id openai-2/small")
+	}
+}
+
+func TestChatCompletionsDoesNotInjectUndocumentedReasoning(t *testing.T) {
+	provider := newFakeProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"c1","choices":[{"message":{"role":"assistant","content":"hello"}}]}`))
+	})
+	instances := `
+[[instances]]
+alias = "go"
+template = "opencode_go"
+api_key_env = "TEST_KEY_1"
+`
+	srv, _ := newGatewayServer(t, provider, instances, defaultEnv, io.Discard)
+	cfg := srv.cfg.Get()
+	inst := cfg.Instances[0]
+	rt := &route{
+		inst:           inst,
+		template:       cfg.Templates[inst.Template],
+		model:          "mimo-v2.6-pro",
+		alias:          inst.Alias,
+		provider:       inst.Template,
+		reasoning:      "max",
+		reasoningKnown: true,
+	}
+	inbound := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req, sent, err := srv.buildUpstream(context.Background(), cfg, rt, []byte(`{"model":"mimo-v2.6-pro","messages":[]}`), "test-session", inbound)
+	if err != nil {
+		t.Fatalf("buildUpstream: %v", err)
+	}
+	if req == nil {
+		t.Fatal("buildUpstream returned nil request")
+	}
+	var body map[string]any
+	if err := json.Unmarshal(sent, &body); err != nil {
+		t.Fatalf("upstream body: %v", err)
+	}
+	if _, ok := body["reasoning_effort"]; ok {
+		t.Errorf("upstream body unexpectedly contains undocumented reasoning_effort: %v", body["reasoning_effort"])
 	}
 }
 

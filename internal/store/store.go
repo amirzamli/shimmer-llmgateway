@@ -72,6 +72,7 @@ const (
   usage_json TEXT,                -- {prompt_tokens,...} or NULL
   request_json TEXT,              -- original body (messages + tool schemas)
   request_filtered_json TEXT,     -- body after request plugins (NULL if none)
+  upstream_request_json TEXT,     -- exact body sent to the provider
   response_json TEXT,             -- reassembled completion(s)
   response_filtered_json TEXT,    -- after response plugins (NULL if none)
   plugins_applied TEXT,           -- JSON array of plugin names, or NULL
@@ -126,6 +127,13 @@ var requestCostColumns = []string{
 	"cost_total REAL DEFAULT 0",
 	"cost_priced INTEGER DEFAULT 0",
 	"cost_schema TEXT DEFAULT ''",
+}
+
+// requestCaptureColumns are payload columns added after the original §5
+// schema. They are applied by migrate so existing capture databases gain the
+// exact provider-wire request without requiring a table rewrite.
+var requestCaptureColumns = []string{
+	"upstream_request_json TEXT",
 }
 
 // sessionColumns are the columns added after the original §5 sessions schema
@@ -228,6 +236,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		table string
 		cols  []string
 	}{
+		{"requests", requestCaptureColumns},
 		{"requests", requestCostColumns},
 		{"sessions", sessionColumns},
 	} {

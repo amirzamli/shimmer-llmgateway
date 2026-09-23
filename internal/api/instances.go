@@ -32,6 +32,7 @@ type instanceView struct {
 	ModelReasoning map[string]string `json:"model_reasoning,omitempty"`
 	Disabled       bool              `json:"disabled"`
 	Priority       int               `json:"priority,omitempty"`
+	Capture        *bool             `json:"capture,omitempty"`
 	KeyMasked      string            `json:"key_masked,omitempty"`
 }
 
@@ -46,6 +47,7 @@ func (a *API) instanceViewOf(cfg *config.Config, inst *config.Instance) instance
 		ModelReasoning: inst.ModelReasoning,
 		Disabled:       inst.Disabled,
 		Priority:       inst.Priority,
+		Capture:        inst.Capture,
 	}
 	if t, ok := cfg.Templates[inst.Template]; ok {
 		v.Style = styleOf(t.Style)
@@ -137,6 +139,7 @@ type instanceCreateReq struct {
 	Plugins   *[]string `json:"plugins"`
 	Key       string    `json:"key"`
 	Priority  int       `json:"priority"`
+	Capture   *bool     `json:"capture"`
 	// BaseURL supplies the provider endpoint (required for the custom_openai /
 	// custom_anthropic placeholders, optional as an override for any other
 	// template). Before the instance is created the endpoint resolves to the
@@ -233,6 +236,7 @@ func (a *API) handleInstancesCreate(w http.ResponseWriter, r *http.Request) {
 			Models:    req.Models,
 			Plugins:   req.Plugins,
 			Priority:  req.Priority,
+			Capture:   req.Capture,
 		})
 		return nil
 	}(candidate)
@@ -319,6 +323,9 @@ type instancePatchReq struct {
 	// Priority replaces the routing priority when provided (0 clears it back
 	// to file order). Absent → unchanged.
 	Priority *int `json:"priority"`
+	// Capture enables or disables persistence for this routed hop. Absent →
+	// unchanged; nil in the config means the default (enabled).
+	Capture *bool `json:"capture"`
 	// ModelAliases replaces the whole model_aliases map when provided (an empty
 	// map clears it); absent → unchanged. Validation runs via config.Validate
 	// in ConfigManager.Update (bad key → 400 INVALID_ARGUMENT).
@@ -459,6 +466,9 @@ func applyInstancePatch(c *config.Config, oldAlias string, req instancePatchReq)
 	}
 	if req.Priority != nil {
 		inst.Priority = *req.Priority
+	}
+	if req.Capture != nil {
+		inst.Capture = req.Capture
 	}
 	if req.ModelAliases != nil {
 		inst.ModelAliases = *req.ModelAliases

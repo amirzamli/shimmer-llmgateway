@@ -116,8 +116,8 @@
       "supports_openai_compatible_api": true,
       "native_api": {
         "base_url": "https://opencode.ai/zen/go/v1",
-        "chat_completions_endpoint": null,
-        "responses_endpoint": null,
+        "chat_completions_endpoint": "/chat/completions",
+        "responses_endpoint": "/responses",
         "messages_endpoint": "/messages",
         "completions_endpoint": null,
         "embeddings_endpoint": null,
@@ -131,7 +131,7 @@
       "openai_compatible_api": {
         "base_url": "https://opencode.ai/zen/go/v1",
         "chat_completions_endpoint": "/chat/completions",
-        "responses_endpoint": null,
+        "responses_endpoint": "/responses",
         "completions_endpoint": null,
         "embeddings_endpoint": null,
         "images_endpoint": null,
@@ -172,7 +172,7 @@
         "citations": null
       },
       "feature_gaps_in_compat_mode": [
-        "Not all Go models share one protocol surface: many use OpenAI-compatible /chat/completions, while some MiniMax models use Anthropic-style /messages.",
+        "Go models are split across OpenAI-compatible /chat/completions, OpenAI Responses /responses, and Anthropic-style /messages endpoints; the model determines which endpoint must be used.",
         "No verified machine-readable models endpoint was exposed on the public docs page even though the page states that a full model list can be fetched."
       ],
       "recommended_integration_mode": "hybrid",
@@ -187,7 +187,13 @@
           "field": "openai_compatible_api.chat_completions_endpoint",
           "source_type": "official_docs",
           "url": "https://opencode.ai/docs/go/",
-          "note": "Official Go docs list many models, including GLM, Kimi, DeepSeek, MiMo, and Qwen variants, on https://opencode.ai/zen/go/v1/chat/completions."
+          "note": "Official Go docs list GLM-5.3 Flash, GLM-5.3, GLM-5.2, GLM-5.1, Kimi K3/K2.7 Code/K2.6, LongCat-2.0, DeepSeek V4.1 Flash/V4 Pro/V4 Flash/V4 Flash Vision Exp, MiMo V2.6 Flash/V2.6 Pro/V2.5/V2.5 Pro, Hy4 preview, and Hy3 on https://opencode.ai/zen/go/v1/chat/completions."
+        },
+        {
+          "field": "native_api.responses_endpoint",
+          "source_type": "official_docs",
+          "url": "https://opencode.ai/docs/go/",
+          "note": "Official Go docs list Grok 4.7, Grok 4.6, GPT 5.6 Luna, and Muse Spark 1.3/1.2 Contributor on https://opencode.ai/zen/go/v1/responses."
         },
         {
           "field": "native_api.messages_endpoint",

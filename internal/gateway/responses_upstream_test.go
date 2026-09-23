@@ -1124,6 +1124,56 @@ api_key_env = "TEST_KEY_1"
 	}
 }
 
+func TestResponsesStyleStreamingErrorDoesNotBecomeEmptyStop(t *testing.T) {
+	// The upstream can return a failed Responses event after the gateway has
+	// committed the streaming HTTP 200. The Chat Completions bridge must pass
+	// the error through but must not append [DONE]: billion-context uses the
+	// missing terminal sentinel to retry rather than treating the turn as a
+	// successful empty stop.
+	var provider *fakeProvider
+	provider = newFakeProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		fmt.Fprint(w, "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_failed\",\"status\":\"failed\",\"error\":{\"code\":\"server_is_overloaded\",\"message\":\"Our servers are currently overloaded. Please try again later.\"}}}\n\n")
+		fl.Flush()
+	})
+	toml := fmt.Sprintf(`
+[settings]
+default_alias = "resp"
+
+[providers.responses]
+base_url = %q
+style = "responses"
+models = ["zen-x"]
+
+[[instances]]
+alias = "resp"
+template = "responses"
+api_key_env = "TEST_KEY_1"
+`, provider.url()+"/v1")
+	gs, st := newResponsesGateway(t, toml, defaultEnv)
+
+	resp := postChat(t, gs, `{"model":"resp/zen-x","stream":true,"messages":[{"role":"user","content":"hi"}]}`, map[string]string{"X-Session-Id": "sess-resp-error"})
+	body := drainClose(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for an in-band stream error", resp.StatusCode)
+	}
+	if strings.Contains(string(body), "data: [DONE]") {
+		t.Fatalf("failed stream must not end in [DONE]: %q", body)
+	}
+	if !strings.Contains(string(body), "server_is_overloaded") || !strings.Contains(string(body), "currently overloaded") {
+		t.Fatalf("upstream error was not passed through: %q", body)
+	}
+
+	req := waitForRequest(t, st, "sess-resp-error", 5*time.Second)
+	if req.Error == nil || req.Error.Code != "server_is_overloaded" {
+		t.Errorf("captured error = %+v, want server_is_overloaded", req.Error)
+	}
+	if req.Truncated {
+		t.Errorf("truncated = true, want false for a completely received upstream failure")
+	}
+}
+
 func TestResponsesStyleStreamingDisconnectTruncated(t *testing.T) {
 	// A stream that dies mid-flight without response.completed records
 	// truncated (inherited from readStream/readAnthropicStream semantics). A
@@ -1203,5 +1253,36 @@ func TestResponsesUpstreamReadEOFIsCleanEnd(t *testing.T) {
 	}
 	if len(forwarded) != 2 || forwarded[1] != "data: [DONE]\n\n" {
 		t.Errorf("forwarded lines = %q, want 2 lines ending in %q", forwarded, "data: [DONE]\n\n")
+	}
+}
+
+func TestResponsesUpstreamErrorDoesNotSynthesizeDone(t *testing.T) {
+	// An in-band Responses failure is a clean network EOF but not a successful
+	// completion. The chat bridge must not append [DONE], because clients such
+	// as billion-context otherwise turn the error-only stream into an empty
+	// finish_reason=stop completion.
+	asm := newAssembler()
+	var forwarded []string
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(
+			"data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"server_is_overloaded\",\"message\":\"busy\"}}}\n\n",
+		)),
+	}
+	out := readResponsesStream(context.Background(), resp, asm, func(line []byte) error {
+		forwarded = append(forwarded, string(line))
+		return nil
+	})
+	if out.streamErr == nil || out.streamErr.Code != "server_is_overloaded" || out.streamErr.Message != "busy" {
+		t.Fatalf("streamErr = %+v, want server_is_overloaded/busy", out.streamErr)
+	}
+	if out.truncated || !out.cleanEnd {
+		t.Errorf("error EOF should remain a clean read: truncated=%v cleanEnd=%v", out.truncated, out.cleanEnd)
+	}
+	if len(forwarded) != 1 || strings.Contains(strings.Join(forwarded, ""), "data: [DONE]") {
+		t.Errorf("forwarded error stream = %q, must contain the error and no [DONE]", forwarded)
+	}
+	if !strings.Contains(forwarded[0], "server_is_overloaded") {
+		t.Errorf("forwarded stream lost the upstream error: %q", forwarded[0])
 	}
 }

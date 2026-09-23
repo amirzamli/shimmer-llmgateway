@@ -32,6 +32,11 @@ type CaptureRecord struct {
 	RequestJSON json.RawMessage
 	// RequestFilteredJSON is the body after request plugins (nil if none).
 	RequestFilteredJSON json.RawMessage
+	// UpstreamRequestJSON is the exact JSON body sent on the provider wire
+	// after plugin filtering, model rewriting, and protocol translation.
+	// It is separate from RequestFilteredJSON because that field is
+	// intentionally nil when no request plugins ran.
+	UpstreamRequestJSON json.RawMessage
 	// ResponseJSON is the reassembled completion(s).
 	ResponseJSON json.RawMessage
 	// ResponseFilteredJSON is the body after response plugins (nil if none).
@@ -118,6 +123,7 @@ type Request struct {
 	Usage                json.RawMessage
 	RequestJSON          json.RawMessage
 	RequestFilteredJSON  json.RawMessage
+	UpstreamRequestJSON  json.RawMessage
 	ResponseJSON         json.RawMessage
 	ResponseFilteredJSON json.RawMessage
 	PluginsApplied       []string
@@ -161,6 +167,7 @@ func (r *CaptureRecord) Request() *Request {
 		Usage:                r.Usage,
 		RequestJSON:          r.RequestJSON,
 		RequestFilteredJSON:  r.RequestFilteredJSON,
+		UpstreamRequestJSON:  r.UpstreamRequestJSON,
 		ResponseJSON:         r.ResponseJSON,
 		ResponseFilteredJSON: r.ResponseFilteredJSON,
 		PluginsApplied:       r.PluginsApplied,

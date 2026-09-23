@@ -331,36 +331,21 @@ func contains(ss []string, s string) bool {
 }
 
 func main() {
-	out := flag.String("out", "internal/pricing/models.json", "output path for the generated models.json")
-	src := flag.String("source", defaultSource, "source catalog URL")
+	out := flag.String("out", pricing.DefaultPath, "output path for the generated models.json")
+	src := flag.String("source", pricing.SourceURL, "source catalog URL")
 	timeout := flag.Duration("timeout", 60*time.Second, "source fetch timeout")
 	flag.Parse()
-
-	dev, err := fetchSource(*src, *timeout)
+	ft, err := pricing.FetchAndBuild(*src, *timeout)
+	if err == nil {
+		err = pricing.WriteSnapshot(*out, ft)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "genpricing: %v\n", err)
 		os.Exit(1)
 	}
-	providers := buildTable(dev, config.BuiltinTemplates())
-	ft := pricing.FileTable{
-		Schema:    pricing.TableSchema,
-		Source:    *src,
-		FetchedAt: time.Now().UTC().Format(time.RFC3339),
-		Providers: providers,
-	}
-	data, err := json.MarshalIndent(ft, "", "  ")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "genpricing: marshal: %v\n", err)
-		os.Exit(1)
-	}
-	if err := os.WriteFile(*out, append(data, '\n'), 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "genpricing: write %s: %v\n", *out, err)
-		os.Exit(1)
-	}
 	n := 0
-	for _, p := range providers {
+	for _, p := range ft.Providers {
 		n += len(p.Models)
 	}
-	fmt.Printf("genpricing: wrote %s (%d providers, %d models, fetched %s)\n",
-		*out, len(providers), n, ft.FetchedAt)
+	fmt.Printf("genpricing: wrote %s (%d providers, %d models, fetched %s)\n", *out, len(ft.Providers), n, ft.FetchedAt)
 }

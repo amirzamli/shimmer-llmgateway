@@ -95,6 +95,8 @@ type Settings struct {
 	// UITheme is the dashboard color scheme persisted by the header toggle:
 	// "dark" (the default look) or "light". Empty means dark.
 	UITheme string `toml:"ui_theme,omitempty"`
+	// PricingRefreshHours controls automatic models.dev refresh; <= 0 disables it.
+	PricingRefreshHours int `toml:"pricing_refresh_hours,omitempty"`
 }
 
 // Template is a provider definition (a [providers.<name>] entry, the §4.2
@@ -200,6 +202,11 @@ type Instance struct {
 	// over instances without one (0 = unset), which keep config file order
 	// among themselves. Prefixed "alias/model" routing is never affected.
 	Priority int `toml:"priority,omitempty"`
+	// Capture controls whether this routed hop is persisted in the inspection
+	// store. Nil means true; an explicit false is useful for a proxy instance
+	// that forwards to another Shimmer gateway, so only the terminal hop is
+	// shown in traces.
+	Capture *bool `toml:"capture,omitempty"`
 }
 
 // Config is a parsed and validated gateway.toml.
@@ -382,6 +389,19 @@ func (c *Config) AliasList() []string {
 func (c *Config) Instance(alias string) (*Instance, bool) {
 	inst, ok := c.instancesByAlias[alias]
 	return inst, ok
+}
+
+// ReasoningOptions returns the advertised reasoning-effort values for model,
+// plus whether the template has an explicit capability entry for that model.
+// An explicit empty slice is meaningful: it says the model has no documented
+// effort vocabulary (for example, it may expose only a reasoning toggle), and
+// must not be confused with unknown metadata.
+func (t *Template) ReasoningOptions(model string) ([]string, bool) {
+	if t == nil || t.ModelReasoningOptions == nil {
+		return nil, false
+	}
+	options, ok := t.ModelReasoningOptions[model]
+	return options, ok
 }
 
 // EffectiveReasoning returns the configured reasoning level for the given model key
@@ -708,12 +728,12 @@ func builtinTemplates() map[string]Template {
 			BaseURL:   "https://opencode.ai/zen/go/v1",
 			APIKeyEnv: "OPENCODE_API_KEY",
 			Models: []string{
-				"grok-4.6", "gpt-5.6-luna",
+				"grok-4.7", "grok-4.6", "gpt-5.6-luna",
 				"glm-5.3-flash", "glm-5.3", "glm-5.2", "glm-5.1",
 				"kimi-k3", "kimi-k2.7-code", "kimi-k2.6", "longcat-2.0",
-				"deepseek-flash", "deepseek-v4-pro", "deepseek-v4-flash",
+				"deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-v4-flash",
 				"deepseek-v4-flash-vision-exp",
-				"mimo-v2.5", "mimo-v2.5-pro",
+				"mimo-v2.6-flash", "mimo-v2.6-pro", "mimo-v2.5", "mimo-v2.5-pro",
 				"minimax-m3", "minimax-m2.7", "minimax-m2.5",
 				"muse-spark-1.3-contributor", "muse-spark-1.2-contributor",
 				"qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus",
@@ -727,23 +747,63 @@ func builtinTemplates() map[string]Template {
 				"X-Opencode-Project": "global",
 			},
 			// The opencode.go endpoint serves three protocols on one base URL:
-			// /chat/completions (the openai default) for most models,
-			// /responses for the muse contributor models, and /messages for
-			// the anthropic-style models. The template default is openai; the
-			// per-model overrides below route each model to its protocol.
+			// /chat/completions (the openai-compatible default) for most models,
+			// /responses for Grok, GPT 5.6 Luna, and Muse Spark, and /messages
+			// for the anthropic-style MiniMax and Qwen models. The template
+			// default is openai; the per-model overrides below route each model
+			// to its documented protocol.
 			ModelStyles: map[string]string{
+				"grok-4.7":                   "responses",
 				"grok-4.6":                   "responses",
 				"gpt-5.6-luna":               "responses",
-				"muse-spark-1.3-contributor": "responses",
-				"muse-spark-1.2-contributor": "responses",
 				"minimax-m3":                 "anthropic",
 				"minimax-m2.7":               "anthropic",
 				"minimax-m2.5":               "anthropic",
+				"muse-spark-1.3-contributor": "responses",
+				"muse-spark-1.2-contributor": "responses",
 				"qwen3.8-max":                "anthropic",
 				"qwen3.8-flash":              "anthropic",
 				"qwen3.7-max":                "anthropic",
 				"qwen3.7-plus":               "anthropic",
 				"qwen3.6-plus":               "anthropic",
+			},
+			// The Go model metadata distinguishes an effort vocabulary from a
+			// reasoning toggle/budget capability. Keep an explicit empty entry
+			// for models that do not advertise effort values: nil would invoke
+			// the permissive generic fallback and could inject an unsupported
+			// reasoning_effort (MiMo V2.6 rejects max/xhigh, for example).
+			ModelReasoningOptions: map[string][]string{
+				"grok-4.7":                     {"low", "medium", "high", "xhigh"},
+				"grok-4.6":                     {"low", "medium", "high", "xhigh"},
+				"gpt-5.6-luna":                 {"none", "low", "medium", "high", "xhigh", "max"},
+				"glm-5.3-flash":                {"low", "high", "max"},
+				"glm-5.3":                      {"low", "high", "max"},
+				"glm-5.2":                      {"high", "max"},
+				"glm-5.1":                      {},
+				"kimi-k3":                      {"max"},
+				"kimi-k2.7-code":               {},
+				"kimi-k2.6":                    {},
+				"longcat-2.0":                  {},
+				"deepseek-v4.1-flash":          {"low", "high", "max"},
+				"deepseek-v4-pro":              {"high", "max"},
+				"deepseek-v4-flash":            {"low", "high", "max"},
+				"deepseek-v4-flash-vision-exp": {"low", "high", "max"},
+				"mimo-v2.6-flash":              {},
+				"mimo-v2.6-pro":                {},
+				"mimo-v2.5":                    {},
+				"mimo-v2.5-pro":                {},
+				"minimax-m3":                   {},
+				"minimax-m2.7":                 {},
+				"minimax-m2.5":                 {},
+				"muse-spark-1.3-contributor":   {"minimal", "low", "medium", "high", "xhigh"},
+				"muse-spark-1.2-contributor":   {"minimal", "low", "medium", "high", "xhigh"},
+				"qwen3.8-max":                  {"low", "medium", "xhigh"},
+				"qwen3.8-flash":                {"low", "medium", "xhigh"},
+				"qwen3.7-max":                  {},
+				"qwen3.7-plus":                 {},
+				"qwen3.6-plus":                 {},
+				"hy4-preview":                  {"none", "high"},
+				"hy3":                          {"none", "low", "high"},
 			},
 			Docs: "https://opencode.ai/docs/go/",
 		},
@@ -1058,10 +1118,7 @@ func Validate(c *Config) error {
 				if mapped, ok := inst.ModelAliases[key]; ok {
 					model = mapped
 				}
-				if opts, ok := t.ModelReasoningOptions[model]; ok {
-					advertised = opts
-					advertisedKnown = true
-				}
+				advertised, advertisedKnown = t.ReasoningOptions(model)
 			}
 			valid := false
 			switch value {

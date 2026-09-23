@@ -746,21 +746,27 @@ loop:
 	close(lines)
 	<-asmDone
 
+	reassembled, finish, usage := asm.result()
+	streamErr := asm.streamError()
 	// Synthesize the terminating [DONE] data line the chat surface expects on
 	// a clean end (response.completed or io.EOF; this style has no upstream
-	// [DONE] sentinel), mirroring readAnthropicStream. A truncated stream must
-	// NOT emit [DONE]. Buffered mode (response plugins) ignores this Write —
-	// bufferedEmitter.Done() emits the completion block plus its own [DONE].
-	if cleanEnd {
+	// [DONE] sentinel), mirroring readAnthropicStream. Do not synthesize it
+	// after an in-band upstream error: the error chunk has already been
+	// forwarded, and a trailing [DONE] makes OpenAI-compatible middleware such
+	// as billion-context classify the failed request as a successful empty
+	// completion. Leaving the stream without [DONE] lets that middleware apply
+	// its truncation/error retry path instead. Buffered mode (response plugins)
+	// ignores this Write — bufferedEmitter.Done() emits the completion block plus
+	// its own [DONE].
+	if cleanEnd && streamErr == nil {
 		_ = forward([]byte("data: [DONE]\n\n"))
 	}
 
-	reassembled, finish, usage := asm.result()
 	return streamOutcome{
 		reassembled: reassembled,
 		finish:      finish,
 		usage:       usage,
-		streamErr:   asm.streamError(),
+		streamErr:   streamErr,
 		chunks:      asm.chunks(),
 		truncated:   !cleanEnd,
 		cleanEnd:    cleanEnd,

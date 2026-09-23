@@ -10,25 +10,27 @@ import (
 // settingsView is the §6.2 settings item. Listen addresses and store path are
 // read-only after start; the rest are patchable.
 type settingsView struct {
-	ListenAddrs     []string `json:"listen_addrs"`
-	Store           string   `json:"store"`
-	RetentionDays   int      `json:"retention_days"`
-	DefaultAlias    string   `json:"default_alias"`
-	RequestPlugins  []string `json:"request_plugins"`
-	ResponsePlugins []string `json:"response_plugins"`
-	LogPayloads     bool     `json:"log_payloads"`
-	UITheme         string   `json:"ui_theme"`
+	ListenAddrs         []string `json:"listen_addrs"`
+	Store               string   `json:"store"`
+	RetentionDays       int      `json:"retention_days"`
+	DefaultAlias        string   `json:"default_alias"`
+	RequestPlugins      []string `json:"request_plugins"`
+	ResponsePlugins     []string `json:"response_plugins"`
+	LogPayloads         bool     `json:"log_payloads"`
+	UITheme             string   `json:"ui_theme"`
+	PricingRefreshHours int      `json:"pricing_refresh_hours"`
 }
 
 // settingsPatchReq is the PATCH /api/settings body; every field is optional.
 // listen_addrs and store are intentionally absent (read-only after start).
 type settingsPatchReq struct {
-	RetentionDays   *int      `json:"retention_days"`
-	DefaultAlias    *string   `json:"default_alias"`
-	RequestPlugins  *[]string `json:"request_plugins"`
-	ResponsePlugins *[]string `json:"response_plugins"`
-	LogPayloads     *bool     `json:"log_payloads"`
-	UITheme         *string   `json:"ui_theme"`
+	RetentionDays       *int      `json:"retention_days"`
+	DefaultAlias        *string   `json:"default_alias"`
+	RequestPlugins      *[]string `json:"request_plugins"`
+	ResponsePlugins     *[]string `json:"response_plugins"`
+	LogPayloads         *bool     `json:"log_payloads"`
+	UITheme             *string   `json:"ui_theme"`
+	PricingRefreshHours *int      `json:"pricing_refresh_hours"`
 }
 
 func (a *API) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
@@ -41,7 +43,7 @@ func (a *API) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 		RequestPlugins:  cfg.Settings.RequestPlugins,
 		ResponsePlugins: cfg.Settings.ResponsePlugins,
 		LogPayloads:     cfg.Settings.LogPayloads,
-		UITheme:         cfg.Settings.UITheme,
+		UITheme:         cfg.Settings.UITheme, PricingRefreshHours: effectiveRefreshHours(cfg.Settings.PricingRefreshHours),
 	})
 }
 
@@ -80,6 +82,9 @@ func (a *API) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		if req.UITheme != nil {
 			c.Settings.UITheme = *req.UITheme
 		}
+		if req.PricingRefreshHours != nil {
+			c.Settings.PricingRefreshHours = *req.PricingRefreshHours
+		}
 		retention = req.RetentionDays
 		return nil
 	})
@@ -101,6 +106,12 @@ func (a *API) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		RequestPlugins:  cfg.Settings.RequestPlugins,
 		ResponsePlugins: cfg.Settings.ResponsePlugins,
 		LogPayloads:     cfg.Settings.LogPayloads,
-		UITheme:         cfg.Settings.UITheme,
+		UITheme:         cfg.Settings.UITheme, PricingRefreshHours: effectiveRefreshHours(cfg.Settings.PricingRefreshHours),
 	})
+}
+
+func effectiveRefreshHours(v int) int {
+	// Zero is the persisted default and disables automatic refresh. Keeping the
+	// value unchanged also lets the UI accurately reflect the disabled state.
+	return v
 }
