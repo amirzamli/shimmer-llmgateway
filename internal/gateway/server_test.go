@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1663,6 +1664,20 @@ api_key_env = "NEVER_SET_ENV"
 }
 
 // ---- model aliases (§4.2 model_aliases) ----
+
+func TestParseOpenCodeGoCatalog(t *testing.T) {
+	docs := []byte(`<table><tr><th>Model</th><th>Model ID</th><th>Endpoint</th></tr>
+<tr><td>Grok 4.7</td><td>grok-4.7</td><td><code>https://opencode.ai/zen/go/v1/responses</code></td></tr>
+<tr><td>MiMo</td><td>mimo-v2.6-pro</td><td><code>https://opencode.ai/zen/go/v1/chat/completions</code></td></tr>
+<tr><td>MiniMax</td><td>minimax-m3</td><td><code>https://opencode.ai/zen/go/v1/messages</code></td></tr></table>`)
+	got := parseOpenCodeGoCatalog(docs, "https://opencode.ai/zen/go/v1")
+	if !slices.Equal(got.models, []string{"grok-4.7", "mimo-v2.6-pro", "minimax-m3"}) {
+		t.Fatalf("models = %v", got.models)
+	}
+	if got.styles["grok-4.7"] != config.StyleResponses || got.styles["mimo-v2.6-pro"] != config.StyleOpenAI || got.styles["minimax-m3"] != config.StyleAnthropic {
+		t.Fatalf("styles = %v", got.styles)
+	}
+}
 
 func TestModelsListIncludesAliases(t *testing.T) {
 	provider := newFakeProvider(t, nil)

@@ -8,15 +8,19 @@
 package gateway
 
 import (
+	_ "embed"
+
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -96,6 +100,10 @@ type Server struct {
 	// listenAddrs are the addresses the gateway is being served on; they
 	// seed the admin-surface Host allowlist (see guard).
 	listenAddrs []string
+	// remoteModels caches live provider catalogs used by /v1/models. The
+	// OpenCode Go catalog changes independently of gateway releases.
+	modelsMu     sync.Mutex
+	remoteModels map[string]remoteModelEntry
 }
 
 // New builds a gateway server over cfg/st, opening the §8 append log at
@@ -150,6 +158,16 @@ func New(cfg *config.ConfigManager, st *store.Store, logger *logging.Logger, con
 		emitterFactory: newStreamEmitter,
 		pricing:        pt,
 		listenAddrs:    listenAddrs, pricingDone: make(chan struct{}),
+		remoteModels: make(map[string]remoteModelEntry),
+	}
+	fallback := embeddedOpenCodeGoCatalogEntry()
+	if len(fallback.models) > 0 {
+		fallback.fetchedAt = time.Now()
+	}
+	for _, inst := range cfg.Get().Instances {
+		if inst.Template == "opencode_go" && len(fallback.models) > 0 {
+			s.remoteModels[inst.Alias] = fallback
+		}
 	}
 	s.startPricingRefresh()
 	return s, nil
@@ -379,6 +397,22 @@ type modelObject struct {
 	OwnedBy string `json:"owned_by"`
 }
 
+type remoteModelEntry struct {
+	models    []string
+	styles    map[string]string
+	fetchedAt time.Time
+}
+
+const (
+	remoteModelsTTL   = 24 * time.Hour
+	openCodeGoDocsURL = "https://opencode.ai/docs/go/"
+)
+
+var openCodeGoEndpointRow = regexp.MustCompile(`(?is)<tr>\s*<td>.*?</td>\s*<td>\s*([^<]+?)\s*</td>\s*<td>\s*<code[^>]*>\s*([^<]+?)\s*</code>`)
+
+//go:embed opencode_go_catalog.json
+var embeddedOpenCodeGoCatalog []byte
+
 // handleModels returns an OpenAI-shaped model list: every enabled instance's
 // effective models as alias/model ids, plus unprefixed ids for the first
 // instance listing each model (deduped, per the plan's assumption 6), and the
@@ -386,6 +420,125 @@ type modelObject struct {
 // same maps, so an alias key that collides with a literal model listed by an
 // earlier instance keeps that literal entry). Disabled instances are excluded —
 // they are not routable.
+func (s *Server) liveProviderModels(ctx context.Context, cfg *config.Config, inst *config.Instance) []string {
+	entry, ok := s.liveProviderCatalog(ctx, cfg, inst)
+	if !ok {
+		return nil
+	}
+	return entry.models
+}
+
+// liveProviderCatalog scrapes the documented OpenCode Go endpoint table. The
+// docs table is the source of truth for both model IDs and protocols; /models
+// alone cannot distinguish chat, Responses, and Anthropic Messages.
+func (s *Server) liveProviderCatalog(ctx context.Context, cfg *config.Config, inst *config.Instance) (remoteModelEntry, bool) {
+	s.modelsMu.Lock()
+	cached, hasCached := s.remoteModels[inst.Alias]
+	if hasCached && time.Since(cached.fetchedAt) < remoteModelsTTL {
+		s.modelsMu.Unlock()
+		return cached, true
+	}
+	s.modelsMu.Unlock()
+
+	tmpl, ok := cfg.Templates[inst.Template]
+	if !ok || inst.Template != "opencode_go" {
+		if hasCached {
+			return cached, true
+		}
+		return remoteModelEntry{}, false
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, openCodeGoDocsURL, nil)
+	if err != nil {
+		return remoteModelEntry{}, false
+	}
+	req.Header.Set("User-Agent", config.UserAgent)
+	client := &http.Client{Transport: providerTransport, Timeout: 10 * time.Second, CheckRedirect: noRedirect}
+	resp, err := client.Do(req)
+	if err != nil {
+		s.logger.Warn("opencode_go_catalog_fetch_failed", map[string]any{"url": openCodeGoDocsURL, "error": err.Error()})
+		if hasCached {
+			return cached, true
+		}
+		return remoteModelEntry{}, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		s.logger.Warn("opencode_go_catalog_fetch_failed", map[string]any{"url": openCodeGoDocsURL, "status": resp.StatusCode})
+		if hasCached {
+			return cached, true
+		}
+		return remoteModelEntry{}, false
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		if hasCached {
+			return cached, true
+		}
+		return remoteModelEntry{}, false
+	}
+	entry := parseOpenCodeGoCatalog(body, tmpl.BaseURL)
+	if len(entry.models) == 0 {
+		if hasCached {
+			return cached, true
+		}
+		return remoteModelEntry{}, false
+	}
+	entry.fetchedAt = time.Now()
+	s.modelsMu.Lock()
+	s.remoteModels[inst.Alias] = entry
+	s.modelsMu.Unlock()
+	return entry, true
+}
+
+func parseOpenCodeGoCatalog(body []byte, baseURL string) remoteModelEntry {
+	base := strings.TrimRight(baseURL, "/")
+	entry := remoteModelEntry{styles: make(map[string]string)}
+	seen := make(map[string]bool)
+	for _, match := range openCodeGoEndpointRow.FindAllSubmatch(body, -1) {
+		model := strings.TrimSpace(html.UnescapeString(string(match[1])))
+		endpoint := strings.TrimSpace(html.UnescapeString(string(match[2])))
+		if model == "" || seen[model] || !strings.HasPrefix(endpoint, base) {
+			continue
+		}
+		style := config.StyleOpenAI
+		switch {
+		case strings.HasSuffix(endpoint, "/responses"):
+			style = config.StyleResponses
+		case strings.HasSuffix(endpoint, "/messages"):
+			style = config.StyleAnthropic
+		case strings.HasSuffix(endpoint, "/chat/completions"):
+			style = config.StyleOpenAI
+		default:
+			continue
+		}
+		seen[model] = true
+		entry.models = append(entry.models, model)
+		entry.styles[model] = style
+	}
+	return entry
+}
+
+func embeddedOpenCodeGoCatalogEntry() remoteModelEntry {
+	var snapshot struct {
+		Models []struct {
+			ID    string `json:"id"`
+			Style string `json:"style"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(embeddedOpenCodeGoCatalog, &snapshot); err != nil {
+		return remoteModelEntry{}
+	}
+	entry := remoteModelEntry{styles: make(map[string]string)}
+	for _, model := range snapshot.Models {
+		if model.ID == "" || model.Style == "" || entry.styles[model.ID] != "" {
+			continue
+		}
+		entry.models = append(entry.models, model.ID)
+		entry.styles[model.ID] = model.Style
+	}
+	return entry
+}
+
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfg.Get()
 	data := []modelObject{}
@@ -395,7 +548,13 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		if inst.Disabled {
 			continue
 		}
-		for _, m := range inst.EffectiveModels(cfg) {
+		models := inst.EffectiveModels(cfg)
+		if inst.Template == "opencode_go" {
+			if discovered := s.liveProviderModels(r.Context(), cfg, inst); len(discovered) > 0 {
+				models = discovered
+			}
+		}
+		for _, m := range models {
 			if !seenUnprefixed[m] {
 				seenUnprefixed[m] = true
 				data = append(data, modelObject{ID: m, Object: "model", OwnedBy: inst.Template})
@@ -441,6 +600,7 @@ type chatRequest struct {
 type route struct {
 	inst      *config.Instance
 	template  *config.Template
+	style     string
 	model     string
 	alias     string
 	provider  string
@@ -506,12 +666,19 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	reasoning := inst.EffectiveReasoning(aliasKey)
 
 	tmpl := cfg.Templates[inst.Template]
+	style := effectiveStyle(tmpl, model)
+	if catalog, ok := s.liveProviderCatalog(r.Context(), cfg, inst); ok {
+		if discovered, exists := catalog.styles[model]; exists {
+			style = discovered
+		}
+	}
 	rt := &route{
 		inst:           inst,
 		template:       tmpl,
 		model:          model,
 		alias:          inst.Alias,
 		provider:       tmpl.Name,
+		style:          style,
 		reasoning:      reasoning,
 		reasoningKnown: reasoningCapabilityKnown(tmpl, model),
 	}
@@ -618,9 +785,16 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		aliasKey = req.Model[i+1:]
 	}
 	tmpl := cfg.Templates[inst.Template]
+	style := effectiveStyle(tmpl, model)
+	if catalog, ok := s.liveProviderCatalog(r.Context(), cfg, inst); ok {
+		if discovered, exists := catalog.styles[model]; exists {
+			style = discovered
+		}
+	}
 	rt := &route{
 		inst:           inst,
 		template:       tmpl,
+		style:          style,
 		model:          model,
 		alias:          inst.Alias,
 		provider:       tmpl.Name,
@@ -788,7 +962,10 @@ func (s *Server) buildUpstream(ctx context.Context, cfg *config.Config, rt *rout
 		upstreamBody = rewritten
 	}
 
-	style := effectiveStyle(rt.template, rt.model)
+	style := rt.style
+	if style == "" {
+		style = effectiveStyle(rt.template, rt.model)
+	}
 	if rt.template.OAuth && (rt.template.BaseURL != config.ChatGPTCodexBaseURL || style != config.StyleResponses || rt.template.SessionHeader != config.ChatGPTCodexSessionHeader) {
 		return nil, nil, errOAuthEndpoint
 	}
@@ -1039,7 +1216,7 @@ func (s *Server) handleNonStream(w http.ResponseWriter, r *http.Request, cfg *co
 	}
 	// Anthropic responses are translated to the OpenAI shape before plugins
 	// and capture, so the whole pipeline (and the client) sees one schema.
-	respBody = translateUpstreamBody(effectiveStyle(rt.template, rt.model), rsp.StatusCode, respBody)
+	respBody = translateUpstreamBody(rt.style, rsp.StatusCode, respBody)
 
 	rec := &store.CaptureRecord{
 		ID:                  requestID,
@@ -1224,7 +1401,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, cfg *confi
 		if err != nil {
 			respBody = nil
 		}
-		respBody = translateUpstreamBody(effectiveStyle(rt.template, rt.model), resp.StatusCode, respBody)
+		respBody = translateUpstreamBody(rt.style, resp.StatusCode, respBody)
 		rec := &store.CaptureRecord{
 			ID:                  requestID,
 			SessionID:           sessionID,
