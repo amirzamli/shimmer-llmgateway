@@ -167,6 +167,25 @@ func dateOf(ts string) string {
 	return ts
 }
 
+// ModelIDs returns the model IDs listed for provider in catalog order.
+func (t *Table) ModelIDs(provider string) []string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	for _, p := range t.providers {
+		if p.ID != provider {
+			continue
+		}
+		ids := make([]string, 0, len(p.Models))
+		for _, m := range p.Models {
+			if m.ID != "" {
+				ids = append(ids, m.ID)
+			}
+		}
+		return ids
+	}
+	return nil
+}
+
 // Schema returns a stable identifier of the loaded snapshot (the source
 // catalog plus its fetch date), stamped onto priced request rows.
 func (t *Table) Schema() string {

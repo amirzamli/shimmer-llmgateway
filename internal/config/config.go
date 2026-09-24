@@ -627,6 +627,7 @@ func builtinTemplates() map[string]Template {
 				"gpt-5.6-sol",
 				"gpt-5.6-terra",
 				"gpt-6-astra",
+				"gpt-6-luna",
 			},
 			ModelReasoningOptions: map[string][]string{
 				"gpt-5.2-codex": {"low", "medium", "high", "xhigh"},
@@ -636,6 +637,7 @@ func builtinTemplates() map[string]Template {
 				"gpt-5.6-sol":   {"none", "low", "medium", "high", "xhigh", "max"},
 				"gpt-5.6-terra": {"none", "low", "medium", "high", "xhigh", "max"},
 				"gpt-6-astra":   {"low", "medium", "high", "xhigh", "max"},
+				"gpt-6-luna":    {"low", "medium", "high", "xhigh", "max"},
 			},
 		},
 		"anthropic": {

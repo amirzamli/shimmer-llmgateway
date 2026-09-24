@@ -1200,10 +1200,8 @@ func TestInstanceModelsKeylessNoAuth(t *testing.T) {
 	}
 }
 
-// TestInstanceModelsOAuthUsesConfiguredModels asserts an OAuth template (the
-// ChatGPT codex endpoint) never performs the OpenAI /models discovery fetch:
-// the configured models are returned with source "config" and no error, even
-// when the provider would refuse the connection.
+// TestInstanceModelsOAuthFallsBackWithoutCatalog asserts that an OAuth
+// template falls back safely when no Models.dev catalog is configured.
 func TestInstanceModelsOAuthUsesConfiguredModels(t *testing.T) {
 	toml := `
 [providers.chatgpt]
@@ -1226,7 +1224,7 @@ template = "chatgpt"
 		t.Errorf("source = %v, want config (no /models discovery for OAuth templates)", out["source"])
 	}
 	if out["error"] != nil {
-		t.Errorf("error = %v, want absent (the config fallback is not an error)", out["error"])
+		t.Errorf("error = %v, want absent", out["error"])
 	}
 	models, ok := out["models"].([]any)
 	if !ok || len(models) != 1 || models[0] != "gpt-5.3-codex" {
@@ -1248,7 +1246,7 @@ template = "chatgpt"
 	if out["source"] != "config" {
 		t.Errorf("source = %v, want config", out["source"])
 	}
-	want := []any{"gpt-5.2-codex", "gpt-5.3-codex", "gpt-5.6", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-6-astra"}
+	want := []any{"gpt-5.2-codex", "gpt-5.3-codex", "gpt-5.6", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-6-astra", "gpt-6-luna"}
 	if models, ok := out["models"].([]any); !ok || !reflect.DeepEqual(models, want) {
 		t.Errorf("models = %v, want %v", out["models"], want)
 	}

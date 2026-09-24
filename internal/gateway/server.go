@@ -141,6 +141,7 @@ func New(cfg *config.ConfigManager, st *store.Store, logger *logging.Logger, con
 	apiHandler := api.New(cfg, configPath, st, sec, logger, client, oauthResolver)
 	apiHandler.SetOAuthLifecycle(life)
 	apiHandler.SetOAuthListenAddrs(listenAddrs)
+	apiHandler.SetModelCatalog(pt)
 	s := &Server{
 		cfg:     cfg,
 		store:   st,
@@ -213,6 +214,7 @@ func (s *Server) startPricingRefresh() {
 				s.pricingMu.Lock()
 				s.pricing = pt
 				s.pricingMu.Unlock()
+				s.api.SetModelCatalog(pt)
 				BackfillCostsWithTable(ctx, s.store, s.logger, pt)
 			}
 			if missing {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +25,7 @@ const (
 	// goes to the gateway log only.
 	modelsGenericError   = "provider models unavailable"
 	modelsSourceProvider = "provider"
+	modelsSourceCatalog  = "catalog"
 	modelsSourceConfig   = "config"
 )
 
@@ -90,7 +92,13 @@ func (a *API) handleInstanceModels(w http.ResponseWriter, r *http.Request) {
 // back to the configured models with source "config" and the generic error
 // string; the underlying detail is logged, never surfaced.
 func (a *API) fetchInstanceModels(cfg *config.Config, inst *config.Instance, refresh bool) instanceModels {
-	if tmpl, ok := cfg.Templates[inst.Template]; ok && (tmpl.Style == config.StyleAnthropic || tmpl.OAuth) {
+	if tmpl, ok := cfg.Templates[inst.Template]; ok && tmpl.OAuth {
+		if models := a.chatGPTCatalogModels(cfg, inst); len(models) > 0 {
+			return instanceModels{Alias: inst.Alias, Models: models, Source: modelsSourceCatalog, FetchedAt: time.Now()}
+		}
+		return instanceModels{Alias: inst.Alias, Models: inst.EffectiveModels(cfg), Source: modelsSourceConfig, FetchedAt: time.Now()}
+	}
+	if tmpl, ok := cfg.Templates[inst.Template]; ok && tmpl.Style == config.StyleAnthropic {
 		return instanceModels{Alias: inst.Alias, Models: inst.EffectiveModels(cfg), Source: modelsSourceConfig, FetchedAt: time.Now()}
 	}
 	if !refresh {
@@ -169,11 +177,10 @@ func (a *API) fetchProviderModels(cfg *config.Config, inst *config.Instance) ([]
 		a.logger.Error("models_fetch_build_request", map[string]any{"alias": inst.Alias, "url": url, "error": err.Error()})
 		return nil, time.Now(), modelsGenericError
 	}
-	// Key precedence mirrors the gateway's resolvedKey: the api_key_env env var
-	// first, then the secrets file. An empty key is legitimate for keyless
-	// providers (ollama/vllm) — the fetch proceeds WITHOUT an Authorization
-	// header, and a keyless-only skip is not surfaced as an error.
 	if key := a.fetchKey(cfg, inst); key != "" {
+		// Key precedence mirrors the gateway's resolvedKey: the api_key_env env
+		// var first, then the secrets file. An empty key is legitimate for
+		// keyless providers, so the fetch proceeds without Authorization.
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	// No inbound client exists on this path, so the probe always identifies
@@ -232,6 +239,119 @@ func (a *API) fetchKey(cfg *config.Config, inst *config.Instance) string {
 
 // modelsSourceOf maps a cached error to the response source: a successful
 // fetch is "provider", anything else is the "config" fallback.
+func (a *API) chatGPTCatalogModels(cfg *config.Config, inst *config.Instance) []string {
+	a.modelsMu.Lock()
+	catalog := a.catalog
+	a.modelsMu.Unlock()
+	if catalog == nil {
+		return nil
+	}
+	ids := catalog.ModelIDs("openai")
+	models := make([]string, 0, len(ids))
+	for _, id := range ids {
+		// Match OpenCode's current OAuth catalog policy: exclude Pro and the
+		// exact gpt-5.6 entry, but retain newer variants such as
+		// gpt-5.6-luna, gpt-5.6-sol, and gpt-6-luna.
+		if id == "gpt-5.5-pro" || id == "gpt-5.6" {
+			continue
+		}
+		if !strings.HasPrefix(id, "gpt-") {
+			continue
+		}
+		rest := strings.TrimPrefix(id, "gpt-")
+		majorText, minorText := rest, "0"
+		if dot := strings.IndexByte(rest, '.'); dot >= 0 {
+			majorText, minorText = rest[:dot], rest[dot+1:]
+		}
+		major, minor, ok := parseGPTCatalogVersion(majorText, minorText)
+		if ok && (major > 5 || (major == 5 && minor > 4)) {
+			models = append(models, id)
+		}
+	}
+	// An explicit instance model list remains a narrowing override. Otherwise
+	// retain configured ChatGPT models as well: the catalog can lag the current
+	// OpenCode-compatible names (for example gpt-6-luna).
+	if len(inst.Models) > 0 {
+		return append([]string(nil), inst.Models...)
+	}
+	seen := make(map[string]bool, len(models))
+	for _, id := range models {
+		seen[id] = true
+	}
+	for _, id := range inst.EffectiveModels(cfg) {
+		if id == "" || seen[id] {
+			continue
+		}
+		majorText, minorText := catalogVersionParts(id)
+		major, minor, ok := parseGPTCatalogVersion(majorText, minorText)
+		if ok && id != "gpt-5.5-pro" && id != "gpt-5.6" && (major > 5 || (major == 5 && minor > 4)) {
+			models = append(models, id)
+			seen[id] = true
+		}
+	}
+	return models
+}
+
+// catalogVersionParts splits supported gpt-N and gpt-N.M identifiers, including
+// optional lowercase variant suffixes such as gpt-6-luna and gpt-5.6-sol.
+func catalogVersionParts(id string) (string, string) {
+	if !strings.HasPrefix(id, "gpt-") {
+		return "", ""
+	}
+	rest := strings.TrimPrefix(id, "gpt-")
+	major, minor := rest, "0"
+	if dot := strings.IndexByte(rest, '.'); dot >= 0 {
+		major, minor = rest[:dot], rest[dot+1:]
+	}
+	return major, minor
+}
+
+func parseGPTCatalogVersion(majorText, minorText string) (int, int, bool) {
+	i := 0
+	for i < len(majorText) && majorText[i] >= '0' && majorText[i] <= '9' {
+		i++
+	}
+	if i == 0 || (i < len(majorText) && !validModelSuffix(majorText[i:])) {
+		return 0, 0, false
+	}
+	major, err := strconv.Atoi(majorText[:i])
+	if err != nil {
+		return 0, 0, false
+	}
+	minor := 0
+	if minorText != "0" {
+		// A minor may have a lowercase variant suffix (e.g. 6-sol),
+		// but never an arbitrary/non-numeric prefix or uppercase suffix.
+		i := 0
+		for i < len(minorText) && minorText[i] >= '0' && minorText[i] <= '9' {
+			i++
+		}
+		if i == 0 {
+			return 0, 0, false
+		}
+		minor, err = strconv.Atoi(minorText[:i])
+		if err != nil {
+			return 0, 0, false
+		}
+		if i < len(minorText) && !validModelSuffix(minorText[i:]) {
+			return 0, 0, false
+		}
+	}
+	return major, minor, true
+}
+
+func validModelSuffix(s string) bool {
+	if len(s) == 0 || s[0] != '-' || len(s) == 1 {
+		return false
+	}
+	for _, r := range s[1:] {
+		if !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && r != '-' {
+			return false
+		}
+	}
+	return true
+}
+
 func modelsSourceOf(err string) string {
 	if err == "" {
 		return modelsSourceProvider

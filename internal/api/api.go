@@ -21,6 +21,7 @@ import (
 	"github.com/amirzamli/shimmer-llmgateway/internal/config"
 	"github.com/amirzamli/shimmer-llmgateway/internal/logging"
 	"github.com/amirzamli/shimmer-llmgateway/internal/oauth"
+	"github.com/amirzamli/shimmer-llmgateway/internal/pricing"
 	"github.com/amirzamli/shimmer-llmgateway/internal/quota"
 	"github.com/amirzamli/shimmer-llmgateway/internal/secrets"
 	"github.com/amirzamli/shimmer-llmgateway/internal/store"
@@ -74,6 +75,8 @@ type API struct {
 	// oauthDevicePollMu serializes device-token polls so two dashboard tabs
 	// cannot consume the same provider response concurrently.
 	oauthDevicePollMu sync.Mutex
+	// catalog is the Models.dev snapshot used for ChatGPT model discovery.
+	catalog *pricing.Table
 	// oauthListenAddrs are the explicitly configured listener addresses that
 	// may serve OAuth lifecycle requests from a trusted remote network.
 	oauthListenAddrs []string
@@ -94,6 +97,14 @@ func New(mgr *config.ConfigManager, configPath string, st *store.Store, sec *sec
 		oauthDevices: oauth.NewDeviceStore(),
 		oauthLife:    oauth.NewLifecycle(),
 	}
+}
+
+// SetModelCatalog supplies the Models.dev snapshot used for catalog-backed
+// provider model discovery.
+func (a *API) SetModelCatalog(table *pricing.Table) {
+	a.modelsMu.Lock()
+	a.catalog = table
+	a.modelsMu.Unlock()
 }
 
 // SetOAuth pins the OAuth protocol configuration and outbound client used by
